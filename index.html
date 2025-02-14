@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="UTF-8">
+	<title>cockatiel | by vulbyte</title>
+	<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline';" />
+</head>
+
+<body>
+	<h1>cockatiel</h1>
+	<details>
+		<summary>youtube stuff</summary>
+
+		<input id="api_key" placeholder="api_key" type="password"></input>
+		<input id="channel_name" placeholder="channel_name" type="text"></input>
+		<button id="get_channel_id_button">get_channel_id_button</button>
+		<details>
+			<summary>advanced stuff (the wizard will do this for you)</summary>
+			<input placeholder="channel_id" id="channel_id" type='text'></input>
+		</details>
+		<script type="module">
+			function ApiKey() {
+				let ak = document.getElementById("api_key").value;
+				return (ak);
+			};
+
+			const ChannelName = ((e) => {
+				return (document.getElementById("channel_name"));
+			})
+
+			document.getElementById('get_channel_id_button').addEventListener('click', () => {
+				GetChannelId();
+			})
+
+
+			async function GetChannelId() {
+				const YtChannelIdQuery = new Promise(async (resolve, reject) => {
+					try {
+						setTimeout(() => {(reject(`couldn't load response in time`))}, 5000);
+						const base_url = "https://www.googleapis.com/youtube/v3/";
+						const params = String(
+							'search' +
+							'?part=snippet' +
+							'&key=' + String(ApiKey()) +
+							'&q=vulbyte' +
+							'&type=channel' +
+							'&maxResults=3' +
+							''
+						);
+
+						let fetch_url = String(base_url + params);
+
+						let response = await fetch(fetch_url);
+						if (!response.ok) {
+							reject('data is not correct' + data);
+						}
+						let data = response.json();
+						console.log(data);
+
+						resolve(data);
+					}
+					catch (err) {
+						console.log(err);
+					}
+				});
+
+				let response = await YtChannelIdQuery;
+
+				console.log(response);
+
+				function CE(args = {
+					'elem': undefined,
+					'it': undefined,
+					'id': undefined,
+					'href': undefined,
+					'alt': undefined,
+					'src': undefined,
+				}) {
+					//does not do styling!
+					console.log(args);
+					let ce;
+
+					if (args.elem == '' || args.elem == undefined || args.elem == null) {
+						ce = document.createElement('div');
+					}
+					else {
+						ce = document.createElement(args.elem);
+					}
+
+					if (args.alt != '' || args.alt != undefined || args.alt != null) {
+						ce.alt = args.alt;
+					}
+
+					if (args.href != '' || args.href != undefined || args.href != null) {
+						ce.href = args.href;
+					}
+					if (args.id != '' || args.id != undefined || args.id != null) {
+						ce.id = args.id;
+					}
+					if (args.it != '' || args.it != undefined || args.it != null) {
+						ce.innerText = args.it;
+					}
+					if (args.src != '' || args.src != undefined || args.src != null) {
+						ce.src = args.src;
+					}
+
+					return (ce);
+				}
+
+				if (response.items.length == 1) {
+					console.log("only one item");
+
+					let popup = CE({'id': 'popup'});
+					popup.style.position = 'fixedabsolute';
+					popup.style.width = '30em';
+					popup.style.height = '30em';
+					popup.style.color = 'black';
+					popup.style.backgroundColor = 'blue';
+
+					document.body.appendChild(popup);
+					popup = document.getElementById('popup');
+
+					let left = window.innerWidth;
+					let top = window.innerHeight;
+
+					document.getElementById('popup').style.left =
+						(window.innerWidth - popup.getBoundingClientRect().x) / 2;
+					document.getElementById('popup').style.top =
+						(window.innerHeight - popup.getBoundingClientRect().y) / 2;
+
+					popup.appendChild(CE({
+						'it': 'only one result found, is this right?'
+					}));
+
+					let single_channel = CE();
+					//img
+					single_channel.appendChild(CE({
+						'elem': 'img',
+						'src': response.items[0].snippet.thumbnails.medium.url,
+						'alt': `image of the channel ${response.items[0].snippet.ChannelName}`
+					}));
+					//channel name
+					single_channel.appendChild(CE({
+						'elem': 'h2',
+						'it': response.items[0].snippet.title
+					}));
+
+					let confirm = CE({
+						'elem': 'button',
+						'id': 'confirm_channel_btn',
+						'it': '✅',
+					});
+					confirm.addEventListener('click', (e) => {
+						document.getElementById('channel_id').value = resposne.items[0].snippet.channelId;
+						popup.remove();
+					});
+					single_channel.appendChild(confirm);
+
+					let deny = CE({
+						'elem': 'button',
+						'id': 'deny_channel_btn',
+						'it': '❌'
+					});
+					deny.addEventListener('click', (e) => {
+						console.log('removing popup');
+						//document.getElementById('channel_id').value = resposne.items[0].snippet.channelId;
+						popup.remove();
+					});
+					single_channel.appendChild(deny);
+
+					popup.appendChild(single_channel)
+				}
+				else {
+					console.log("more than one item returned");
+
+					let popup = CE({'id': 'popup'});
+					popup.style.position = 'absolute';
+					popup.style.width = '30em';
+					popup.style.height = '30em';
+					popup.style.color = 'black';
+					popup.style.backgroundColor = 'blue';
+
+					document.body.appendChild(popup);
+					popup = document.getElementById('popup');
+
+					let left = window.innerWidth;
+					let top = window.innerHeight;
+
+					popup.style.left =
+						(window.innerWidth - popup.getBoundingClientRect().x) / 2;
+					popup.style.bottom =
+						(window.innerHeight - popup.getBoundingClientRect().y) / 2;
+
+					popup.appendChild(CE({
+						'it': 'multiple results! which is right?'
+					}));
+
+					let channel_list = CE({'elem': 'ul'});
+
+					for (let i = 0; i < response.items.length; ++i) {
+						let channel_item = response.items[i];
+
+						//img
+						channel_item.appendChild(CE({
+							'elem': 'img',
+							"it": response.items[0].snippet.thumbnails.medium.url
+						}));
+						//channel name
+						channel_item.appendChild(CE({
+							'elem': 'h2',
+							'it': response.items[0].snippet.title
+						}));
+
+						let confirm = CE({
+							'elem': 'button',
+							'id': 'confirm_channel_btn',
+							'it': '✅',
+						});
+						confirm.addEventListener('click', (e) => {
+							document.getElementById('channel_id').value = response.items[0].snippet.channelId;
+							popup.remove();
+						});
+						channel_item.appendChild(confirm);
+
+						let deny = CE({
+							'elem': 'button',
+							'id': 'deny_channel_btn',
+							'it': '❌'
+						});
+						document.getElementById(deny.id).addEventListener('click', (e) => {
+							console.log('removing popup');
+							popup.remove();
+						});
+						channel_item.appendChild(deny);
+					}//end of for loop
+
+					popup.appendChild(channel_list);
+				}
+			}
+
+		</script>
+	</details>
+
+	<div style="position:absolute; bottom:0px;">
+		cockatiel is using Node.js <span id="node-version"></span>,
+		Chromium <span id="chrome-version"></span>,
+		and Electron <span id="electron-version"></span>.
+	</div>
+
+	<!-- You can also require other files to run in this process -->
+	<script src="./renderer.js"></script>
+</body>
+
+</html>

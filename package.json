@@ -1,0 +1,31 @@
+{
+  "name": "cockatiel",
+  "version": "1.0.0",
+  "description": "cockatiel stream manager",
+  "main": "index.js",
+  "scripts": {
+    "test": "test",
+    "start": "electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vulbyte/cockatiel.git"
+  },
+  "keywords": [
+    "steram",
+    "chat",
+    "monitor",
+    "archive",
+    "youtube",
+    "twitch"
+  ],
+  "author": "vulbyte",
+  "license": "GPL-2.0-only",
+  "bugs": {
+    "url": "https://github.com/vulbyte/cockatiel/issues"
+  },
+  "homepage": "https://github.com/vulbyte/cockatiel#readme",
+  "devDependencies": {
+    "electron": "^34.2.0"
+  }
+}
