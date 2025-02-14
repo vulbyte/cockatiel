@@ -10,6 +10,43 @@
 </head>
 
 <body>
+	<button id='save_button'>save values</button>
+	<button id='load_button'>load values</button>
+	<script>
+		document.getElementById('save_button').addEventListener('click', (e) => {SaveValues()})
+		document.getElementById('load_button').addEventListener('click', (e) => {LoadValues()})
+		function SaveValues() {
+			let inputs = document.getElementsByTagName('input');
+
+			let save_map = {};
+			for (let i = 0; i < Object.keys(inputs).length; ++i) {
+				save_map[inputs[i].id] = inputs[i].value;
+			}
+			console.log(save_map);
+			localStorage.setItem('inputs', JSON.stringify(save_map));
+		}
+
+		function LoadValues() {
+			let values = localStorage.getItem('inputs');
+			values = JSON.parse(values);
+			console.log(values);
+			let inputs = document.getElementsByTagName('input');
+
+			for (let i = 0; i < inputs.length; ++i) {
+				try {
+					let ce = inputs[i];
+					if (values[ce.id] == null) {console.log(`null value with ${ce.id}`); continue;}
+					if (values[ce.id] == undefined) {console.log('undefined'); continue;}
+					if (values[ce.id] == null) {console.log("''"); continue;}
+
+					ce.value = values[ce.id];
+				}
+				catch (err) {
+					console.warn(err);
+				}
+			}
+		}
+	</script>
 	<h1>cockatiel</h1>
 	<details>
 		<summary>youtube stuff</summary>
@@ -17,10 +54,9 @@
 		<input id="api_key" placeholder="api_key" type="password"></input>
 		<input id="channel_name" placeholder="channel_name" type="text"></input>
 		<button id="get_channel_id_button">get_channel_id_button</button>
-		<details>
-			<summary>advanced stuff (the wizard will do this for you)</summary>
-			<input placeholder="channel_id" id="channel_id" type='text'></input>
-		</details>
+		<br>
+		<em>don't fill this out unless you already know it, the wizard can do this for you!</em>
+		<input placeholder="channel_id" id="channel_id" type='text'></input>
 		<script type="module">
 			function ApiKey() {
 				let ak = document.getElementById("api_key").value;
@@ -37,6 +73,13 @@
 
 
 			async function GetChannelId() {
+				try {
+					document.getElementById('popup').remove();
+				}
+				catch (err) {
+					console.warn(err)
+				}
+
 				const YtChannelIdQuery = new Promise(async (resolve, reject) => {
 					try {
 						setTimeout(() => {(reject(`couldn't load response in time`))}, 5000);
@@ -114,22 +157,57 @@
 					console.log("only one item");
 
 					let popup = CE({'id': 'popup'});
-					popup.style.position = 'fixedabsolute';
-					popup.style.width = '30em';
-					popup.style.height = '30em';
-					popup.style.color = 'black';
 					popup.style.backgroundColor = 'blue';
+					popup.style.color = 'black';
+					popup.style.height = 'auto';
+					popup.style.position = 'absolute';
+					popup.style.width = '30em';
 
 					document.body.appendChild(popup);
 					popup = document.getElementById('popup');
+					await setTimeout(() => { }, 100);
 
-					let left = window.innerWidth;
-					let top = window.innerHeight;
+					function LeftOffset() {
+						let win, pu;
+						win = window.innerWidth;
+						try {
+							pu = document.getElementById('popup').getBoundingClientRect().x;
+						}
+						catch (err) {console.warn(err)}
+						let offset = ((win - pu) / 2);
+						console.log(
+							`y offset: ${offset}`,
+							`win: ${win}`,
+							`pu: ${pu}`,
+						);
+						return offset / 2;
+					}
 
+					function TopOffset() {
+						let win, pu;
+						win = window.innerHeight;
+						try {
+							pu = document.getElementById('popup').getBoundingClientRect().y;
+						}
+						catch (err) {console.warn(err)}
+						let offset = ((win - pu) / 2);
+						console.log(
+							`y offset: ${offset}`,
+							`win: ${win}`,
+							`pu: ${pu}`,
+						);
+						if (offset <= 0) {return (0)}
+						return offset / 2;
+					}
+
+					console.log(
+						'centering popup',
+						LeftOffset(), ", ", TopOffset(), "\n",
+						popup.getBoundingClientRect().x, ", ", popup.getBoundingClientRect().y
+					);
 					document.getElementById('popup').style.left =
-						(window.innerWidth - popup.getBoundingClientRect().x) / 2;
-					document.getElementById('popup').style.top =
-						(window.innerHeight - popup.getBoundingClientRect().y) / 2;
+						LeftOffset() + "px";
+					document.getElementById('popup').style.top = TopOffset() + "px";
 
 					popup.appendChild(CE({
 						'it': 'only one result found, is this right?'
@@ -154,7 +232,7 @@
 						'it': '✅',
 					});
 					confirm.addEventListener('click', (e) => {
-						document.getElementById('channel_id').value = resposne.items[0].snippet.channelId;
+						document.getElementById('channel_id').value = response.items[0].snippet.channelId;
 						popup.remove();
 					});
 					single_channel.appendChild(confirm);
@@ -177,13 +255,13 @@
 					console.log("more than one item returned");
 
 					let popup = CE({'id': 'popup'});
+					popup.style.backgroundColor = 'blue';
+					popup.style.color = 'black';
+					popup.style.height = 'auto';
 					popup.style.position = 'absolute';
 					popup.style.width = '30em';
-					popup.style.height = '30em';
-					popup.style.color = 'black';
-					popup.style.backgroundColor = 'blue';
 
-					document.body.appendChild(popup);
+					await document.body.appendChild(popup);
 					popup = document.getElementById('popup');
 
 					let left = window.innerWidth;
@@ -242,9 +320,175 @@
 			}
 
 		</script>
+
+		<button id="select_yt_livestream_btn" style="background-color:#ff0000;">
+			select a currently live youtube stream
+		</button>
+		<button id="select_upcoming_yt_livestream_btn" style="background-color:#ffff00">
+			select scheduled youtube stream
+		</button>
+		<script>
+			function CE(args = {
+				'elem': undefined,
+				'it': undefined,
+				'id': undefined,
+				'href': undefined,
+				'alt': undefined,
+				'src': undefined,
+			}) {
+				//does not do styling!
+				//console.log(args);
+				let ce;
+
+				if (args.elem == '' || args.elem == undefined || args.elem == null) {
+					ce = document.createElement('div');
+				}
+				else {
+					ce = document.createElement(args.elem);
+				}
+
+				if (args.alt != '' || args.alt != undefined || args.alt != null) {
+					ce.alt = args.alt;
+				}
+
+				if (args.href != '' || args.href != undefined || args.href != null) {
+					ce.href = args.href;
+				}
+				if (args.id != '' || args.id != undefined || args.id != null) {
+					ce.id = args.id;
+				}
+				if (args.it != '' || args.it != undefined || args.it != null) {
+					ce.innerText = args.it;
+				}
+				if (args.src != '' || args.src != undefined || args.src != null) {
+					ce.src = args.src;
+				}
+
+				return (ce);
+			}
+
+			let d = document;
+			function GEBI(id) {return (d.getElementById(id))};
+
+			GEBI("select_yt_livestream_btn").addEventListener('click', (e) => {
+				let ak = GEBI("api_key").value;
+				if (ak == null || ak == undefined || ak == '') {
+					console.warn('missing api key!');
+					return;
+				}
+				let ci = GEBI("channel_id").value;
+				if (ci == null || ci == undefined || ci == '') {
+					console.warn('missing channel id!');
+					return;
+				}
+
+				GetYoutubeLiveStreamsFromChannel();
+			});
+
+			function GetYoutubeLiveStreamsFromChannel() {
+				let ak = GEBI("api_key").value;
+				let id = GEBI("channel_id").value;
+
+
+				fetch(`
+					https://www.googleapis.com/youtube/v3/search
+							?part=snippet
+							&channelId=${id}
+							&eventType=live
+							&type=video
+							&key=${ak}
+				`)
+					.then(response => response.json())
+					.then(data => console.log(data))
+					.catch(err => console.warn(err))
+			}
+
+			GEBI("select_upcoming_yt_livestream_btn").addEventListener('click', (e) => {
+				let ak = GEBI("api_key").value;
+				if (ak == null || ak == undefined || ak == '') {
+					console.warn('missing api key!');
+					return;
+				}
+				let ci = GEBI("channel_id").value;
+				if (ci == null || ci == undefined || ci == '') {
+					console.warn('missing channel id!');
+					return;
+				}
+
+				GetUpcomingYoutubeLiveStreamsFromChannel();
+			});
+			function GetUpcomingYoutubeLiveStreamsFromChannel() {
+				console.log('getting upcomings streams');
+				let ak = GEBI("api_key").value;
+				let id = GEBI("channel_id").value;
+
+				fetch(`
+					https://www.googleapis.com/youtube/v3/search
+							?part=snippet
+							&channelId=${id}
+							&eventType=upcoming
+							&type=video
+							&key=${ak}
+				`)
+					.then(response => response.json())
+					.then((data) => {
+						console.log(data)
+						let container = CE({"elem": "ul", "id": "stream_selection"});
+						for (let i = 0; i < data.items.length; ++i) {
+							let item = data.items[i];
+							console.log(`making item for loop ${i} item: ${item}`);
+
+							let stream_item = CE({"elem": "li", "id": "stream_item"});
+
+							let thumbnail = CE({
+								"elem": "img",
+								"src": `${item.snippet.thumbnails.medium.url}`,
+								"alt": `thumbnail of stream: ${item.snippet.title}`
+							});
+							stream_item.appendChild(thumbnail);
+
+							let title = CE({"elem": "h3", "it": item.snippet.title});
+							stream_item.appendChild(title);
+
+							let select = CE({"elem": "button", "it": "click here to select this stream"});
+							select.addEventListener("click", (e) => {
+								document.getElementById("youtube_stream_id").value = (item.id.videoId);
+								container.remove();
+							});
+							stream_item.appendChild(select);
+
+							container.appendChild(stream_item);
+						}
+						document.body.appendChild(container);
+					})
+					.catch(err => console.warn(err))
+			}
+		</script>
+		<br>
+		<input id="youtube_stream_id" placeholder="stream_id"></input>
+		<button id="get_youtube_livestream_chat_id">get youtube livestream chat id</button>
+		<script>
+			document.getElementById('get_youtube_livestream_chat_id').addEventListener('click', () => {
+				GetYoutubeLivestreamChatIdFromVideoId();
+			})
+			function GetYoutubeLivestreamChatIdFromVideoId() {
+				fetch(
+					`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${document.getElementById('youtube_stream_id').value}&key=${document.getElementById('api_key').value}`
+				)
+					.then(response => response.json())
+					.then((data) => {
+						console.log(data);
+						let chat_id = data.items[0].liveStreamingDetails.activeLiveChatId;
+						document.getElementById('youtube_chat_id').value = chat_id;
+					})
+					.catch((err) => {console.warn(err)});
+			}
+		</script>
+		<br>
+		<input id='youtube_chat_id' placeholder="youtube_chat_id"></input>
 	</details>
 
-	<div style="position:absolute; bottom:0px;">
+	<div style="position:fixed; bottom:0px;">
 		cockatiel is using Node.js <span id="node-version"></span>,
 		Chromium <span id="chrome-version"></span>,
 		and Electron <span id="electron-version"></span>.
