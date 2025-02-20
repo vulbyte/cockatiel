@@ -10,6 +10,21 @@
 </head>
 
 <body>
+	<style>
+		* {
+			background-color: black;
+			color: white;
+			font-family: Helvetica, Arial, sans-serif;
+		}
+
+		impl {
+			background-color: yellow;
+			color: darkred;
+			display: block;
+			width: 10em;
+			;
+		}
+	</style>
 	<button id='save_button'>save values</button>
 	<button id='load_button'>load values</button>
 	<script>
@@ -51,7 +66,7 @@
 	<details>
 		<summary>youtube stuff</summary>
 
-		<input id="api_key" placeholder="api_key" type="password"></input>
+		<input id="youtube_api_key" placeholder="youtube_api_key" type="password"></input>
 		<input id="channel_name" placeholder="channel_name" type="text"></input>
 		<button id="get_channel_id_button">get_channel_id_button</button>
 		<br>
@@ -59,7 +74,7 @@
 		<input placeholder="channel_id" id="channel_id" type='text'></input>
 		<script type="module">
 			function ApiKey() {
-				let ak = document.getElementById("api_key").value;
+				let ak = document.getElementById("youtube_api_key").value;
 				return (ak);
 			};
 
@@ -324,7 +339,7 @@
 		<button id="select_yt_livestream_btn" style="background-color:#ff0000;">
 			select a currently live youtube stream
 		</button>
-		<button id="select_upcoming_yt_livestream_btn" style="background-color:#ffff00">
+		<button id="select_upcoming_yt_livestream_btn" style="background-color:yellow; color: black;">
 			select scheduled youtube stream
 		</button>
 		<script>
@@ -371,7 +386,7 @@
 			function GEBI(id) {return (d.getElementById(id))};
 
 			GEBI("select_yt_livestream_btn").addEventListener('click', (e) => {
-				let ak = GEBI("api_key").value;
+				let ak = GEBI("youtube_api_key").value;
 				if (ak == null || ak == undefined || ak == '') {
 					console.warn('missing api key!');
 					return;
@@ -386,7 +401,7 @@
 			});
 
 			function GetYoutubeLiveStreamsFromChannel() {
-				let ak = GEBI("api_key").value;
+				let ak = GEBI("youtube_api_key").value;
 				let id = GEBI("channel_id").value;
 
 
@@ -404,7 +419,7 @@
 			}
 
 			GEBI("select_upcoming_yt_livestream_btn").addEventListener('click', (e) => {
-				let ak = GEBI("api_key").value;
+				let ak = GEBI("youtube_api_key").value;
 				if (ak == null || ak == undefined || ak == '') {
 					console.warn('missing api key!');
 					return;
@@ -419,7 +434,7 @@
 			});
 			function GetUpcomingYoutubeLiveStreamsFromChannel() {
 				console.log('getting upcomings streams');
-				let ak = GEBI("api_key").value;
+				let ak = GEBI("youtube_api_key").value;
 				let id = GEBI("channel_id").value;
 
 				fetch(`
@@ -473,7 +488,7 @@
 			})
 			function GetYoutubeLivestreamChatIdFromVideoId() {
 				fetch(
-					`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${document.getElementById('youtube_stream_id').value}&key=${document.getElementById('api_key').value}`
+					`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${document.getElementById('youtube_stream_id').value}&key=${document.getElementById('youtube_api_key').value}`
 				)
 					.then(response => response.json())
 					.then((data) => {
@@ -487,11 +502,681 @@
 		<br>
 		<input id='youtube_chat_id' placeholder="youtube_chat_id"></input>
 	</details>
+	<br>
+	<br>
 
-	<div style="position:fixed; bottom:0px;">
-		cockatiel is using Node.js <span id="node-version"></span>,
-		Chromium <span id="chrome-version"></span>,
-		and Electron <span id="electron-version"></span>.
+	<button id='start_monitoring_messages' style='background-color:green;'>start monitoring</button>
+	<button id='stop_monitoring_messages' style='background-color:red;'>stop monitoring</button>
+	<script>
+		class IntTimer {
+			constructor(
+				args = {
+					timerName: "",
+					tick: 1,
+					timeoutDuration: 7000,
+					killOnTimeout: true,
+					autoStart: false
+				}
+			) {
+				this.timerName = args.timerName;
+				this.tick = args.tick;
+				this.timeoutDuration = args.timeoutDuration;
+				this.killOnTimeout = args.killOnTimeout;
+				this.time = 0;
+				this.autoStart = args.autoStart;
+
+				this.listeners = [];
+
+				if (this.autoStart == true) {
+					this.Start();
+				}
+			}
+
+			Start() {
+				console.log(`IntTimer: Starting timer with interval of: ${this.timeoutDuration}`);
+				this.timer = setInterval(() => {
+					this.Tick();
+
+				}, 1000);
+			}
+
+			Pause() {
+				clearInterval(this.timer);
+			}
+
+			Stop() {
+				this.Pause();
+				this.Restart();
+			}
+
+			Restart() {
+				this.time = 0;
+			}
+
+			Tick() {
+				console.log(`timer ${this.timerName}: tick`);
+
+				this.time += 1;
+
+				if (this.time % this.timeoutDuration == 0) {
+					this.Timeout();
+				}
+			}
+
+			Timeout() {
+				console.log(`timer ${this.timerName} Has Timeout'd`);
+
+				this.Emit();
+
+				if (this.killOnTimeout == true) {
+					this.Kill();
+				}
+			}
+
+			Kill() {
+				console.log(`timer ${this.timerName} Has been killed`);
+				this.killOnTimeout = true;
+
+				this.listeners = [];
+
+				clearInterval(this.timer);
+			}
+
+			// signal stuff
+			Connect(connect_func) {
+				this.listeners.push(connect_func);
+			}
+
+			Emit(data) {
+				console.log('listener amnt: ' + this.listeners.length);
+				//console.log('listeners: ' + this.listeners.json());
+
+				for (let i = 0; i < this.listeners.length; ++i) {
+					this.listeners[i](data);
+					//if (typeof this.listeners[i] === 'function') {
+					//} else {
+					//	console.error("Listener is not a function:", this.listeners[i]);
+					//}
+				}
+			}
+
+			Disconnect(listener) {
+				this.listeners = this.listeners.filter(l => l !== listener);
+			}
+		}
+
+		let Timer;
+		Timer = new IntTimer({'killOnTimeout': false});
+
+
+		document.getElementById('start_monitoring_messages').addEventListener('click', (e) => {
+			console.log('Timer started');
+			Timer.Connect(() => {GetAndUpdateMessages()});
+			Timer.Connect(() => {
+				d.getElementById('tts_message_total').innerText = d.getElementById("messages_display").children.length - 1;
+
+				let count = Timer.timeoutDuration;
+				let timer = setInterval(() => {
+					count -= 1;
+					d.getElementById('tts_update_time').innerText = count;
+					if (count == 0) {clearInterval(timer)};
+				}, 1000);
+			});
+			Timer.timeoutDuration = document.getElementById('youtube_chat_update_interval').value;
+			Timer.Start();
+		});
+		document.getElementById('stop_monitoring_messages').addEventListener('click', (e) => {
+			console.log('Timer killed');
+			Timer.Stop();
+		});
+
+		function GetYtTimeoutDuration() {
+			return (document.getElementById('youtube_chat_update_interval').value);
+		}
+
+		let old_messages;
+
+		async function GetYtMessages() {
+			let messages;
+			let id = document.getElementById('youtube_chat_id').value;
+			let ak = document.getElementById('youtube_api_key').value;
+
+			/*fetch(String(
+				`https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId=${id}&part=snippet,authorDetails&key=${ak}`)
+			)
+				.then(response => response.json())
+				.then(data => {
+					console.log("DATA FROM FETCH: ", data);
+					resolve(data);
+				})
+				.catch((err) => {
+					console.error(err);
+				});*/
+
+			try {
+				const response = await fetch(`https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId=${id}&part=snippet,authorDetails&key=${ak}`);
+				const data = await response.json();
+				//console.log("DATA FROM FETCH: ", data);
+				return data;
+			}
+			catch (err) {
+				console.error(err);
+			}
+		}
+
+		async function GetAndUpdateMessages() {
+			const Prom = new Promise((resolve, reject) => {
+				console.log(`timeout duration is: ${ytci.value * 1000}ms`)
+				setTimeout((e) => {
+					reject(
+						'could not get and list messages before next interval!'
+					)
+				}, (ytci.value) * 1000);
+
+				let table = document.getElementById('messages_display');
+				console.log('getting messages');
+
+				try {
+					GetYtMessages().then((messages) => {
+						//console.log("%j", messages);
+						console.log(
+							'messages.length' + messages.items.length
+						);
+
+						let break_outer_loop = false;
+						old_messages = d.getElementById("messages_display").children;
+						//go from newest to oldest
+						for (let i = messages.items.length - 1; i >= 0; --i) {
+							let message = messages.items[i];
+							break_outer_loop = false
+
+							//check if already in list
+							for (let j = old_messages.length - 1; j > 0; --j) {
+								if (
+									// BUG: this is erroring when reading 1 at some point
+									old_messages[j].children[0].innerText == message.authorDetails.displayName &&
+									old_messages[j].children[2].innerText == message.snippet.publishedAt &&
+									old_messages[j].children[3].innerText == message.snippet.displayMessage
+								) {
+									break_outer_loop = true;
+									console.log('duplicate message found, adding new messages and moving on!');
+									break;
+								}
+							}
+
+							if (break_outer_loop) {
+								break;
+							}
+
+							//{{{3
+							let row = CE({
+								'elem': 'tr',
+								'id': `row${i}`
+							});
+							row.innerText = '';
+
+							let tr_author = CE({
+								'elem': 'td',
+								'id': 'td_author',
+							});
+							tr_author.innerText = message.authorDetails.displayName;
+							row.appendChild(tr_author);
+
+							let tr_platform = CE({
+								'elem': 'td',
+								'id': 'td_platform',
+							});
+							tr_platform.innerText = 'youtube';
+							row.appendChild(tr_platform);
+
+							let tr_date = CE({
+								'elem': 'td',
+								'id': 'td_date',
+							});
+							tr_date.innerText = message.snippet.publishedAt;
+							row.appendChild(tr_date);
+
+							let tr_message = CE({
+								'elem': 'td',
+								'id': 'td_message',
+							});
+							tr_message.innerText = message.snippet.displayMessage;
+							row.appendChild(tr_message);
+
+							let tr_play_now = CE({
+								'elem': 'td',
+								'id': 'td_play_now',
+								'it': '',
+							});
+							let tr_play_now_button = document.createElement('button');
+							tr_play_now_button.id = 'tr_play_now_button';
+							tr_play_now_button.innerText = '▶️';
+							tr_play_now_button.checked = true;
+							tr_play_now_button.addEventListener('click', (e) => {
+								//{{{3 CallTSS() and bind
+								async function CallTTS(message) {
+									let speech = new SpeechSynthesisUtterance(message);
+
+									// Ensure voices are loaded
+									let voices = window.speechSynthesis.getVoices();
+									if (!voices.length) {
+										await new Promise(resolve => {
+											window.speechSynthesis.onvoiceschanged = () => {
+												voices = window.speechSynthesis.getVoices();
+												resolve();
+											};
+										});
+									}
+
+									// Default message if empty
+									if (!message || message.trim() === "") {
+										message = "nah, i ain't reading that... I'm sorry or congratulations";
+									}
+									speech.text = message;
+
+									try {
+										console.log("call_tts, reading config: ", config);
+										speech.lang = config.tts.lang;
+										speech.voice = voices[document.getElementById('tts_voice_num').value] || voices[15]; // Fallback if index is invalid
+										speech.volume = config.tts.volume;
+										speech.rate = document.getElementById('tts_speed').value;
+										speech.pitch = document.getElementById('tts_pitch').value;
+									} catch (err) {
+										// Fallback values
+										speech.lang = "en";
+										speech.pitch = document.getElementById('tts_pitch').value;
+										speech.rate = document.getElementById('tts_speed').value;
+										speech.voice = voices[document.getElementById('tts_voice_num').value] || voices[0]; // Ensure voices exist
+										speech.volume = 0.6;
+										console.warn("Error loading settings: ", err);
+									}
+
+									// Emit voice
+									window.speechSynthesis.speak(speech);
+								}
+								async function emit_voice(speech) {
+									await window.speechSynthesis.speak(speech);
+								}
+
+								CallTTS(document.getElementById(`row${i}`).children[3].innerText);
+								//}}}3
+							});
+
+							async function AddMessagesToTable() {
+								tr_play_now.appendChild(tr_play_now_button);
+								row.appendChild(tr_play_now);
+
+								let tr_in_queue = CE({
+									'elem': 'td',
+									'id': 'td_in_queue',
+								});
+								//row.children.getElementById('tr_play_now_button').checked = true;
+								row.appendChild(tr_in_queue);
+
+								let tr_skip = CE({
+									'elem': 'td',
+									'id': 'td_skip',
+								});
+								row.appendChild(tr_skip);
+
+								let tr_delete = CE({
+									'elem': 'td',
+									'id': 'td_delete',
+								});
+								tr_delete.innerText = '❌';
+								tr_delete.addEventListener('click', (e) => {
+									row.remove();
+								});
+								row.appendChild(tr_delete);
+
+								console.log('adding message');
+								table.appendChild(row);
+								//}}}
+							}// end of loop
+							AddMessagesToTable();
+						}
+					});
+				}
+				catch (err) {
+					console.log(`couldn't get messages`);
+					return;
+				}
+				console.log('added all messages');
+
+				resolve();
+			});
+		};
+	</script>
+	<input id='youtube_chat_update_interval' style=' color:#000;' type='range' min='5' max='120' value='20'>
+	<span>
+		interval:
+		<span id='youtube_chat_update_interval_display'></span>
+		seconds
+	</span>
+	<br>
+	<details>
+		<summary>warning about adjusting the interval!</summary>
+		<sub>
+			please note! i recommend tuning this to 'as needed'.
+			<br>
+			according to <a href='https://developers.google.com/youtube/v3/determine_quota_cost'
+				target='_blank'>youtube/google's api docs, the average cost</a> and testing, the average cost per message is
+			approximately 50-100 tokens. with a default limit of 10,000; to be able to stream 24/7 means you should set your
+			update interval to about every 10 seconds. if you stream for a shorter period i made you a helpful little table
+			you
+			can view:
+			<details>
+				<summary>here</summary>
+				<table>
+					<tbody>
+						<tr>
+							<th>max-hours</th>
+							<th>update interval</th>
+						</tr>
+						<tr>
+							<td>24 hours</td>
+							<td>10 seconds (default)</td>
+						</tr>
+						<tr>
+							<td>16 hours</td>
+							<td>8 seconds</td>
+						</tr>
+						<tr>
+							<td>12 hours</td>
+							<td>7 seconds</td>
+						</tr>
+						<tr>
+							<td>10 hours </td>
+							<td>7 seconds</td>
+						</tr>
+						<tr>
+							<td>9 hours</td>
+							<td>7 seconds</td>
+						</tr>
+						<tr>
+							<td>8 hours</td>
+							<td>6 seconds</td>
+						</tr>
+						<tr>
+							<td>7 hours</td>
+							<td>6 seconds</td>
+						</tr>
+						<tr>
+							<td>6 hours</td>
+							<td>6 seconds</td>
+						</tr>
+						<tr>
+							<td>5 hours</td>
+							<td>6 seconds</td>
+						</tr>
+						<tr>
+							<td>4 hours</td>
+							<td>5 seconds</td>
+						</tr>
+						<tr>
+							<td>3 hours</td>
+							<td>5 seconds</td>
+						</tr>
+						<tr>
+							<td>2 hours</td>
+							<td>5 seconds</td>
+						</tr>
+						<tr>
+							<td>1 hours</td>
+							<td>5 seconds</td>
+						</tr>
+					</tbody>
+				</table>
+			</details>
+	</details>
+	</sub>
+	<script>
+		ytci = document.getElementById('youtube_chat_update_interval');
+		ytcid = document.getElementById('youtube_chat_update_interval_display');
+
+		ytcid.innerText = 20;
+
+		ytci.addEventListener('mousemove', (e) => {
+			ytcid.innerText = ytci.value;
+		})
+	</script>
+
+
+	<style>
+		table {
+			border: 1px solid #ffffff;
+			max-height: 20em;
+			paddding: 3em;
+			margin-bottom: 6em;
+			max-width: 95%;
+		}
+
+		#messages_display>tr>th:nth-child(2n+1) {
+			background-color: #333;
+		}
+
+		#messages_display>tr>td {
+			border: 1px solid #ffffff;
+			border-radius: 5px;
+			padding: 0.5em;
+			margin: auto;
+			text-align: center;
+		}
+
+		#messages_display>tr>td:nth-child(2n+1) {
+			background-color: #333;
+		}
+
+		#messages_display>tr>td:nth-child(5) {
+			background-color: lightgreen;
+		}
+
+		#messages_display>tr>td:nth-child(6) {
+			background-color: lightyellow;
+		}
+
+		#messages_display>tr>td:nth-child(7) {
+			background-color: moccasin;
+		}
+
+		#messages_display>tr>td:nth-child(8) {
+			background-color: lightcoral;
+		}
+	</style>
+	<div>
+		<details>
+			<summary>tts setting here</summary>
+			<br>
+			<impl>impl ⬇️</impl>
+			<label>tts trigger token: </label>
+			<br>
+			<sub>make this unique unless you want people to accidentally use it! i recommend !tts due to being similar to bots
+				in discord</sub>
+			<impl>impl ⬇️</impl>
+			<input id='tts_trigger_token' placeholder='!tts'>
+			<br>
+			<impl>impl ⬇️</impl>
+			<label>token location: </label>
+			<!-- {{{2  options for token location-->
+			<select id='tts_trigger_token' placeholder='beginning' default='beginning'>
+				<option value='beginning'>
+					beginning - requires the tts token to be at the very beginning of the message, then will read the whole
+					message
+				</option>
+				<option value='anywhere-after'>
+					anywhere_all - the tts token can be ANYWHERE in the message to trigger the tts, then will read what's after
+					the token.
+				</option>
+				<option value='anywhere-before'>
+					anywhere_before - the tts token can be ANYWHERE in the message to trigger the tts, then will read what's
+					before the token.
+				</option>
+				<option value='anywhere-all'>
+					anywhere_all - the tts token can be ANYWHERE in the message to trigger the tts, then will read the whole
+					message.
+				</option>
+				<option value='end'>
+					end - requires the tts token to be at the end of the message to be read, then will read the whole message.
+				</option>
+			</select>
+			<!-- }}}2 -->
+			<br>
+			<label>default tts voice: </label>
+			<input id='tts_voice_num' input='number' placeholder='18'>
+			<!-- {{{2 preview generator for tts voices -->
+			<label>tts speed: </label>
+			<input id='tts_speed' input='number' increment='0.1' value='1' min='0.1' max='50'>
+			<label>tts pitch: </label>
+			<input id='tts_pitch' input='number' increment='0.1' value='1' min='0.1' max='50'>
+			<!-- {{{2 preview generator for tts voices -->
+			<details>
+				<summary>preview all the voices here!</summary>
+				<br>
+				<div>test message:
+					<input id='tts_test_text' value='the quick brown fox jumped over the brown lazy dog' style='width:80%;'>
+				</div>
+				<ol id='voices_preview'></ol>
+				<script>
+					console.log('loading voices preview');
+					let voices = window.speechSynthesis.getVoices();
+					if (!voices.length) {
+						new Promise(resolve => {
+							window.speechSynthesis.onvoiceschanged = () => {
+								voices = window.speechSynthesis.getVoices();
+								console.log('loaded voices');
+								GenerateVoicesPreview();
+								resolve();
+							};
+						});
+					}
+
+
+					async function CallTTS(message, args = {'voice_num': ''}) {
+						let speech = new SpeechSynthesisUtterance(message);
+
+						// Ensure voices are loaded
+						let voices = window.speechSynthesis.getVoices();
+						if (!voices.length) {
+							await new Promise(resolve => {
+								window.speechSynthesis.onvoiceschanged = () => {
+									voices = window.speechSynthesis.getVoices();
+									resolve();
+								};
+							});
+						}
+
+						// Default message if empty
+						if (!message || message.trim() === "") {
+							message = "nah, i ain't reading that... I'm sorry or congratulations";
+						}
+						speech.text = message;
+
+						// Fallback values
+						speech.lang = "en";
+						speech.pitch = 1.1;
+						speech.rate = 1.1;
+						if (args.voice_num) {
+							speech.voice = voices[args.voice_num];
+						}
+						speech.volume = 0.6;
+
+						// Emit voice
+						window.speechSynthesis.speak(speech);
+					}
+
+					console.log(`voices.length: `, voices.length);
+
+					function GenerateVoicesPreview() {
+						for (let i = 0; i < voices.length; ++i) {
+							console.log(`adding voice preview for voice: ${i}`);
+							let li = d.createElement('li');
+							li.style.border = '1px solid white';
+
+							let label_name = d.createElement('span');
+							label_name.innerText = 'name: ' + voices[i].name;
+							li.appendChild(label_name);
+
+							let label_lang = d.createElement('span');
+							label_lang.innerText = 'name: ' + voices[i].lang;
+							li.appendChild(label_lang);
+
+							let pvb = d.createElement('button');
+							pvb.type = 'button';
+							pvb.innerText = `preview voice #${i}`;
+							pvb.style.backgroundColor = 'darkgreen';
+							pvb.addEventListener('click', (e) => {
+								CallTTS(
+									document.getElementById('tts_test_text').value ||
+									'couldnt read preview text so heres this instead',
+									{
+										'voice_num': i
+									}
+								);
+							});
+							li.appendChild(pvb);
+
+							document.getElementById('voices_preview').appendChild(li);
+						}
+					}
+				</script>
+			</details>
+			<!-- {{{2 preview generator for tts voices -->
+			<br>
+			<impl>impl ⬇️</impl>
+			<label>read who message is from?</label>
+			<input type='checkbox' checked='true'>
+			<br>
+			<impl>impl ⬇️</impl>
+			<label>read date message was received?</label>
+			<input type='checkbox' checked='true'>
+			<br>
+			<impl>impl ⬇️</impl>
+			<label>read date platform message was from?</label>
+			<input type='checkbox' checked='true'>
+			<br>
+			<impl>impl ⬇️</impl>
+			<label>read date platform message was from?</label>
+			<input type='checkbox' checked='true'>
+			<br>
+		</details>
+	</div>
+	<impl> this duplicates messages ⬇️</impl>
+	<table>
+		<tbody id="messages_display">
+			<tr>
+				<th>author</th>
+				<th>platform</th>
+				<th>date (YMD)</th>
+				<th>message</th>
+				<th>play now</th>
+				<th>in queue</th>
+				<th>skip</th>
+				<th>delete</th>
+			</tr>
+		</tbody>
+	</table>
+
+	<div style="
+				position:fixed; 
+				bottom:0px; 
+				left:0px;
+				background-color:black; 
+				color:white; 
+				width:100%; 
+				padding:0px;
+				margin:0px;">
+		<div style="padding:0.6em">
+			<span style='padding-right:2em'>tts info: </span>
+			<span style='padding-right:2em'>next update in: <span id='tts_update_time'>0</span></span>
+			<span style='padding-right:2em'>messages in queue: <span id='tts_message_queue'>0</span></span>
+			<span style='padding-right:2em'>total messages: <span id='tts_message_total'>0</span></span>
+			<span style='padding-right:2em'>next auto tts: <span id='tts_message_total'>0</span></span>
+		</div>
+		<div>
+			cockatiel by vulbyte is using: Node.js <span id="node-version"></span>,
+			Chromium <span id="chrome-version"></span>,
+			and Electron <span id="electron-version"></span>.
+		</div>
 	</div>
 
 	<!-- You can also require other files to run in this process -->

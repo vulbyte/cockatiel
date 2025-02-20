@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html>
+
+<!-- test comment -->
+
+<head>
+	<meta charset="UTF-8">
+	<title>cockatiel | by vulbyte</title>
+	<meta http-equiv="Content-Security-Policy" content="script-src 'self' 'unsafe-inline';" />
+</head>
+
+<body>
+	<button id='save_button'>save values</button>
+	<button id='load_button'>load values</button>
+	<script>
+		document.getElementById('save_button').addEventListener('click', (e) => {SaveValues()})
+		document.getElementById('load_button').addEventListener('click', (e) => {LoadValues()})
+		function SaveValues() {
+			let inputs = document.getElementsByTagName('input');
+
+			let save_map = {};
+			for (let i = 0; i < Object.keys(inputs).length; ++i) {
+				save_map[inputs[i].id] = inputs[i].value;
+			}
+			console.log(save_map);
+			localStorage.setItem('inputs', JSON.stringify(save_map));
+		}
+
+		function LoadValues() {
+			let values = localStorage.getItem('inputs');
+			values = JSON.parse(values);
+			console.log(values);
+			let inputs = document.getElementsByTagName('input');
+
+			for (let i = 0; i < inputs.length; ++i) {
+				try {
+					let ce = inputs[i];
+					if (values[ce.id] == null) {console.log(`null value with ${ce.id}`); continue;}
+					if (values[ce.id] == undefined) {console.log('undefined'); continue;}
+					if (values[ce.id] == null) {console.log("''"); continue;}
+
+					ce.value = values[ce.id];
+				}
+				catch (err) {
+					console.warn(err);
+				}
+			}
+		}
+	</script>
+	<h1>cockatiel</h1>
+	<details>
+		<summary>youtube stuff</summary>
+
+		<input id="api_key" placeholder="api_key" type="password"></input>
+		<input id="channel_name" placeholder="channel_name" type="text"></input>
+		<button id="get_channel_id_button">get_channel_id_button</button>
+		<br>
+		<em>don't fill this out unless you already know it, the wizard can do this for you!</em>
+		<input placeholder="channel_id" id="channel_id" type='text'></input>
+		<script type="module">
+			function ApiKey() {
+				let ak = document.getElementById("api_key").value;
+				return (ak);
+			};
+
+			const ChannelName = ((e) => {
+				return (document.getElementById("channel_name"));
+			})
+
+			document.getElementById('get_channel_id_button').addEventListener('click', () => {
+				GetChannelId();
+			})
+
+
+			async function GetChannelId() {
+				try {
+					document.getElementById('popup').remove();
+				}
+				catch (err) {
+					console.warn(err)
+				}
+
+				const YtChannelIdQuery = new Promise(async (resolve, reject) => {
+					try {
+						setTimeout(() => {(reject(`couldn't load response in time`))}, 5000);
+						const base_url = "https://www.googleapis.com/youtube/v3/";
+						const params = String(
+							'search' +
+							'?part=snippet' +
+							'&key=' + String(ApiKey()) +
+							'&q=vulbyte' +
+							'&type=channel' +
+							'&maxResults=3' +
+							''
+						);
+
+						let fetch_url = String(base_url + params);
+
+						let response = await fetch(fetch_url);
+						if (!response.ok) {
+							reject('data is not correct' + data);
+						}
+						let data = response.json();
+						console.log(data);
+
+						resolve(data);
+					}
+					catch (err) {
+						console.log(err);
+					}
+				});
+
+				let response = await YtChannelIdQuery;
+
+				console.log(response);
+
+				function CE(args = {
+					'elem': undefined,
+					'it': undefined,
+					'id': undefined,
+					'href': undefined,
+					'alt': undefined,
+					'src': undefined,
+				}) {
+					//does not do styling!
+					console.log(args);
+					let ce;
+
+					if (args.elem == '' || args.elem == undefined || args.elem == null) {
+						ce = document.createElement('div');
+					}
+					else {
+						ce = document.createElement(args.elem);
+					}
+
+					if (args.alt != '' || args.alt != undefined || args.alt != null) {
+						ce.alt = args.alt;
+					}
+
+					if (args.href != '' || args.href != undefined || args.href != null) {
+						ce.href = args.href;
+					}
+					if (args.id != '' || args.id != undefined || args.id != null) {
+						ce.id = args.id;
+					}
+					if (args.it != '' || args.it != undefined || args.it != null) {
+						ce.innerText = args.it;
+					}
+					if (args.src != '' || args.src != undefined || args.src != null) {
+						ce.src = args.src;
+					}
+
+					return (ce);
+				}
+
+				if (response.items.length == 1) {
+					console.log("only one item");
+
+					let popup = CE({'id': 'popup'});
+					popup.style.backgroundColor = 'blue';
+					popup.style.color = 'black';
+					popup.style.height = 'auto';
+					popup.style.position = 'absolute';
+					popup.style.width = '30em';
+
+					document.body.appendChild(popup);
+					popup = document.getElementById('popup');
+					await setTimeout(() => { }, 100);
+
+					function LeftOffset() {
+						let win, pu;
+						win = window.innerWidth;
+						try {
+							pu = document.getElementById('popup').getBoundingClientRect().x;
+						}
+						catch (err) {console.warn(err)}
+						let offset = ((win - pu) / 2);
+						console.log(
+							`y offset: ${offset}`,
+							`win: ${win}`,
+							`pu: ${pu}`,
+						);
+						return offset / 2;
+					}
+
+					function TopOffset() {
+						let win, pu;
+						win = window.innerHeight;
+						try {
+							pu = document.getElementById('popup').getBoundingClientRect().y;
+						}
+						catch (err) {console.warn(err)}
+						let offset = ((win - pu) / 2);
+						console.log(
+							`y offset: ${offset}`,
+							`win: ${win}`,
+							`pu: ${pu}`,
+						);
+						if (offset <= 0) {return (0)}
+						return offset / 2;
+					}
+
+					console.log(
+						'centering popup',
+						LeftOffset(), ", ", TopOffset(), "\n",
+						popup.getBoundingClientRect().x, ", ", popup.getBoundingClientRect().y
+					);
+					document.getElementById('popup').style.left =
+						LeftOffset() + "px";
+					document.getElementById('popup').style.top = TopOffset() + "px";
+
+					popup.appendChild(CE({
+						'it': 'only one result found, is this right?'
+					}));
+
+					let single_channel = CE();
+					//img
+					single_channel.appendChild(CE({
+						'elem': 'img',
+						'src': response.items[0].snippet.thumbnails.medium.url,
+						'alt': `image of the channel ${response.items[0].snippet.ChannelName}`
+					}));
+					//channel name
+					single_channel.appendChild(CE({
+						'elem': 'h2',
+						'it': response.items[0].snippet.title
+					}));
+
+					let confirm = CE({
+						'elem': 'button',
+						'id': 'confirm_channel_btn',
+						'it': '✅',
+					});
+					confirm.addEventListener('click', (e) => {
+						document.getElementById('channel_id').value = response.items[0].snippet.channelId;
+						popup.remove();
+					});
+					single_channel.appendChild(confirm);
+
+					let deny = CE({
+						'elem': 'button',
+						'id': 'deny_channel_btn',
+						'it': '❌'
+					});
+					deny.addEventListener('click', (e) => {
+						console.log('removing popup');
+						//document.getElementById('channel_id').value = resposne.items[0].snippet.channelId;
+						popup.remove();
+					});
+					single_channel.appendChild(deny);
+
+					popup.appendChild(single_channel)
+				}
+				else {
+					console.log("more than one item returned");
+
+					let popup = CE({'id': 'popup'});
+					popup.style.backgroundColor = 'blue';
+					popup.style.color = 'black';
+					popup.style.height = 'auto';
+					popup.style.position = 'absolute';
+					popup.style.width = '30em';
+
+					await document.body.appendChild(popup);
+					popup = document.getElementById('popup');
+
+					let left = window.innerWidth;
+					let top = window.innerHeight;
+
+					popup.style.left =
+						(window.innerWidth - popup.getBoundingClientRect().x) / 2;
+					popup.style.bottom =
+						(window.innerHeight - popup.getBoundingClientRect().y) / 2;
+
+					popup.appendChild(CE({
+						'it': 'multiple results! which is right?'
+					}));
+
+					let channel_list = CE({'elem': 'ul'});
+
+					for (let i = 0; i < response.items.length; ++i) {
+						let channel_item = response.items[i];
+
+						//img
+						channel_item.appendChild(CE({
+							'elem': 'img',
+							"it": response.items[0].snippet.thumbnails.medium.url
+						}));
+						//channel name
+						channel_item.appendChild(CE({
+							'elem': 'h2',
+							'it': response.items[0].snippet.title
+						}));
+
+						let confirm = CE({
+							'elem': 'button',
+							'id': 'confirm_channel_btn',
+							'it': '✅',
+						});
+						confirm.addEventListener('click', (e) => {
+							document.getElementById('channel_id').value = response.items[0].snippet.channelId;
+							popup.remove();
+						});
+						channel_item.appendChild(confirm);
+
+						let deny = CE({
+							'elem': 'button',
+							'id': 'deny_channel_btn',
+							'it': '❌'
+						});
+						document.getElementById(deny.id).addEventListener('click', (e) => {
+							console.log('removing popup');
+							popup.remove();
+						});
+						channel_item.appendChild(deny);
+					}//end of for loop
+
+					popup.appendChild(channel_list);
+				}
+			}
+
+		</script>
+
+		<button id="select_yt_livestream_btn" style="background-color:#ff0000;">
+			select a currently live youtube stream
+		</button>
+		<button id="select_upcoming_yt_livestream_btn" style="background-color:#ffff00">
+			select scheduled youtube stream
+		</button>
+		<script>
+			function CE(args = {
+				'elem': undefined,
+				'it': undefined,
+				'id': undefined,
+				'href': undefined,
+				'alt': undefined,
+				'src': undefined,
+			}) {
+				//does not do styling!
+				//console.log(args);
+				let ce;
+
+				if (args.elem == '' || args.elem == undefined || args.elem == null) {
+					ce = document.createElement('div');
+				}
+				else {
+					ce = document.createElement(args.elem);
+				}
+
+				if (args.alt != '' || args.alt != undefined || args.alt != null) {
+					ce.alt = args.alt;
+				}
+
+				if (args.href != '' || args.href != undefined || args.href != null) {
+					ce.href = args.href;
+				}
+				if (args.id != '' || args.id != undefined || args.id != null) {
+					ce.id = args.id;
+				}
+				if (args.it != '' || args.it != undefined || args.it != null) {
+					ce.innerText = args.it;
+				}
+				if (args.src != '' || args.src != undefined || args.src != null) {
+					ce.src = args.src;
+				}
+
+				return (ce);
+			}
+
+			let d = document;
+			function GEBI(id) {return (d.getElementById(id))};
+
+			GEBI("select_yt_livestream_btn").addEventListener('click', (e) => {
+				let ak = GEBI("api_key").value;
+				if (ak == null || ak == undefined || ak == '') {
+					console.warn('missing api key!');
+					return;
+				}
+				let ci = GEBI("channel_id").value;
+				if (ci == null || ci == undefined || ci == '') {
+					console.warn('missing channel id!');
+					return;
+				}
+
+				GetYoutubeLiveStreamsFromChannel();
+			});
+
+			function GetYoutubeLiveStreamsFromChannel() {
+				let ak = GEBI("api_key").value;
+				let id = GEBI("channel_id").value;
+
+
+				fetch(`
+					https://www.googleapis.com/youtube/v3/search
+							?part=snippet
+							&channelId=${id}
+							&eventType=live
+							&type=video
+							&key=${ak}
+				`)
+					.then(response => response.json())
+					.then(data => console.log(data))
+					.catch(err => console.warn(err))
+			}
+
+			GEBI("select_upcoming_yt_livestream_btn").addEventListener('click', (e) => {
+				let ak = GEBI("api_key").value;
+				if (ak == null || ak == undefined || ak == '') {
+					console.warn('missing api key!');
+					return;
+				}
+				let ci = GEBI("channel_id").value;
+				if (ci == null || ci == undefined || ci == '') {
+					console.warn('missing channel id!');
+					return;
+				}
+
+				GetUpcomingYoutubeLiveStreamsFromChannel();
+			});
+			function GetUpcomingYoutubeLiveStreamsFromChannel() {
+				console.log('getting upcomings streams');
+				let ak = GEBI("api_key").value;
+				let id = GEBI("channel_id").value;
+
+				fetch(`
+					https://www.googleapis.com/youtube/v3/search
+							?part=snippet
+							&channelId=${id}
+							&eventType=upcoming
+							&type=video
+							&key=${ak}
+				`)
+					.then(response => response.json())
+					.then((data) => {
+						console.log(data)
+						let container = CE({"elem": "ul", "id": "stream_selection"});
+						for (let i = 0; i < data.items.length; ++i) {
+							let item = data.items[i];
+							console.log(`making item for loop ${i} item: ${item}`);
+
+							let stream_item = CE({"elem": "li", "id": "stream_item"});
+
+							let thumbnail = CE({
+								"elem": "img",
+								"src": `${item.snippet.thumbnails.medium.url}`,
+								"alt": `thumbnail of stream: ${item.snippet.title}`
+							});
+							stream_item.appendChild(thumbnail);
+
+							let title = CE({"elem": "h3", "it": item.snippet.title});
+							stream_item.appendChild(title);
+
+							let select = CE({"elem": "button", "it": "click here to select this stream"});
+							select.addEventListener("click", (e) => {
+								document.getElementById("youtube_stream_id").value = (item.id.videoId);
+								container.remove();
+							});
+							stream_item.appendChild(select);
+
+							container.appendChild(stream_item);
+						}
+						document.body.appendChild(container);
+					})
+					.catch(err => console.warn(err))
+			}
+		</script>
+		<br>
+		<input id="youtube_stream_id" placeholder="stream_id"></input>
+		<button id="get_youtube_livestream_chat_id">get youtube livestream chat id</button>
+		<script>
+			document.getElementById('get_youtube_livestream_chat_id').addEventListener('click', () => {
+				GetYoutubeLivestreamChatIdFromVideoId();
+			})
+			function GetYoutubeLivestreamChatIdFromVideoId() {
+				fetch(
+					`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${document.getElementById('youtube_stream_id').value}&key=${document.getElementById('api_key').value}`
+				)
+					.then(response => response.json())
+					.then((data) => {
+						console.log(data);
+						let chat_id = data.items[0].liveStreamingDetails.activeLiveChatId;
+						document.getElementById('youtube_chat_id').value = chat_id;
+					})
+					.catch((err) => {console.warn(err)});
+			}
+		</script>
+		<br>
+		<input id='youtube_chat_id' placeholder="youtube_chat_id"></input>
+	</details>
+	<br>
+	<br>
+
+	<button id='start_monitoring_messages' style='background-color:green;'>start monitoring</button>
+	<button id='stop_monitoring_messages' style='background-color:red;'>stop monitoring</button>
+	<script>
+		class IntTimer {
+			constructor(
+				args = {
+					timerName: "",
+					tick: 1,
+					timeoutDuration: 60,
+					killOnTimeout: true,
+					autoStart: false
+				}
+			) {
+				this.timerName = args.timerName;
+				this.tick = args.tick;
+				this.timeoutDuration = args.timeoutDuration;
+				this.killOnTimeout = args.killOnTimeout;
+				this.time = 0;
+				this.autoStart = args.autoStart;
+
+				this.listeners = [];
+
+				if (this.autoStart == true) {
+					this.Start();
+				}
+			}
+
+			Start() {
+				console.log(`IntTimer: Starting timer with interval of: ${this.timeoutDuration}`);
+				this.timer = setInterval(() => {
+					this.Tick();
+
+				}, 1000);
+			}
+
+			Pause() {
+				clearInterval(this.timer);
+			}
+
+			Stop() {
+				this.Pause();
+				this.Restart();
+			}
+
+			Restart() {
+				this.time = 0;
+			}
+
+			Tick() {
+				console.log(`timer ${this.timerName}: tick`);
+
+				this.time += 1;
+
+				if (this.time % this.timeoutDuration == 0) {
+					this.Timeout();
+				}
+			}
+
+			Timeout() {
+				console.log(`timer ${this.timerName} Has Timeout'd`);
+
+				this.Emit();
+
+				if (this.killOnTimeout == true) {
+					this.Kill();
+				}
+			}
+
+			Kill() {
+				console.log(`timer ${this.timerName} Has been killed`);
+				this.killOnTimeout = true;
+
+				this.listeners = [];
+
+				clearInterval(this.timer);
+			}
+
+			// signal stuff
+			Connect(listener) {
+				this.listeners.push(listener);
+			}
+
+			Emit(data) {
+				this.listeners.forEach(listener => listener(data));
+			}
+
+			Disconnect(listener) {
+				this.listeners = this.listeners.filter(l => l !== listener);
+			}
+		}
+
+		const Timer = new IntTimer();
+		Timer.Connect();
+
+		async function GetYtMessages() {
+			let new_messages;
+
+			await fetch(
+				`https://www.googleapis.com/youtube/v3/liveChat/messages` +
+				`?liveChatId=${document.getElementById('youtube_stream_id')}` +
+				`&part=snippet,authorDetails` +
+				`&key=${document.getElementById('api_key')}`)
+				.then(response => response.json()) //??????????????????????????????????????????????????
+				.then(data => {
+					console.log("DATA FROM FETCH: ", data);
+					new_messages = data.items.map(item => ({
+						author: item.authorDetails.displayName,
+						message: item.snippet.displayMessage,
+						time: item.snippet.publishedAt,
+					}));
+				})
+				.catch(err => console.error(err));
+			return (new_messages);
+		}
+
+		async function GetAndUpdateMessages() {
+			const Prom = new Promise((resolve, reject) => {
+				setTimeout((e) => {
+					reject(
+						'could not get and list messages before next interval!'
+					)
+				}, ytci * 1000);
+
+				let messages = GetYtMessages();
+
+				let table = CE({
+					'elem': 'table',
+				})
+				let row_template = CW({
+					'elem': 'th',
+				})
+				for (let i = 0; i < Object.keys(messages).length; ++i) {
+
+				}
+				//await document.getElementById('messages_display').
+			});
+
+			Timer.Connect(GetAndUpdateMessages);
+
+			document.getElementById('start_monitoring_messages').addEventListener((e) => {
+				Timer.Start();
+			});
+			document.getElementById('start_monitoring_messages').addEventListener((e) => {
+				Timer.Pause()
+			});
+		}
+
+	</script>
+	<input id='youtube_chat_update_interval' style='background-color:yellow;' type='range' min='5' max='120' value='20'>
+	<span>
+		interval:
+		<span id='youtube_chat_update_interval_display'></span>
+		seconds
+	</span>
+	<script>
+		ytci = document.getElementById('youtube_chat_update_interval');
+		ytcid = document.getElementById('youtube_chat_update_interval_display');
+
+		ytcid.innerText = 20;
+
+		ytci.addEventListener('mousemove', (e) => {
+			ytcid.innerText = ytci.value;
+		})
+	</script>
+
+
+	<style>
+		#messages_display>tr>th:nth-child(2n+1) {
+			background-color: lightgray;
+		}
+
+		#messages_display>tr>td {
+			border: 3px solid #000000;
+			padding: 0.5em;
+			margin: auto;
+			text-align: center;
+		}
+
+		#messages_display>tr>td:nth-child(2n+1) {
+			background-color: lightgray;
+		}
+
+		#messages_display>tr>td:nth-child(8) {
+			background-color: red;
+		}
+	</style>
+	<table>
+		<tbody id="messages_display">
+			<tr>
+				<th>author</th>
+				<th>platform</th>
+				<th>date (YMD)</th>
+				<th>message</th>
+				<th>play now</th>
+				<th>re-add to queue</th>
+				<th>skip</th>
+				<th>delete</th>
+			</tr>
+			<tr>
+				<td>exampler</td>
+				<td>youtube</td>
+				<td>2025_02_14</td>
+				<td>hello! what a cool stream! ^w^</td>
+				<td>▶️</td>
+				<td>+</td>
+				<td>⏭️</td>
+				<td>❌</td>
+			</tr>
+		</tbody>
+	</table>
+
+	<div style="position:fixed; bottom:0px;">
+		cockatiel is using Node.js <span id="node-version"></span>,
+		Chromium <span id="chrome-version"></span>,
+		and Electron <span id="electron-version"></span>.
+	</div>
+
+	<!-- You can also require other files to run in this process -->
+	<script src="./renderer.js"></script>
+</body>
+
+</html>
