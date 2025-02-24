@@ -789,15 +789,6 @@
 									document.getElementById('tts_pitch').value = tts_args.pitch;
 									document.getElementById('tts_speed').value = tts_args.rate;
 
-									// Select voice
-									const voices = speechSynthesis.getVoices();
-									const selectedVoiceIndex = parseInt(tts_args.voiceIndex, 10);
-									if (!isNaN(selectedVoiceIndex) && voices[selectedVoiceIndex]) {
-										tts_args.voice = voices[selectedVoiceIndex];
-									} else {
-										tts_args.voice = voices[0]; // Fallback to first voice
-									}
-
 									console.log('Parsed TTS values:', tts_args);
 
 									return tts_args;
@@ -806,7 +797,15 @@
 								const tts_args = parseTTSCommand(message.snippet.displayMessage);
 								//}}} 6
 								//{{{3 CallTSS() and bind
-								async function CallTTS(message, tts_args) {
+								async function CallTTS(
+									message,
+									args = tts_args || {
+										'voiceIndex': document.getElementById('tts_voice_num'),
+										'pitch': document.getElementById('tts_pitch'),
+										'rate': document.getElementById('tts_speed')
+									}
+								) {
+									console.log('CallTTS args: ' + JSON.stringify(args));
 									let speech = new SpeechSynthesisUtterance(message);
 
 									// Ensure voices are loaded
@@ -840,15 +839,12 @@
 									}
 
 									try {
-										console.log("call_tts, reading config: ", tts_args);
+										console.log("call_tts, reading config: ", args);
 										speech.lang = "en_US";
-										speech.voice =
-											tts_args.voiceIndex
-											|| voices[document.getElementById('tts_voice_num').value]
-											|| voices[15]; // Fallback if index is invalid
-										speech.volume = config.tts.volume;
-										speech.rate = tts_args.rate || document.getElementById('tts_speed').value;
-										speech.pitch = tts_args.pitch || document.getElementById('tts_pitch').value;
+										speech.voice = voices[args.voiceIndex];
+										speech.volume = 0.6;
+										speech.rate = args.rate || document.getElementById('tts_speed').value;
+										speech.pitch = args.pitch || document.getElementById('tts_pitch').value;
 									}
 									catch (err) {
 										console.warn("Error loading settings: ", err);
