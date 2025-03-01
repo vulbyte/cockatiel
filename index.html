@@ -449,6 +449,7 @@
 					.then((data) => {
 						console.log(data)
 						let container = CE({"elem": "ul", "id": "stream_selection"});
+						container.style.paddingBottom = "3rem";
 						for (let i = 0; i < data.items.length; ++i) {
 							let item = data.items[i];
 							console.log(`making item for loop ${i} item: ${item}`);
@@ -746,7 +747,7 @@
 							tr_play_now_button.id = 'tr_play_now_button';
 							tr_play_now_button.innerText = '▶️';
 							tr_play_now_button.checked = true;
-							tr_play_now_button.addEventListener('click', (e) => {
+							function tr_play_tts() {
 								// {{{6 GPT THING, TODO: REWRITE, ADD -l
 								function parseTTSCommand(message) {
 									console.log('Parsing TTS commands on message: ' + message);
@@ -865,6 +866,9 @@
 
 								CallTTS(document.getElementById(`row${i}`).children[3].innerText);
 								//}}}3
+							}
+							tr_play_now_button.addEventListener('click', (e) => {
+								tr_play_tts();
 							});
 
 							let tr_in_queue = CE({
@@ -874,7 +878,7 @@
 							tr_in_queue.innerText = '';
 							tr_in_queue_toggle = CE({
 								'elem': 'input',
-								'id': 'tss_message_in_queue'
+								'id': 'is_tss_message_in_queue'
 							});
 							tr_in_queue_toggle.type = 'checkbox';
 							async function AddMessageToQueue() {
@@ -884,7 +888,8 @@
 								let ttstt = GEBI('tts_trigger_token');
 								ttstt = ttstt.value | ttstt.placeholder;
 								let message_text = message.snippet.displayMessage;
-								function EvalIfShouldAddMessageToQueue() { // returns 0 if checks are valid, other if false
+								// TODO: this for filtering
+								/*function EvalIfShouldAddMessageToQueue() { // returns 0 if checks are valid, other if false
 									if (message_text.includes(ttstt)) {
 										let should_be_added_to_queue = true;
 										//delimiter check
@@ -924,7 +929,16 @@
 										// TODO: token location
 									}
 								};
-								tr_in_queue.checked = EvalIfShouldAddMessageToQueue();
+								tr_in_queue_toggle.checked = EvalIfShouldAddMessageToQueue();*/
+								tr_in_queue_toggle.checked = (
+									message.snippet.displayMessage.includes(
+										document.getElementById("tts_trigger_token").value
+									) &&
+									message.snippet.displayMessage.includes(
+										document.getElementById("tts_delimiting_token").value
+									)
+								);
+								tr_in_queue.appendChild(tr_in_queue_toggle);
 								row.appendChild(tr_in_queue);
 
 								let tr_skip = CE({
@@ -979,71 +993,71 @@
 			update interval to about every 10 seconds. if you stream for a shorter period i made you a helpful little table
 			you
 			can view:
-			<details>
-				<summary>here</summary>
-				<table>
-					<tbody>
-						<tr>
-							<th>max-hours</th>
-							<th>update interval</th>
-						</tr>
-						<tr>
-							<td>24 hours</td>
-							<td>10 seconds (default)</td>
-						</tr>
-						<tr>
-							<td>16 hours</td>
-							<td>8 seconds</td>
-						</tr>
-						<tr>
-							<td>12 hours</td>
-							<td>7 seconds</td>
-						</tr>
-						<tr>
-							<td>10 hours </td>
-							<td>7 seconds</td>
-						</tr>
-						<tr>
-							<td>9 hours</td>
-							<td>7 seconds</td>
-						</tr>
-						<tr>
-							<td>8 hours</td>
-							<td>6 seconds</td>
-						</tr>
-						<tr>
-							<td>7 hours</td>
-							<td>6 seconds</td>
-						</tr>
-						<tr>
-							<td>6 hours</td>
-							<td>6 seconds</td>
-						</tr>
-						<tr>
-							<td>5 hours</td>
-							<td>6 seconds</td>
-						</tr>
-						<tr>
-							<td>4 hours</td>
-							<td>5 seconds</td>
-						</tr>
-						<tr>
-							<td>3 hours</td>
-							<td>5 seconds</td>
-						</tr>
-						<tr>
-							<td>2 hours</td>
-							<td>5 seconds</td>
-						</tr>
-						<tr>
-							<td>1 hours</td>
-							<td>5 seconds</td>
-						</tr>
-					</tbody>
-				</table>
-			</details>
+		</sub>
+		<details>
+			<summary>here</summary>
+			<table>
+				<tbody>
+					<tr>
+						<th>max-hours</th>
+						<th>update interval</th>
+					</tr>
+					<tr>
+						<td>24 hours</td>
+						<td>10 seconds (default)</td>
+					</tr>
+					<tr>
+						<td>16 hours</td>
+						<td>8 seconds</td>
+					</tr>
+					<tr>
+						<td>12 hours</td>
+						<td>7 seconds</td>
+					</tr>
+					<tr>
+						<td>10 hours </td>
+						<td>7 seconds</td>
+					</tr>
+					<tr>
+						<td>9 hours</td>
+						<td>7 seconds</td>
+					</tr>
+					<tr>
+						<td>8 hours</td>
+						<td>6 seconds</td>
+					</tr>
+					<tr>
+						<td>7 hours</td>
+						<td>6 seconds</td>
+					</tr>
+					<tr>
+						<td>6 hours</td>
+						<td>6 seconds</td>
+					</tr>
+					<tr>
+						<td>5 hours</td>
+						<td>6 seconds</td>
+					</tr>
+					<tr>
+						<td>4 hours</td>
+						<td>5 seconds</td>
+					</tr>
+					<tr>
+						<td>3 hours</td>
+						<td>5 seconds</td>
+					</tr>
+					<tr>
+						<td>2 hours</td>
+						<td>5 seconds</td>
+					</tr>
+					<tr>
+						<td>1 hours</td>
+						<td>5 seconds</td>
+					</tr>
+				</tbody>
+			</table>
+		</details>
 	</details>
-	</sub>
 	<script>
 		ytci = document.getElementById('youtube_chat_update_interval');
 		ytcid = document.getElementById('youtube_chat_update_interval_display');
@@ -1060,10 +1074,16 @@
 		table {
 			border: 1px solid #ffffff;
 			max-height: 20em;
-			paddding: 3em;
 			margin-bottom: 6em;
 			max-width: 95%;
+			overflow-y: scroll !important;
 		}
+
+		tbody {
+			height: 20em;
+			overflow-y: scroll !important;
+		}
+
 
 		#messages_display>tr>th:nth-child(2n+1) {
 			background-color: #333;
@@ -1365,21 +1385,209 @@
 			<br>
 		</details>
 	</div>
-	<impl> this duplicates messages ⬇️</impl>
-	<table>
-		<tbody id="messages_display">
-			<tr>
-				<th>author</th>
-				<th>platform</th>
-				<th>date (YMD)</th>
-				<th>message</th>
-				<th>play now</th>
-				<th>in queue</th>
-				<th>skip</th>
-				<th>delete</th>
-			</tr>
-		</tbody>
-	</table>
+	<div>
+		<button id="start_auto_tts" style="background-color:blue;">start automatic tts</button>
+		<button id="stop_auto_tts" style="background-color:purple;">stop automatic tts</button>
+		<label> interval (in seconds):</label>
+		<input id="auto_tts_interval" min="15" max="6000" default="300" type="range"><span
+			id="auto_tts_interval_display"></span>
+		<script>
+			class IntTimer2 {
+				constructor(
+					args = {
+						timerName: "",
+						tick: 1,
+						timeoutDuration: 1,
+						killOnTimeout: false,
+						autoStart: false
+					}
+				) {
+					this.timerName = args.timerName;
+					this.tick = args.tick;
+					this.timeoutDuration = args.timeoutDuration;
+					this.killOnTimeout = args.killOnTimeout;
+					this.time = 0;
+					this.autoStart = args.autoStart;
+
+					this.listeners = [];
+
+					if (this.autoStart == true) {
+						this.Start();
+					}
+				}
+
+				Start() {
+					console.log(`IntTimer: Starting timer with interval of: ${this.timeoutDuration}`);
+					this.timer = setInterval(() => {
+						this.Tick();
+
+					}, 1000);
+				}
+
+				Pause() {
+					clearInterval(this.timer);
+				}
+
+				Stop() {
+					this.Pause();
+					this.Restart();
+				}
+
+				Restart() {
+					this.time = 0;
+				}
+
+				Tick() {
+					console.log(`timer ${this.timerName}: tick`);
+
+					this.time += 1;
+
+					if (this.time % this.timeoutDuration == 0) {
+						this.Timeout();
+					}
+				}
+
+				Timeout() {
+					console.log(`timer ${this.timerName} Has Timeout'd`);
+
+					this.Emit();
+
+					if (this.killOnTimeout == true) {
+						this.Kill();
+					}
+				}
+
+				Kill() {
+					console.log(`timer ${this.timerName} Has been killed`);
+					this.killOnTimeout = true;
+
+					this.listeners = [];
+
+					clearInterval(this.timer);
+				}
+
+				// signal stuff
+				Connect(connect_func) {
+					this.listeners.push(connect_func);
+				}
+
+				Emit(data) {
+					//console.log('listener amnt: ' + this.listeners.length);
+					//console.log('listeners: ' + this.listeners.json());
+
+					for (let i = 0; i < this.listeners.length; ++i) {
+						this.listeners[i](data);
+						//if (typeof this.listeners[i] === 'function') {
+						//} else {
+						//	console.error("Listener is not a function:", this.listeners[i]);
+						//}
+					}
+				}
+
+				Disconnect(listener) {
+					this.listeners = this.listeners.filter(l => l !== listener);
+				}
+			}
+
+			const Auto_TTS_Timer = new IntTimer2;
+			let start_auto_tts =
+				document.getElementById("start_auto_tts");
+			start_auto_tts.addEventListener("click", (e) => {
+				Auto_TTS_Timer.Start();
+			});
+			let stop_auto_tts =
+				document.getElementById("stop_auto_tts");
+			stop_auto_tts.addEventListener("click", (e) => {
+				Auto_TTS_Timer.Stop();
+			});
+
+			let auto_tts_interval = document.getElementById("auto_tts_interval");
+			console.log("auto_tts interval is: " + auto_tts_interval.value);
+			let auto_tts_interval_display = document.getElementById("auto_tts_interval_display");
+			auto_tts_interval.addEventListener("mousemove", (e) => {
+				auto_tts_interval_display.innerHTML = auto_tts_interval.value;
+			});
+
+			Auto_TTS_Timer.Connect(() => {
+				Auto_TTS_Timer.timeoutDuration = auto_tts_interval.value;
+				console.log("new timeout duration for auto_tts: " + Auto_TTS_Timer.timeoutDuration);
+				let messages =
+					document
+						.getElementById("messages_display")
+						.children;
+
+				console.log(JSON.stringify(messages));
+
+				let new_list = [];
+
+				for (let i = 0; i < messages.length; ++i) {
+					let checkbox = messages[i].querySelector("#is_tss_message_in_queue");
+					if (checkbox && checkbox.checked) {
+						let messageText = messages[i].querySelector("#td_message")?.innerText || "(empty message)";
+						console.log("adding message to queue! " + messageText);
+						new_list.push(messages[i]);
+					}
+				}
+				console.log("messages: " + messages + "\nnew list: " + new_list);
+
+				messages = new_list;
+
+				console.log(messages);
+
+				//messages_in_queue:
+				let messages_in_queue;
+				if (messages.length > 0) {
+					messages_in_queue = messages.length - 1
+				}
+				else {
+					messages_in_queue = 0;
+				}
+				document.getElementById("tts_message_queue").innerHTML = messages_in_queue;
+
+				//next_auto_tts:
+				let count = Auto_TTS_Timer.timeoutDuration;
+				let timer = setInterval(() => {
+					count -= 1;
+					d.getElementById('next_auto_tts').innerText = count;
+					if (count == 0) {clearInterval(timer)};
+				}, 1000);
+
+				if (messages.length > 0) {
+					//clear and read next message
+					messages[0]
+						.children
+						.td_in_queue_container
+						.children
+						.is_tss_message_in_queue
+						.checked = false;
+					messages[0]
+						.children
+						.td_play_now
+						.children
+						.tr_play_now_button
+						.click();
+				}
+
+			});
+		</script>
+	</div>
+	<div style="max-height: 20em; overflow-y: scroll;">
+		<impl> this does not reverse sort properly</impl>
+		<table>
+			<tbody id="messages_display">
+				<tr>
+					<th>author</th>
+					<th>platform</th>
+					<th>date (YMD)</th>
+					<th>message</th>
+					<th>play now</th>
+					<th>in queue</th>
+					<th>skip</th>
+					<th>delete</th>
+				</tr>
+			</tbody>
+		</table>
+	</div>
 
 	<div style="
 				position:fixed; 
@@ -1395,7 +1603,7 @@
 			<span style='padding-right:2em'>next update in: <span id='tts_update_time'>0</span></span>
 			<span style='padding-right:2em'>messages in queue: <span id='tts_message_queue'>0</span></span>
 			<span style='padding-right:2em'>total messages: <span id='tts_message_total'>0</span></span>
-			<span style='padding-right:2em'>next auto tts: <span id='tts_message_total'>0</span></span>
+			<span style='padding-right:2em'>next auto tts: <span id='next_auto_tts'>0</span></span>
 		</div>
 		<div>
 			cockatiel by vulbyte is using: Node.js <span id="node-version"></span>,
