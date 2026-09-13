@@ -4,7 +4,31 @@
 ## roadmap for v1:
 
 #### checkpoint 1: da core
-- [ ] - Protocol Stability First: Prioritize locking down the Protobuf schema over adding new features.
+- [x] - Protocol Stability First: Prioritize locking down the Protobuf schema over adding new features.
+- [ ] - one file import for the following langs:
+    - [ ] - C (#import <cockatiel_lib.h/c> or cmake)
+    - [ ] - C# (dotnet package?)
+    - [ ] - gdScript (file/folder you paste into your project, then const MyLib = preload("res://path/to/external_lib.gd"))
+    - [ ] - javaScript (ie: import { chunk } from './libs/cockatiel_lib.js';)
+        - [ ] - ez import
+        - [ ] - README.md tutorial
+        - [ ] - <import_name>.connect()
+        - [ ] - <import_name>.Send()
+        - [ ] - <import_name>.ReceiveAny()
+        - [ ] - <import_name>.Receive.protobuffType()
+    - [ ] - python (cockatiel = get("https://github.com/vulbyte/cockatiel_lib"))
+        - [ ] - ez import
+        - [ ] - README.md tutorial
+        - [ ] - <import_name>.connect()
+        - [ ] - <import_name>.Send()
+        - [ ] - <import_name>.ReceiveAny()
+        - [ ] - <import_name>.Receive.protobuffType()
+    - [x] - rust (use "path/to/file/cockatiel_lib.rs")
+        - [x] - ez import
+        - [x] - README.md tutorial
+        - [x] - <import_name>.connect()
+        - [x] - <import_name>.Send(<protobuffType>, <tareget_as_string>, <message>)
+        - [x] - <import_name>.Receive.protobuffType(<functionToCatchData>)
 - [ ] - test input module, which will connect as: adapter, preprocess, inprocess, and postprocess, to verify dataflow
     - [ ] - message Container { /* general template for communicating messages */
         - [ ] -   int32 version = 1; /* version for disbatching */
@@ -30,13 +54,6 @@
             - [ ] -   }
 
 #### checkpoint 2: engine modules
-- [ ] - one file import for the following langs:
-    - [ ] - C (#import <cockatiel_lib.h/c> or cmake)
-    - [ ] - C# (dotnet package?)
-    - [ ] - gdScript (file/folder you paste into your project, then const MyLib = preload("res://path/to/external_lib.gd"))
-    - [ ] - javaScript (ie: import { chunk } from './libs/cockatiel_lib.js';)
-    - [ ] - python (cockatiel = get("https://github.com"))
-    - [ ] - rust (use "path/to/file/cockatiel_lib.rs")
 - [ ] - timeline_database
     - [ ] - check and verify config
     - [ ] - create config
