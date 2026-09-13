@@ -4,266 +4,266 @@
 ## roadmap for v1:
 
 #### checkpoint 1: da core
-[ ] - Protocol Stability First: Prioritize locking down the Protobuf schema over adding new features.
-[ ] - test input module, which will connect as: adapter, preprocess, inprocess, and postprocess, to verify dataflow
-    [ ] - message Container { /* general template for communicating messages */
-        [ ] -   int32 version = 1; /* version for disbatching */
-        [ ] -   string auth_token = 3; /* JWT for auth */
-        [ ] -   string module_name = 4; /* used for displaying to user and for internal resource mgmt */
-        [ ] -   string module_instance_uuid7 = 5; /*if is a connection request, will ignore this*/
-            [ ] -   oneof payload {
-                [ ] -     ConnectionRequest connection_request = 7;
-                [ ] -     ConnectionRequestReturn connection_request_return = 8;
-                [ ] -     AuthVerify auth_verify = 9;
-                [ ] -     AuthNew auth_new = 10;
-                [ ] -     Command command_payload = 11;
-                [ ] -     Commands commands_payload = 12;
-                [ ] -     MessagePreProcess message_pre_process = 13;
-                [ ] -     MessageInProcess message_in_process = 14;
-                [ ] -     MessagePostProcess message_post_process = 15;
-                [ ] -     TimelineEvent timeline_event = 16;
-                [ ] -     UserData user_data = 17;
-                [ ] -     Shutdown shutdown = 18;
-                [ ] -     Log log = 19;
-                [ ] -     Err err = 20;
-                [ ] -     SendToPlatfroms send_to_platforms = 21;  /*if received and module has perms, used to tell the engine to send a message to all chats*/
-            [ ] -   }
+- [ ] - Protocol Stability First: Prioritize locking down the Protobuf schema over adding new features.
+- [ ] - test input module, which will connect as: adapter, preprocess, inprocess, and postprocess, to verify dataflow
+    - [ ] - message Container { /* general template for communicating messages */
+        - [ ] -   int32 version = 1; /* version for disbatching */
+        - [ ] -   string auth_token = 3; /* JWT for auth */
+        - [ ] -   string module_name = 4; /* used for displaying to user and for internal resource mgmt */
+        - [ ] -   string module_instance_uuid7 = 5; /*if is a connection request, will ignore this*/
+            - [ ] -   oneof payload {
+                - [ ] -     ConnectionRequest connection_request = 7;
+                - [ ] -     ConnectionRequestReturn connection_request_return = 8;
+                - [ ] -     AuthVerify auth_verify = 9;
+                - [ ] -     AuthNew auth_new = 10;
+                - [ ] -     Command command_payload = 11;
+                - [ ] -     Commands commands_payload = 12;
+                - [ ] -     MessagePreProcess message_pre_process = 13;
+                - [ ] -     MessageInProcess message_in_process = 14;
+                - [ ] -     MessagePostProcess message_post_process = 15;
+                - [ ] -     TimelineEvent timeline_event = 16;
+                - [ ] -     UserData user_data = 17;
+                - [ ] -     Shutdown shutdown = 18;
+                - [ ] -     Log log = 19;
+                - [ ] -     Err err = 20;
+                - [ ] -     SendToPlatfroms send_to_platforms = 21;  /*if received and module has perms, used to tell the engine to send a message to all chats*/
+            - [ ] -   }
 
 #### checkpoint 2: engine modules
-[ ] - one file import for the following langs:
-    [ ] - C (#import <cockatiel_lib.h/c> or cmake)
-    [ ] - C# (dotnet package?)
-    [ ] - gdScript (file/folder you paste into your project, then const MyLib = preload("res://path/to/external_lib.gd"))
-    [ ] - javaScript (ie: import { chunk } from './libs/cockatiel_lib.js';)
-    [ ] - python (cockatiel = get("https://github.com"))
-    [ ] - rust (use "path/to/file/cockatiel_lib.rs")
-[ ] - timeline_database
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - add event
-    [ ] - get event
-[ ] - user_database
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - check if config exists and is valid
-    [ ] - init table
-    [ ] - user control
-        [ ] - read user
-        [ ] - write user
-        [ ] - delete user
-    [ ] - user value control
-        [ ] - read value from user (via uuid7)
-        [ ] - write value from user (via uuid7)
-        [ ] - delete user from user (via uuid7)
-    [ ] - subprocess that connects and listens for the following commands:
-        [ ] - commendment 
-        [ ] - reprimand
-        [ ] - ban
-        [ ] - timeout
+- [ ] - one file import for the following langs:
+    - [ ] - C (#import <cockatiel_lib.h/c> or cmake)
+    - [ ] - C# (dotnet package?)
+    - [ ] - gdScript (file/folder you paste into your project, then const MyLib = preload("res://path/to/external_lib.gd"))
+    - [ ] - javaScript (ie: import { chunk } from './libs/cockatiel_lib.js';)
+    - [ ] - python (cockatiel = get("https://github.com"))
+    - [ ] - rust (use "path/to/file/cockatiel_lib.rs")
+- [ ] - timeline_database
+    - [ ] - check and verify config
+    - [ ] - create config
+    - [ ] - add event
+    - [ ] - get event
+- [ ] - user_database
+    - [ ] - check and verify config
+    - [ ] - create config
+    - [ ] - check if config exists and is valid
+    - [ ] - init table
+    - [ ] - user control
+        - [ ] - read user
+        - [ ] - write user
+        - [ ] - delete user
+    - [ ] - user value control
+        - [ ] - read value from user (via uuid7)
+        - [ ] - write value from user (via uuid7)
+        - [ ] - delete user from user (via uuid7)
+    - [ ] - subprocess that connects and listens for the following commands:
+        - [ ] - commendment 
+        - [ ] - reprimand
+        - [ ] - ban
+        - [ ] - timeout
 
 
 #### checkpoint 3: platform modules
-[ ] - discord_adapter 
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - receive messages from as specific channel in specific server
-    [ ] - receive messages from an entire server
-    [ ] - pass messages as a preprocessed module to the engine
-    [ ] - receive a "Send" protobuf send messages into discord channel as a "user" (aka: cockatiel: message)
-    [ ] - receive a "Send" send messages into discord channel as an "embed" (https://discordjs.guide/legacy/popular-topics/embeds)
-    [ ] - ban user
-        [ ] - -d --duration
-        [ ] - -r --reason
-    [ ] - timeout user
-        [ ] - -d --duration
-        [ ] - -r --reason
-[ ] - kick_adapter
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - read messages from chat 
-    [ ] - pass messages as a preprocessed module to the engine
-    [ ] - send messages into chat
-    [ ] - ban user
-        [ ] - -d --duration
-        [ ] - -r --reason
-    [ ] - timeout user
-        [ ] - -d --duration
-        [ ] - -r --reason
-[ ] - twitch_adapter
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - read messages from chat 
-    [ ] - pass messages as a preprocessed module to the engine
-    [ ] - send messages into chat
-    [ ] - ban user
-        [ ] - -d --duration
-        [ ] - -r --reason
-    [ ] - timeout user
-        [ ] - -d --duration
-        [ ] - -r --reason
-[ ] - youtube_adapter
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - read messages from chat 
-    [ ] - pass messages as a preprocessed module to the engine
-    [ ] - send messages into chat
-    [ ] - ban user
-        [ ] - -d --duration
-        [ ] - -r --reason
-    [ ] - timeout user
-        [ ] - -d --duration
-        [ ] - -r --reason
+- [ ] - discord_adapter 
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - receive messages from as specific channel in specific server
+   - [ ] - receive messages from an entire server
+   - [ ] - pass messages as a preprocessed module to the engine
+   - [ ] - receive a "Send" protobuf send messages into discord channel as a "user" (aka: cockatiel: message)
+   - [ ] - receive a "Send" send messages into discord channel as an "embed" (https://discordjs.guide/legacy/popular-topics/embeds)
+   - [ ] - ban user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+   - [ ] - timeout user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+-[ ] - kick_adapter
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - read messages from chat 
+   - [ ] - pass messages as a preprocessed module to the engine
+   - [ ] - send messages into chat
+   - [ ] - ban user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+   - [ ] - timeout user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+- [ ] - twitch_adapter
+    - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - read messages from chat 
+   - [ ] - pass messages as a preprocessed module to the engine
+   - [ ] - send messages into chat
+   - [ ] - ban user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+   - [ ] - timeout user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+- [ ] - youtube_adapter
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - read messages from chat 
+   - [ ] - pass messages as a preprocessed module to the engine
+   - [ ] - send messages into chat
+   - [ ] - ban user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
+   - [ ] - timeout user
+       - [ ] - -d --duration
+       - [ ] - -r --reason
 
 #### checkpoint 4: processing modules
-[ ] - banned words manager
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - parse message for banned words
-        [ ] - no spaces (thisisastringofbadwords)
-        [ ] - leet words (ch33z3)
-        [ ] - extra spaces (b a n n e d _ w o r d)
-    [ ] - flag message for review
-    if banned word is found:
-    [ ] - soft censor word (a food i really don't like is c!!!!e)
-    [ ] - mid censor word (a food i really don't like is c!!!!!)
-    [ ] - hard censor word (a food i really don't like is !!!!!!)
-    [ ] - replace word (a food i really don't like is [cheese -> apples])
-    [ ] - replace replace sentance ([a food i really don't like is cheese -> sometimes i dream of cheese])
-    [ ] - censor sentance (!!!!!!!)
-    [ ] - OPTIONAL: lightweight llm review such as 
-        [ ] - thurough checking with flags [llama-guard-3-1b](https://huggingface.co/meta-llama/Llama-Guard-3-1B) 
-        [ ] - quick check with 0-1 probability [deberta-v3-small](https://huggingface.co/microsoft/deberta-v3-small)
-[ ] - score messages (good reference is the sustem for animal crossing new horizons)
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - contextual rewards/punishments
-        [ ] - punctuation
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - questions
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - length
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - emoji
-        [ ] - frequency (too fast/slow)
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - bad punctuation
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - spam (ie: asdlfkjsqaldkfja, bbbbbb)
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - no spacing 
-            [ ] - toggle
-            [ ] - user setable score value
-        [ ] - wordless messages (ie: use trigrams to determine if word is valid)
-            [ ] - toggle
-            [ ] - user setable score value
-[ ] - tts_module
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - allow users to choose custom model form local file
-    [ ] - take in string via PostProcessMessage
-    [ ] - render message via desired model/method
-        [ ] - add fallback if there's an error ie model missing, render fail, etc
-    [ ] - play rendered tts message
-    [ ] - volume for the tts module
+- [ ] - banned words manager
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - parse message for banned words
+       - [ ] - no spaces (thisisastringofbadwords)
+       - [ ] - leet words (ch33z3)
+       - [ ] - extra spaces (b a n n e d _ w o r d)
+   - [ ] - flag message for review
+   - if banned word is found:
+   - [ ] - soft censor word (a food i really don't like is c!!!!e)
+   - [ ] - mid censor word (a food i really don't like is c!!!!!)
+   - [ ] - hard censor word (a food i really don't like is !!!!!!)
+   - [ ] - replace word (a food i really don't like is [cheese -> apples])
+   - [ ] - replace replace sentance ([a food i really don't like is cheese -> sometimes i dream of cheese])
+   - [ ] - censor sentance (!!!!!!!)
+   - [ ] - OPTIONAL: lightweight llm review such as 
+       - [ ] - thurough checking with flags [llama-guard-3-1b](https://huggingface.co/meta-llama/Llama-Guard-3-1B) 
+       - [ ] - quick check with 0-1 probability [deberta-v3-small](https://huggingface.co/microsoft/deberta-v3-small)
+- [ ] - score messages (good reference is the sustem for animal crossing new horizons)
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - contextual rewards/punishments
+       - [ ] - punctuation
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - questions
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - length
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - emoji
+       - [ ] - frequency (too fast/slow)
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - bad punctuation
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - spam (ie: asdlfkjsqaldkfja, bbbbbb)
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - no spacing 
+           - [ ] - toggle
+           - [ ] - user setable score value
+       - [ ] - wordless messages (ie: use trigrams to determine if word is valid)
+           - [ ] - toggle
+           - [ ] - user setable score value
+- [ ] - tts_module
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - allow users to choose custom model form local file
+   - [ ] - take in string via PostProcessMessage
+   - [ ] - render message via desired model/method
+       - [ ] - add fallback if there's an error ie model missing, render fail, etc
+   - [ ] - play rendered tts message
+   - [ ] - volume for the tts module
 
 #### checkpoint 5: minimal-UI
-[ ] - term_chat
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - disable custom colors (global)
-    [ ] - show user (with color)
-        [ ] - toggle for username 
-        [ ] - toggle for color 
-    [ ] - show platform
-        [ ] - toggle for username 
-        [ ] - toggle for color 
-    [ ] - show user status  (ie sponsor/mod/admin/owner and commendation/reprimand, either being colored)
-        [ ] - toggle for user priv
-        [ ] - toggle for user repriment
-        [ ] - toggle for colors
-    [ ] - show user rank (ie opal/trash/other)
-        [ ] - toggle for display
-        [ ] - toggle for colors
-    [ ] - disappear after x seconds
-        [ ] - options for how the message is removed
-        [ ] - toggle on/off
-        [ ] - toggle for setting
-    [ ] - message easing to let the chat messages feel "smoother" (display messages slower if there's a burst (but not too much that they overflow and some never get seen), and send instantly if there hasn't been messages in a while)
-        [ ] - target messages/minute
-        [ ] - toggle on/off (if off send instantly)
-    [ ] - emoji map, ie take in :emoji_from_platform:
-        [ ] - toggle for setting
-    [ ] - display images and gifs as aciiart
-        [ ] - toggle
-        [ ] - adaptive to size
-        [ ] - use [TheZoraiz/ascii-image-conver](https://github.com/TheZoraiz/ascii-image-converter) maybe? (not an endorcement, need to inspect)
+- [ ] - term_chat
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - disable custom colors (global)
+   - [ ] - show user (with color)
+       - [ ] - toggle for username 
+       - [ ] - toggle for color 
+   - [ ] - show platform
+       - [ ] - toggle for username 
+       - [ ] - toggle for color 
+   - [ ] - show user status  (ie sponsor/mod/admin/owner and commendation/reprimand, either being colored)
+       - [ ] - toggle for user priv
+       - [ ] - toggle for user repriment
+       - [ ] - toggle for colors
+   - [ ] - show user rank (ie opal/trash/other)
+       - [ ] - toggle for display
+       - [ ] - toggle for colors
+   - [ ] - disappear after x seconds
+       - [ ] - options for how the message is removed
+       - [ ] - toggle on/off
+       - [ ] - toggle for setting
+   - [ ] - message easing to let the chat messages feel "smoother" (display messages slower if there's a burst (but not too much that they overflow and some never get seen), and send instantly if there hasn't been messages in a while)
+       - [ ] - target messages/minute
+       - [ ] - toggle on/off (if off send instantly)
+   - [ ] - emoji map, ie take in :emoji_from_platform:
+       - [ ] - toggle for setting
+   - [ ] - display images and gifs as aciiart
+       - [ ] - toggle
+       - [ ] - adaptive to size
+       - [ ] - use [TheZoraiz/ascii-image-conver](https://github.com/TheZoraiz/ascii-image-converter) maybe? (not an endorcement, need to inspect)
 
 #### checkpoint 6: mod tools
-[ ] - mod_chat (fork that builds ontop of term_chat)
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - show user status  (ie sponsor/mod/admin/owner and commendation/reprimand)
-        [ ] - toggle for setting
-    [ ] - show user rank (ie opal/trash/other)
-        [ ] - toggle for setting
-    [ ] - disappear after x seconds
-        [ ] - toggle for setting
-    [ ] - disable custom colors
-        [ ] - toggle for setting
-    [ ] - message easing to let the chat messages feel "smoother" (display messages slower if there's a burst (but not too much that they overflow and some never get seen), and send instantly if there hasn't been messages in a while)
-        [ ] - toggle for setting (if off always push asap)
-        [ ] - slider for "smooth amount" (ie, target x messages per second)
-    [ ] - send message (as user/as system)
-    [ ] - display images and gifs
-        [ ] - toggle for profile pictures (display: none, after review, all)
-        [ ] - toggle for images/gifs within messages (display: none, after review, all)
-    [ ] - emoji map, ie take in :emoji_from_platform:
-[ ] - timeline_web_ui
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - get messages from user
-    [ ] - user notes
-        [ ] - get
-        [ ] - display
-        [ ] - adjsut (update on type)
-    [ ] - get errors
-    [ ] - get logs
-    [ ] - get user(s) via property (ie: bans, commendment, reprimends, totalscore, etc)
-    [ ] - display for the users properties
+- [ ] - mod_chat (fork that builds ontop of term_chat)
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - show user status  (ie sponsor/mod/admin/owner and commendation/reprimand)
+       - [ ] - toggle for setting
+   - [ ] - show user rank (ie opal/trash/other)
+       - [ ] - toggle for setting
+   - [ ] - disappear after x seconds
+       - [ ] - toggle for setting
+   - [ ] - disable custom colors
+       - [ ] - toggle for setting
+   - [ ] - message easing to let the chat messages feel "smoother" (display messages slower if there's a burst (but not too much that they overflow and some never get seen), and send instantly if there hasn't been messages in a while)
+       - [ ] - toggle for setting (if off always push asap)
+       - [ ] - slider for "smooth amount" (ie, target x messages per second)
+   - [ ] - send message (as user/as system)
+   - [ ] - display images and gifs
+       - [ ] - toggle for profile pictures (display: none, after review, all)
+       - [ ] - toggle for images/gifs within messages (display: none, after review, all)
+   - [ ] - emoji map, ie take in :emoji_from_platform:
+- [ ] - timeline_web_ui
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - get messages from user
+   - [ ] - user notes
+       - [ ] - get
+       - [ ] - display
+       - [ ] - adjsut (update on type)
+   - [ ] - get errors
+   - [ ] - get logs
+   - [ ] - get user(s) via property (ie: bans, commendment, reprimends, totalscore, etc)
+   - [ ] - display for the users properties
 
 #### checkpoint 7: extend modules and features
-[ ] - one file import for the following langs:
-    [ ] - C++ (#import <cockatiel_lib.h/c> or cmake)
-    [ ] - odin (import "<path/to/file/cockatiel_lib>")
-    [ ] - java (???)
-    [ ] - lua (local my_lib = require("mymodule"))
-[ ] - language constrainer 
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - impl cockatiel_lib for protobuf communication
-    [ ] - UTF-8 codes of valid characters for language
-        [ ] - toggle for emojis
-        [ ] - toggle for characters commonly used for expressive chars such as "ඞ" or "(๑ > ᴗ < ๑)" etc
-    [ ] - create map file for language and construct to said map file (plus toggles)
-[ ] - web_chat_renderer
-    [ ] - check and verify config
-    [ ] - create config
-    [ ] - take in PostProcessMessage with user data
-    [ ] - display message in css based chat window
-    [ ] - options: 
-        [ ] - disappear after x seconds
-        [ ] - animations on/off
-        [ ] - disable custom colors
+- [ ] - one file import for the following langs:
+   - [ ] - C++ (#import <cockatiel_lib.h/c> or cmake)
+   - [ ] - odin (import "<path/to/file/cockatiel_lib>")
+   - [ ] - java (???)
+   - [ ] - lua (local my_lib = require("mymodule"))
+- [ ] - language constrainer 
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - impl cockatiel_lib for protobuf communication
+   - [ ] - UTF-8 codes of valid characters for language
+       - [ ] - toggle for emojis
+       - [ ] - toggle for characters commonly used for expressive chars such as "ඞ" or "(๑ > ᴗ < ๑)" etc
+   - [ ] - create map file for language and construct to said map file (plus toggles)
+- [ ] - web_chat_renderer
+   - [ ] - check and verify config
+   - [ ] - create config
+   - [ ] - take in PostProcessMessage with user data
+   - [ ] - display message in css based chat window
+   - [ ] - options: 
+       - [ ] - disappear after x seconds
+       - [ ] - animations on/off
+       - [ ] - disable custom colors
 
  
 ## about the project:
