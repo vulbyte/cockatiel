@@ -1,0 +1,14 @@
+{
+  "name": "cockatiel-test-runner",
+  "description": "Compliance & benchmark suite: verifies the pre/in/post message chain against the real engine, then archives results to the timeline.",
+  "version": "0.1.0",
+  "capabilities": "input",
+  "root_file": "./src/main.rs",
+  "launch_command": "cargo",
+  "command_flags": [
+    "run",
+    "--release"
+  ],
+  "autostart": true,
+  "terminal": false
+}

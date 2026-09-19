@@ -1,0 +1,161 @@
+syntax = "proto3";
+
+// ==========================================
+// USER DATABASE PROTOCOL
+// ==========================================
+// This protocol is DISCONNECTED from cockatiel-lib on purpose.
+// The user-database and timeline are engine-internal resources and
+// must NOT be accessible to modules. Only the engine (and privileged
+// control surfaces such as the TUI) may talk to this service over
+// its own WebSocket.
+// ==========================================
+
+package cockatiel_userdb.v1;
+
+// ── Data model ────────────────────────────────────────────
+
+// A channel a user is known on. A user can span multiple platforms
+// and multiple channels on the same platform.
+message ChannelRef {
+  string platform = 1;      // e.g. "twitch", "kick", "youtube"
+  string channel_id = 2;    // platform-native channel id
+  string handle = 3;        // user-facing handle / @name (best-effort)
+}
+
+// A user record as stored in the user database.
+message User {
+  string uuid7 = 1;         // primary key
+  string username = 2;      // display name / handle
+
+  bool is_sponsor = 3;
+  bool is_moderator = 4;
+  bool is_admin = 5;
+  bool is_owner = 6;
+
+  int64 score = 7;          // net score (commendations - reprimands)
+  int64 commendations = 8;
+  int64 reprimands = 9;
+
+  repeated ChannelRef channels = 10;
+  string flags = 11;        // JSON blob of module-defined metadata
+
+  int64 created_at = 12;
+  int64 updated_at = 13;
+}
+
+// ── Requests ──────────────────────────────────────────────
+
+message AddUserRequest {
+  string username = 1;
+  ChannelRef channel = 2;   // the channel they were first seen on
+}
+
+message DeleteUserRequest {
+  string uuid7 = 1;
+  // The actor performing the delete (used for permission checks).
+  string actor_uuid7 = 2;
+  string actor_role = 3;    // "owner" | "admin" | "moderator" | "user"
+}
+
+message ScoreRequest {
+  string uuid7 = 1;
+  int64 delta = 2;          // signed change; add=+n, remove=-n
+  string reason = 3;
+}
+
+message AddChannelRequest {
+  string uuid7 = 1;
+  ChannelRef channel = 2;
+}
+
+message RemoveChannelRequest {
+  string uuid7 = 1;
+  string platform = 2;
+  string channel_id = 3;
+}
+
+message GetUserRequest {
+  // Lookup by uuid7 OR by (platform + channel_id OR handle).
+  string uuid7 = 1;
+  string platform = 2;
+  string channel_id = 3;
+  string handle = 4;
+}
+
+message ListUsersRequest {
+  string platform = 1;      // optional filter
+  int32 limit = 2;          // 0 = default (100)
+  int32 offset = 3;
+}
+
+message UpdateFlagsRequest {
+  string uuid7 = 1;
+  string flags = 2;         // full JSON blob replacement
+}
+
+message SetRolesRequest {
+  string uuid7 = 1;
+  string actor_uuid7 = 2;
+  string actor_role = 3;
+  // Only owner/admin may change these.
+  bool is_sponsor = 4;
+  bool is_moderator = 5;
+  bool is_admin = 6;
+  bool is_owner = 7;
+}
+
+// User value control: a key-value store attached to a user.
+message UserValueRequest {
+  string uuid7 = 1;
+  string key = 2;
+  string value = 3;   // JSON-encodable string value
+}
+
+message UserValueResult {
+  string key = 1;
+  string value = 2;
+}
+
+message UserValueDeleteRequest {
+  string uuid7 = 1;
+  string key = 2;
+}
+
+message UserValueListRequest {
+  string uuid7 = 1;
+}
+
+message UserDbRequest {
+  // Every request must carry the engine's shared auth token so only the
+  // engine (or privileged control surface) can talk to this service.
+  string auth_token = 1;
+
+  oneof op {
+    AddUserRequest add_user = 2;
+    DeleteUserRequest delete_user = 3;
+    ScoreRequest add_score = 4;
+    ScoreRequest remove_score = 5;
+    AddChannelRequest add_channel = 6;
+    RemoveChannelRequest remove_channel = 7;
+    GetUserRequest get_user = 8;
+    ListUsersRequest list_users = 9;
+    UpdateFlagsRequest update_flags = 10;
+    SetRolesRequest set_roles = 11;
+    UserValueRequest read_user_value = 12;
+    UserValueRequest write_user_value = 13;
+    UserValueDeleteRequest delete_user_value = 14;
+    UserValueListRequest list_user_values = 15;
+  }
+}
+
+// ── Responses ─────────────────────────────────────────────
+
+message UserDbResponse {
+  bool success = 1;
+  string error = 2;         // human-readable error on failure
+  User user = 3;            // populated for add/get/score/channel ops
+  repeated User users = 4;  // populated for list
+  string message = 5;       // human-readable status message
+  UserValueResult value = 6;              // populated for read_user_value / write_user_value
+  repeated UserValueResult values = 7;    // populated for list_user_values
+}

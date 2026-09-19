@@ -16,3 +16,6 @@
 [submodule "modules/cockatiel_module-youtube_adapter-rs"]
 	path = modules/cockatiel_module-youtube_adapter-rs
 	url = https://github.com/vulbyte/cockatiel_module-youtube_adapter-rs
+[submodule "modules/cockatiel_module-stress_test-rs"]
+	path = modules/cockatiel_module-stress_test-rs
+	url = https://github.com/vulbyte/cockatiel_module-stress_test-rs

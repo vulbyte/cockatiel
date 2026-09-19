@@ -1,0 +1,17 @@
+[package]
+name = "cockatiel-user-database"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+turso = "0.1.0"
+prost = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v7", "fast-rng"] }
+
+[build-dependencies]
+prost-build = "0.13"

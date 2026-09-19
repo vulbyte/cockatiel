@@ -1,0 +1,20 @@
+[package]
+name = "cockatiel-test-runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cockatiel-client = { path = "../cockatiel_engine-rs/cockatiel_lib/rust" }
+tokio = { version = "1.38", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+prost = "0.14"
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v7", "fast-rng"] }
+
+[[bin]]
+name = "cockatiel-test-runner"
+path = "src/main.rs"
+
+[build-dependencies]
+prost-build = "0.13"

@@ -1,0 +1,27 @@
+{
+  "borders": {
+    "inactive": "gray",
+    "logo": "orange",
+    "log": "yellow",
+    "db_platforms": "magenta",
+    "modules": "cyan",
+    "hotkey_bar": "green",
+    "chart": "blue"
+  },
+  "status": {
+    "online": "green",
+    "connected": "green",
+    "starting": "yellow",
+    "error": "lightred",
+    "offline": "gray",
+    "stopped": "yellow",
+    "disconnected": "yellow",
+    "crashed": "red"
+  },
+  "platforms": {
+    "twitch": "purple",
+    "youtube": "red",
+    "kick": "green",
+    "discord": "blue"
+  }
+}

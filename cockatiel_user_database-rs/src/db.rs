@@ -1,0 +1,452 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
+
+use crate::proto::{ChannelRef, User};
+
+pub const SCHEMA_VERSION: i32 = 1;
+
+const CREATE_USERS: &str = "
+CREATE TABLE IF NOT EXISTS users (
+    uuid7 TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    username TEXT NOT NULL,
+    is_sponsor INTEGER NOT NULL DEFAULT 0,
+    is_moderator INTEGER NOT NULL DEFAULT 0,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    is_owner INTEGER NOT NULL DEFAULT 0,
+    score INTEGER NOT NULL DEFAULT 0,
+    commendations INTEGER NOT NULL DEFAULT 0,
+    reprimands INTEGER NOT NULL DEFAULT 0,
+    flags TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)";
+
+const CREATE_CHANNELS: &str = "
+CREATE TABLE IF NOT EXISTS user_channels (
+    user_uuid7 TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    handle TEXT,
+    PRIMARY KEY (user_uuid7, platform, channel_id)
+)";
+
+const CREATE_USER_VALUES: &str = "
+CREATE TABLE IF NOT EXISTS user_values (
+    user_uuid7 TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_uuid7, key)
+)";
+
+#[derive(Debug, Clone)]
+pub struct UserDatabase {
+    local: Arc<Mutex<Option<turso::Connection>>>,
+}
+
+impl UserDatabase {
+    pub fn new() -> Self {
+        Self {
+            local: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub async fn initialize(&self, path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        let db = turso::Builder::new_local(path.to_string_lossy().as_ref())
+            .build()
+            .await?;
+        let conn = db.connect()?;
+
+        conn.execute(CREATE_USERS, ()).await?;
+        conn.execute(CREATE_CHANNELS, ()).await?;
+        conn.execute(CREATE_USER_VALUES, ()).await?;
+
+        {
+            let mut local = self.local.lock().await;
+            *local = Some(conn);
+        }
+
+        println!("[UserDB] Initialized at {:?}", path);
+        Ok(())
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    async fn conn(&self) -> Result<turso::Connection, Box<dyn std::error::Error>> {
+        let guard = self.local.lock().await;
+        guard.as_ref().cloned().ok_or("User database not initialized".into())
+    }
+
+    // ── Core operations ────────────────────────────────────
+
+    pub async fn add_user(
+        &self,
+        username: &str,
+        channel: Option<&ChannelRef>,
+    ) -> Result<User, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let now = Self::now_ms();
+        let uuid7 = uuid::Uuid::now_v7().to_string();
+
+        conn.execute(
+            "INSERT INTO users (uuid7, schema_version, username, flags, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '{}', ?4, ?4)",
+            turso::params![uuid7.clone(), SCHEMA_VERSION, username, now],
+        )
+        .await?;
+
+        if let Some(ch) = channel {
+            // Turso/Limbo does not support INSERT OR IGNORE / ON CONFLICT.
+            let exists = self
+                .channel_exists(&uuid7, &ch.platform, &ch.channel_id)
+                .await?;
+            if !exists {
+                conn.execute(
+                    "INSERT INTO user_channels (user_uuid7, platform, channel_id, handle)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    turso::params![uuid7.clone(), ch.platform.clone(), ch.channel_id.clone(), ch.handle.clone()],
+                )
+                .await?;
+            }
+        }
+
+        self.get_user_by_uuid(&uuid7).await?.ok_or("Failed to create user".into())
+    }
+
+    /// Find a user by (platform, channel_id) or handle. Returns existing user if found.
+    pub async fn find_user_by_channel(
+        &self,
+        platform: &str,
+        channel_id: &str,
+        handle: &str,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+
+        // Look up by (platform, channel_id) first.
+        let mut rows = conn.query(
+            "SELECT user_uuid7 FROM user_channels WHERE platform = ?1 AND channel_id = ?2",
+            turso::params![platform, channel_id],
+        ).await?;
+        if let Some(row) = rows.next().await? {
+            let uuid7: String = row.get(0)?;
+            return self.get_user_by_uuid(&uuid7).await;
+        }
+
+        // Fall back to handle lookup.
+        if !handle.is_empty() {
+            let mut rows = conn.query(
+                "SELECT user_uuid7 FROM user_channels WHERE platform = ?1 AND handle = ?2",
+                turso::params![platform, handle],
+            ).await?;
+            if let Some(row) = rows.next().await? {
+                let uuid7: String = row.get(0)?;
+                return self.get_user_by_uuid(&uuid7).await;
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub async fn get_user_by_uuid(&self, uuid7: &str) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+
+        let mut rows = conn.query(
+            "SELECT uuid7, username, is_sponsor, is_moderator, is_admin, is_owner, score, commendations, reprimands, flags, created_at, updated_at
+             FROM users WHERE uuid7 = ?1",
+            turso::params![uuid7],
+        ).await?;
+
+        if let Some(row) = rows.next().await? {
+            let user_uuid: String = row.get(0)?;
+            let username: String = row.get(1)?;
+            let is_sponsor: i64 = row.get(2)?;
+            let is_moderator: i64 = row.get(3)?;
+            let is_admin: i64 = row.get(4)?;
+            let is_owner: i64 = row.get(5)?;
+            let score: i64 = row.get(6)?;
+            let commendations: i64 = row.get(7)?;
+            let reprimands: i64 = row.get(8)?;
+            let flags: String = row.get(9)?;
+            let created_at: i64 = row.get(10)?;
+            let updated_at: i64 = row.get(11)?;
+
+            let channels = self.get_channels(&user_uuid).await?;
+
+            Ok(Some(User {
+                uuid7: user_uuid,
+                username,
+                is_sponsor: is_sponsor != 0,
+                is_moderator: is_moderator != 0,
+                is_admin: is_admin != 0,
+                is_owner: is_owner != 0,
+                score,
+                commendations,
+                reprimands,
+                channels,
+                flags,
+                created_at,
+                updated_at,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_channels(&self, uuid7: &str) -> Result<Vec<ChannelRef>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let mut rows = conn.query(
+            "SELECT platform, channel_id, handle FROM user_channels WHERE user_uuid7 = ?1",
+            turso::params![uuid7],
+        ).await?;
+
+        let mut channels = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let platform: String = row.get(0)?;
+            let channel_id: String = row.get(1)?;
+            let handle: Option<String> = row.get(2)?;
+            channels.push(ChannelRef {
+                platform,
+                channel_id,
+                handle: handle.unwrap_or_default(),
+            });
+        }
+        Ok(channels)
+    }
+
+    async fn channel_exists(&self, uuid7: &str, platform: &str, channel_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let mut rows = conn.query(
+            "SELECT 1 FROM user_channels WHERE user_uuid7 = ?1 AND platform = ?2 AND channel_id = ?3",
+            turso::params![uuid7, platform, channel_id],
+        ).await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    pub async fn delete_user(&self, uuid7: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        conn.execute("DELETE FROM user_channels WHERE user_uuid7 = ?1", turso::params![uuid7]).await?;
+        let changed = conn.execute("DELETE FROM users WHERE uuid7 = ?1", turso::params![uuid7]).await?;
+        Ok(changed > 0)
+    }
+
+    pub async fn adjust_score(
+        &self,
+        uuid7: &str,
+        delta: i64,
+        is_commendation: bool,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let now = Self::now_ms();
+        let field = if is_commendation { "commendations" } else { "reprimands" };
+
+        conn.execute(
+            &format!(
+                "UPDATE users SET score = score + ?1, {} = {} + 1, updated_at = ?3 WHERE uuid7 = ?2",
+                field, field
+            ),
+            turso::params![delta, uuid7, now],
+        ).await?;
+
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    pub async fn add_channel(
+        &self,
+        uuid7: &str,
+        channel: Option<&ChannelRef>,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let Some(channel) = channel else {
+            return self.get_user_by_uuid(uuid7).await;
+        };
+        let conn = self.conn().await?;
+        let exists = self.channel_exists(uuid7, &channel.platform, &channel.channel_id).await?;
+        if !exists {
+            conn.execute(
+                "INSERT INTO user_channels (user_uuid7, platform, channel_id, handle)
+                 VALUES (?1, ?2, ?3, ?4)",
+                turso::params![uuid7, channel.platform.clone(), channel.channel_id.clone(), channel.handle.clone()],
+            ).await?;
+        }
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    pub async fn remove_channel(
+        &self,
+        uuid7: &str,
+        platform: &str,
+        channel_id: &str,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "DELETE FROM user_channels WHERE user_uuid7 = ?1 AND platform = ?2 AND channel_id = ?3",
+            turso::params![uuid7, platform, channel_id],
+        ).await?;
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    pub async fn update_flags(
+        &self,
+        uuid7: &str,
+        flags: &str,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET flags = ?2, updated_at = ?3 WHERE uuid7 = ?1",
+            turso::params![uuid7, flags, Self::now_ms()],
+        ).await?;
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    pub async fn set_roles(
+        &self,
+        uuid7: &str,
+        is_sponsor: bool,
+        is_moderator: bool,
+        is_admin: bool,
+        is_owner: bool,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET is_sponsor = ?2, is_moderator = ?3, is_admin = ?4, is_owner = ?5, updated_at = ?6 WHERE uuid7 = ?1",
+            turso::params![
+                uuid7,
+                is_sponsor as i64,
+                is_moderator as i64,
+                is_admin as i64,
+                is_owner as i64,
+                Self::now_ms(),
+            ],
+        ).await?;
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    // ── User value control (key-value per user) ─────────────
+
+    pub async fn write_user_value(
+        &self,
+        uuid7: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        // Ensure the user exists first.
+        if self.get_user_by_uuid(uuid7).await?.is_none() {
+            return Ok(None);
+        }
+        // Upsert without ON CONFLICT (unsupported in turso/Limbo).
+        let exists = {
+            let mut rows = conn.query(
+                "SELECT 1 FROM user_values WHERE user_uuid7 = ?1 AND key = ?2",
+                turso::params![uuid7, key],
+            ).await?;
+            rows.next().await?.is_some()
+        };
+        if exists {
+            conn.execute(
+                "UPDATE user_values SET value = ?3, updated_at = ?4 WHERE user_uuid7 = ?1 AND key = ?2",
+                turso::params![uuid7, key, value, Self::now_ms()],
+            ).await?;
+        } else {
+            conn.execute(
+                "INSERT INTO user_values (user_uuid7, key, value, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                turso::params![uuid7, key, value, Self::now_ms()],
+            ).await?;
+        }
+        Ok(Some(value.to_string()))
+    }
+
+    pub async fn read_user_value(
+        &self,
+        uuid7: &str,
+        key: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let mut rows = conn.query(
+            "SELECT value FROM user_values WHERE user_uuid7 = ?1 AND key = ?2",
+            turso::params![uuid7, key],
+        ).await?;
+        if let Some(row) = rows.next().await? {
+            Ok(Some(row.get::<String>(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn delete_user_value(
+        &self,
+        uuid7: &str,
+        key: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let changed = conn.execute(
+            "DELETE FROM user_values WHERE user_uuid7 = ?1 AND key = ?2",
+            turso::params![uuid7, key],
+        ).await?;
+        Ok(changed > 0)
+    }
+
+    pub async fn list_user_values(
+        &self,
+        uuid7: &str,
+    ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let mut rows = conn.query(
+            "SELECT key, value FROM user_values WHERE user_uuid7 = ?1 ORDER BY key",
+            turso::params![uuid7],
+        ).await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let key: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            out.push((key, value));
+        }
+        Ok(out)
+    }
+
+    pub async fn list_users(
+        &self,
+        platform: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let limit = if limit <= 0 { 100 } else { limit };
+        let offset = if offset < 0 { 0 } else { offset };
+
+        let mut users = Vec::new();
+        if platform.is_empty() {
+            let mut rows = conn.query(
+                "SELECT uuid7 FROM users ORDER BY score DESC LIMIT ?1 OFFSET ?2",
+                turso::params![limit, offset],
+            ).await?;
+            while let Some(row) = rows.next().await? {
+                let uuid7: String = row.get(0)?;
+                if let Some(user) = self.get_user_by_uuid(&uuid7).await? {
+                    users.push(user);
+                }
+            }
+        } else {
+            let mut rows = conn.query(
+                "SELECT DISTINCT uc.user_uuid7 FROM user_channels uc
+                 WHERE uc.platform = ?1 ORDER BY uc.user_uuid7 LIMIT ?2 OFFSET ?3",
+                turso::params![platform, limit, offset],
+            ).await?;
+            while let Some(row) = rows.next().await? {
+                let uuid7: String = row.get(0)?;
+                if let Some(user) = self.get_user_by_uuid(&uuid7).await? {
+                    users.push(user);
+                }
+            }
+        }
+
+        Ok(users)
+    }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "score-messages",
+  "description": "preprocess module that scores chat messages contextually (punctuation, questions, length, spam, no-spacing, wordless) and applies the delta to the user's score",
+  "version": "0.1.0",
+  "capabilities": "preprocess",
+  "root_file": "./src/main.rs",
+  "launch_command": "cargo run",
+  "command_flags": ["--release"],
+  "autostart": true,
+  "credentials": [
+    { "key": "punctuation_toggle", "label": "Punctuation Toggle", "sensitive": false, "list": false },
+    { "key": "punctuation_score", "label": "Punctuation Score", "sensitive": false, "list": false },
+    { "key": "question_toggle", "label": "Question Toggle", "sensitive": false, "list": false },
+    { "key": "question_score", "label": "Question Score", "sensitive": false, "list": false },
+    { "key": "length_toggle", "label": "Length Toggle", "sensitive": false, "list": false },
+    { "key": "length_score", "label": "Length Score", "sensitive": false, "list": false },
+    { "key": "spam_toggle", "label": "Spam Toggle", "sensitive": false, "list": false },
+    { "key": "spam_score", "label": "Spam Score", "sensitive": false, "list": false },
+    { "key": "no_spacing_toggle", "label": "No Spacing Toggle", "sensitive": false, "list": false },
+    { "key": "no_spacing_score", "label": "No Spacing Score", "sensitive": false, "list": false },
+    { "key": "wordless_toggle", "label": "Wordless Toggle", "sensitive": false, "list": false },
+    { "key": "wordless_score", "label": "Wordless Score", "sensitive": false, "list": false }
+  ]
+}

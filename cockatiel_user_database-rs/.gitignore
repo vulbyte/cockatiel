@@ -1,0 +1,14 @@
+# User database runtime files — contains user data. Never commit.
+user_data.db
+*.db-wal
+*.db-shm
+*.db-journal
+.env
+.env.local
+
+# Rust
+/target/
+**/*.rs.bk
+
+# macOS
+.DS_Store

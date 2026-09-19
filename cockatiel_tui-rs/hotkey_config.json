@@ -1,0 +1,27 @@
+{
+  "nav": {
+    "Tab": "FocusNext",
+    "BackTab": "FocusPrev",
+    "q": "Quit",
+    "Ctrl+c": "Quit"
+  },
+  "modules": {
+    "s": "StartModule",
+    "x": "StopModule",
+    "d": "DeleteModule",
+    "a": "ToggleAutostart",
+    "c": "EditCredentials",
+    "t": "RunTests",
+    "Enter": "SelectModule"
+  },
+  "chart": {
+    "1": "TimeWindow5m",
+    "2": "TimeWindow1h",
+    "3": "TimeWindow6h",
+    "4": "TimeWindow24h",
+    "+": "ZoomIn",
+    "-": "ZoomOut",
+    "Enter": "TogglePlatform",
+    "Space": "TogglePlatform"
+  }
+}
