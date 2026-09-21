@@ -797,9 +797,21 @@ impl Window for ModulesWindow {
         }
 
         if y < inner.y + inner.height {
+            let tl_bk = if stats.timeline_backup {
+                ("set", colors.status_color("online"))
+            } else {
+                ("NONE", Color::Red)
+            };
+            let ud_bk = if stats.userdb_backup {
+                ("set", colors.status_color("online"))
+            } else {
+                ("NONE", Color::Red)
+            };
             let line = Line::from(vec![
-                Span::styled("    backup:   ", Style::default().fg(Color::DarkGray)),
-                Span::styled("unknown", Style::default().fg(Color::DarkGray)),
+                Span::styled("    backup:   timeline=", Style::default().fg(Color::DarkGray)),
+                Span::styled(tl_bk.0, Style::default().fg(tl_bk.1)),
+                Span::styled(" userdb=", Style::default().fg(Color::DarkGray)),
+                Span::styled(ud_bk.0, Style::default().fg(ud_bk.1)),
             ]);
             line.render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
             y += 1;

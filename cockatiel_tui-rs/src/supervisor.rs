@@ -538,6 +538,26 @@ fn shell_quote(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('`', "\\`")
 }
 
+/// Is a process with `pid` alive? Uses `kill -0` (signal 0, no-op probe) on
+/// Unix. On Windows the pidfile mechanism isn't used, so this always reports
+/// alive (terminal modules there are detected via the engine's liveness probe).
+pub fn pid_alive(pid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// Spawn a `terminal: true` module inside a NEW terminal window so it gets a
 /// real TTY (stdin/stdout). Cross-platform: macOS (Terminal.app), Linux (first
 /// available terminal emulator), Windows (new console window).

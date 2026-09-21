@@ -1112,10 +1112,19 @@ fn handle_prompt_key(
         } else if prompt_is_local(&prompt_id) {
             // TUI-local prompts are resolved here (no engine round-trip).
             if let Some(mod_name) = prompt_id.strip_prefix("tui-local:disable-autostart:") {
-                // On "yes" disable the module's autostart.
+                // "Yes" disables autostart AND stops the crash loop — the
+                // module stays dead instead of being relaunched over and over.
                 if accepted {
                     set_autostart(plugins, mod_name, false);
-                    supervisor_log(state, format!("[supervisor] {} autostart disabled by operator", mod_name));
+                    if let Some(proc) = supervisor.remove(mod_name) {
+                        let mut proc = proc.lock().unwrap();
+                        supervisor_log(state, format!("[supervisor] Killing {} (pid {}) — crash loop stopped", mod_name, proc.pid()));
+                        proc.kill();
+                    }
+                    state.module_runs.lock().unwrap().insert(mod_name.to_string(), "stopped".to_string());
+                    supervisor_log(state, format!("[supervisor] {} disabled: autostart off + stopped (no more relaunches)", mod_name));
+                } else {
+                    supervisor_log(state, format!("[supervisor] {} left running (crash loop continues)", mod_name));
                 }
             } else if let Some(mod_name) = prompt_id.strip_prefix("tui-local:clear-config:") {
                 // On "yes" empty the module's `.env` + `config.json` values
@@ -1844,9 +1853,41 @@ fn spawn_monitor(
 ) {
     tokio::spawn(async move {
         loop {
-            // Crashed: the child process exited (not applicable to terminal
-            // modules, whose launcher detaches immediately).
-            if !is_terminal {
+            // Crashed: the child process exited. For terminal modules the
+            // launcher (e.g. osascript) detaches immediately, so instead we
+            // probe the pidfile's real pid — if the module died before it ever
+            // connected, treat it as a startup crash (recoverable), same as a
+            // non-terminal module exiting while "starting".
+            if is_terminal {
+                let pidfile = proc.lock().unwrap().terminal_pidfile.clone();
+                if let Some(pf) = pidfile {
+                    if let Ok(pid_str) = std::fs::read_to_string(&pf) {
+                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                            if !supervisor::pid_alive(pid) {
+                                let status = runs
+                                    .lock()
+                                    .unwrap()
+                                    .get(&name)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let startup = status == "starting";
+                                let connected = status == "connected";
+                                if startup {
+                                    runs.lock().unwrap().insert(name.clone(), "crashed".to_string());
+                                    // Died before the engine saw it connect —
+                                    // an unexpected failure, rebuild + relaunch.
+                                    let _ = rebuild_tx.send(name.clone());
+                                } else if connected {
+                                    runs.lock().unwrap().insert(name.clone(), "crashed".to_string());
+                                    let _ = restart_tx.send(name.clone());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
                 let mut guard = proc.lock().unwrap();
                 match guard.child.try_wait() {
                     Ok(Some(_)) => {
