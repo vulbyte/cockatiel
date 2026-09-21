@@ -1,8 +1,0 @@
-{
-  "ip": "127.0.0.1",
-  "port": 58552,
-  "pin": 0,
-  "module_name": "banned-words",
-  "position": 1,
-  "priority": 2
-}

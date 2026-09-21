@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cockatiel-client = { path = "../cockatiel_engine-rs/cockatiel_lib/rust" }
+cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "a37fe0e2ba5fad13b417cfdbbf067a95b3844249" }
 tokio = { version = "1.38", features = ["full"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
@@ -15,6 +15,3 @@ uuid = { version = "1.0", features = ["v7", "fast-rng"] }
 [[bin]]
 name = "cockatiel-test-runner"
 path = "src/main.rs"
-
-[build-dependencies]
-prost-build = "0.13"

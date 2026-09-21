@@ -19,3 +19,18 @@
 [submodule "modules/cockatiel_module-stress_test-rs"]
 	path = modules/cockatiel_module-stress_test-rs
 	url = https://github.com/vulbyte/cockatiel_module-stress_test-rs
+[submodule "modules/cockatiel_module-audit_viewer-rs"]
+	path = modules/cockatiel_module-audit_viewer-rs
+	url = https://github.com/vulbyte/cockatiel_module-audit_viewer-rs
+[submodule "modules/cockatiel_module-banned_words-rs"]
+	path = modules/cockatiel_module-banned_words-rs
+	url = https://github.com/vulbyte/cockatiel_module-banned_words-rs
+[submodule "modules/cockatiel_module-discord_adapter-rs"]
+	path = modules/cockatiel_module-discord_adapter-rs
+	url = https://github.com/vulbyte/cockatiel_module-discord_adapter-rs
+[submodule "modules/cockatiel_module-language_constrainer-rs"]
+	path = modules/cockatiel_module-language_constrainer-rs
+	url = https://github.com/vulbyte/cockatiel_module-language_constrainer-rs
+[submodule "modules/cockatiel_module-score_messages-rs"]
+	path = modules/cockatiel_module-score_messages-rs
+	url = https://github.com/vulbyte/cockatiel_module-score_messages-rs
