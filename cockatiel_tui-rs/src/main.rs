@@ -542,6 +542,7 @@ async fn run_app(
                 // (nothing is sent to the engine for these).
                 if prompt_is_credential(state, &prompt_id) {
                     cancel_credential_session(state);
+                    supervisor_log(state, "[supervisor] credential entry timed out — module was not launched");
                     continue;
                 }
                 // TUI-local prompts (e.g. "disable autostart?") just expire.
@@ -808,6 +809,18 @@ async fn handle_input_event(
             if let Some(window) = state.get_window_mut(state.active_window) {
                 if window.in_editor() {
                     if window.editor_key(key, &hotkeys) {
+                        if let Some(saved) = window.take_saved_module() {
+                            let running = state
+                                .module_runs
+                                .lock()
+                                .unwrap()
+                                .get(&saved)
+                                .map(|s| s == "connected" || s == "starting")
+                                .unwrap_or(false);
+                            if running {
+                                supervisor_log(state, format!("[supervisor] {} config saved — restart the module (x) to apply", saved));
+                            }
+                        }
                         return Ok(false);
                     }
                 }
@@ -2109,6 +2122,11 @@ async fn dispatch_action(
         }
         Action::RunTests => {
             // Run the compliance suite against the selected module.
+            supervisor_log(state, "[supervisor] test run requested");
+            if !state.connected {
+                supervisor_log(state, "[supervisor] cannot run tests — engine disconnected");
+                return Ok(false);
+            }
             let selected_name = selected_module_name(state);
             let payload = serde_json::json!({
                 "suite": "all",

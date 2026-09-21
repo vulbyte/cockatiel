@@ -361,9 +361,6 @@ pub fn default_hotkeys() -> HotkeyConfig {
     module_actions.insert(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT), Action::EditCredentials(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()), Action::EditConfig(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()), Action::RunTests);
-    module_actions.insert(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()), Action::AddNote);
-    module_actions.insert(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()), Action::ShowInfo);
-    module_actions.insert(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()), Action::SelectModule);
     module_actions.insert(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()), Action::PopOut("users".to_string()));
 
     let mut chart_actions = HashMap::new();
@@ -403,10 +400,10 @@ mod tests {
             .values()
             .any(|a| matches!(a, Action::EditConfig(_))));
         // A default binding NOT in the file still survives the merge:
-        // `n` → AddNote is a default that the file omits.
+        // `u` → PopOut("users") is a default that the file omits.
         assert!(modules
             .values()
-            .any(|a| matches!(a, Action::AddNote)));
+            .any(|a| matches!(a, Action::PopOut(ref w) if w == "users")));
     }
 
     #[test]

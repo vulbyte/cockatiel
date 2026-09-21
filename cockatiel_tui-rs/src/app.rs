@@ -121,6 +121,9 @@ pub trait Window {
     fn editor_key(&mut self, _key: KeyEvent, _hotkeys: &HotkeyConfig) -> bool { false }
     /// Paste text into the active config editor (at the cursor). Consumed?
     fn editor_paste(&mut self, _text: &str) -> bool { false }
+    /// The module whose config the editor most recently saved, if any (cleared
+    /// when read). Lets the app warn that the module must be restarted.
+    fn take_saved_module(&mut self) -> Option<String> { None }
 }
 
 pub struct AppState {

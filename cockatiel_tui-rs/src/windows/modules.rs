@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -31,6 +32,11 @@ pub struct ModulesWindow {
     /// Active config editor (takes over the window until Esc).
 
     editing: Option<ConfigEditor>,
+
+    /// Module whose config was most recently saved by the editor (cleared on
+    /// read) — lets the app warn that the module must be restarted.
+
+    last_saved_module: Option<String>,
 
 }
 
@@ -88,6 +94,7 @@ impl ModulesWindow {
             link_rect: None,
             link_url: None,
             editing: None,
+            last_saved_module: None,
         }
     }
 
@@ -407,6 +414,7 @@ impl ModulesWindow {
             let _ = std::fs::write(&json_path, pretty);
         }
         eprintln!("[supervisor] saved config for {} (.env + config.json)", module_name);
+        self.last_saved_module = Some(module_name);
     }
 
 /// Vertical-line prefix for a row in the tree: each ancestor level shows
@@ -432,7 +440,7 @@ fn row_label(row: &EditorRow) -> String {
 
 /// Render the config editor as a tree: `.env` (censored) and `config.json`
 /// (visible) sections, `key : value` rows, `+` rows for maps/arrays/files.
-fn render_editor(&mut self, area: Rect, buf: &mut Buffer, is_active: bool, colors: &ColorConfig) {
+fn render_editor(&mut self, area: Rect, buf: &mut Buffer, is_active: bool, colors: &ColorConfig, prompts: &[PendingPrompt]) {
         let Some(ed) = &mut self.editing else { return };
         if ed.rows.is_empty() {
             ed.selected = 0;
@@ -451,6 +459,19 @@ fn render_editor(&mut self, area: Rect, buf: &mut Buffer, is_active: bool, color
             .border_style(Style::default().fg(border_color));
         let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
         let mut y = inner.y;
+
+        if !prompts.is_empty() {
+            let expiring = prompts
+                .iter()
+                .filter(|p| p.deadline.saturating_duration_since(Instant::now()).as_secs() <= 10)
+                .count();
+            let line = Line::from(Span::styled(
+                format!(" {} prompts waiting ({} expiring)", prompts.len(), expiring),
+                Style::default().fg(Color::Yellow),
+            ));
+            line.render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
+            y += 1;
+        }
 
         if y < inner.y + inner.height {
             let help = if ed.confirm_save {
@@ -672,7 +693,7 @@ impl Window for ModulesWindow {
     fn render(&mut self, area: Rect, buf: &mut Buffer, is_active: bool, stats: &GlobalStats, colors: &ColorConfig, hotkeys: &HotkeyConfig, prompts: &[PendingPrompt]) {
         // Config editor takes over the whole window.
         if self.editing.is_some() {
-            self.render_editor(area, buf, is_active, colors);
+            self.render_editor(area, buf, is_active, colors, prompts);
             return;
         }
 
@@ -1079,6 +1100,10 @@ fn editor_key(&mut self, key: crossterm::event::KeyEvent, hotkeys: &HotkeyConfig
         }
         self.editing = Some(ed);
         true
+    }
+
+    fn take_saved_module(&mut self) -> Option<String> {
+        self.last_saved_module.take()
     }
 }
 #[cfg(test)]
