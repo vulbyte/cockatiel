@@ -161,10 +161,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut supervisor = crate::supervisor::ProcessTable::new();
     let mut plugins: Vec<crate::plugins::Plugin> = Vec::new();
     if detached_window.is_none() {
-        // Prefer engine config values for port/pin.
+        // Prefer engine config values for port/pin, BUT explicit CLI overrides
+        // (--port/--pin) win — a user pointing at a remote/renumbered engine
+        // must be able to override the local config.json.
         if let Some((ep, epin)) = supervisor::read_engine_addr() {
-            port = ep;
-            pin = epin;
+            if override_port.is_none() {
+                port = ep;
+            }
+            if override_pin.is_none() {
+                pin = epin;
+            }
         }
 
         // Databases are an expected core of the engine — always launch the
@@ -210,12 +216,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     eprintln!("[supervisor] Launched engine (pid {})", pid);
                     // Wait for the engine to write its config (port/pin) so
-                    // plugins launch with the right credentials.
+                    // plugins launch with the right credentials. Explicit CLI
+                    // overrides still win over the freshly-written config.
                     for _ in 0..20 {
                         std::thread::sleep(std::time::Duration::from_millis(300));
                         if let Some((ep, epin)) = supervisor::read_engine_addr() {
-                            port = ep;
-                            pin = epin;
+                            if override_port.is_none() {
+                                port = ep;
+                            }
+                            if override_pin.is_none() {
+                                pin = epin;
+                            }
                             break;
                         }
                     }
@@ -400,19 +411,24 @@ async fn run_app(
                     ).await? {
                         return Ok(());
                     }
-                    // Credential entry just finished via the prompt subwindow —
-                    // relaunch the module now that its config is saved.
-                    if let Some(name) = state.pending_launch.take() {
-                        if !supervisor.contains_key(&name) {
-                            request_launch(
-                                state,
-                                &name,
-                                supervisor,
-                                &plugins,
-                                port,
-                                pin,
-                                supervisor::LaunchMode::Prebuilt,
-                            );
+                    // Credential entry just finished via the prompt subwindow.
+                    // Launch only once the engine's `set_credentials`
+                    // QueryResult confirms the save (pending_launch_confirmed)
+                    // — a failed save never launches the module.
+                    if state.pending_launch_confirmed {
+                        if let Some(name) = state.pending_launch.take() {
+                            state.pending_launch_confirmed = false;
+                            if !supervisor.contains_key(&name) {
+                                request_launch(
+                                    state,
+                                    &name,
+                                    supervisor,
+                                    &plugins,
+                                    port,
+                                    pin,
+                                    supervisor::LaunchMode::Prebuilt,
+                                );
+                            }
                         }
                     }
                 }
@@ -744,6 +760,28 @@ fn handle_ws_event(
                 text_input: String::new(),
             });
         }
+        WsEvent::QueryResult { query_id, result } => {
+            // Surface query failures (notably set_credentials) into the log
+            // window instead of silently dropping them. On a successful
+            // credential save, signal the main loop to launch the module; on
+            // failure, clear any pending launch so it never fires.
+            if query_id == "set_credentials" {
+                if result.success {
+                    // The main loop launches `pending_launch` only once this
+                    // flag is set, so a failed save never launches the module.
+                    state.pending_launch_confirmed = true;
+                } else {
+                    state.pending_launch = None;
+                    state.pending_launch_confirmed = false;
+                    let msg = if result.error.is_empty() {
+                        "set_credentials failed (no error detail)".to_string()
+                    } else {
+                        format!("set_credentials failed: {}", result.error)
+                    };
+                    supervisor_log(state, msg);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -781,7 +819,7 @@ async fn handle_input_event(
             // cycle the queue; y/n (or typed text + Enter) answers the focused
             // prompt.
             if state.active_window == WindowId::Prompts && !state.pending_prompt.is_empty() {
-                if handle_prompt_key(state, key, plugins, ws_command_tx) {
+                if handle_prompt_key(state, key, plugins, supervisor, ws_command_tx) {
                     return Ok(false);
                 }
             }
@@ -983,7 +1021,13 @@ async fn handle_input_event(
 /// Returns true if the key was consumed by the prompt (so the caller skips
 /// normal navigation/actions). Left/right cycle through the queue; y/n or
 /// typed text + Enter answers the focused prompt; Esc cancels it.
-fn handle_prompt_key(state: &mut AppState, key: KeyEvent, plugins: &[crate::plugins::Plugin], ws_command_tx: &mpsc::UnboundedSender<WsCommand>) -> bool {
+fn handle_prompt_key(
+    state: &mut AppState,
+    key: KeyEvent,
+    plugins: &[crate::plugins::Plugin],
+    supervisor: &mut supervisor::ProcessTable,
+    ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
+) -> bool {
     let len = state.pending_prompt.len();
     if len == 0 {
         return false;
@@ -1092,6 +1136,13 @@ fn handle_prompt_key(state: &mut AppState, key: KeyEvent, plugins: &[crate::plug
                         supervisor_log(state, format!("[supervisor] cannot clear {}'s config: module not found", mod_name));
                     }
                 }
+            } else if let Some(mod_name) = prompt_id.strip_prefix("tui-local:delete-module:") {
+                // On "yes" kill + fully unregister the module (process,
+                // modules.json, config.json ordering). Mirrors the clear-config
+                // confirm flow — deleting is destructive and needs a confirm.
+                if accepted {
+                    delete_module(state, supervisor, &mod_name);
+                }
             }
             remove_prompt_at(state, state.selected_prompt);
         } else {
@@ -1186,8 +1237,10 @@ fn finish_credential_field(
             query_id: "set_credentials".to_string(),
             sql: payload.to_string(),
         });
-        // The engine saves the config; ask the supervisor to launch the module.
+        // Launch only after the engine's QueryResult confirms the save (see
+        // WsEvent::QueryResult) — a failed save must never launch the module.
         state.pending_launch = Some(module_name);
+        state.pending_launch_confirmed = false;
     }
     true
 }
@@ -1522,6 +1575,31 @@ async fn handle_launch_result(
             pipe,
         );
     }
+}
+
+/// Permanently remove a module: kill its process, drop its run state, remove it
+/// from the engine's config.json ordering and from modules.json. Called after
+/// the operator confirms the delete prompt.
+fn delete_module(state: &mut AppState, supervisor: &mut supervisor::ProcessTable, name: &str) {
+    if let Some(proc) = supervisor.remove(name) {
+        let mut proc = proc.lock().unwrap();
+        supervisor_log(state, format!("[supervisor] Killing {} (pid {})", name, proc.pid()));
+        proc.kill();
+    }
+    state.module_runs.lock().unwrap().remove(name);
+    supervisor::remove_from_ordering(name);
+    // Also remove from modules.json via the engine registry file.
+    if let Ok(data) = std::fs::read_to_string(supervisor::modules_registry_path()) {
+        if let Ok(mut registry) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(arr) = registry.as_array_mut() {
+                arr.retain(|e| e.get("name").and_then(|v| v.as_str()) != Some(name));
+                if let Ok(pretty) = serde_json::to_string_pretty(&registry) {
+                    let _ = std::fs::write(supervisor::modules_registry_path(), pretty);
+                }
+            }
+        }
+    }
+    supervisor_log(state, format!("[supervisor] deleted {}", name));
 }
 
 /// Crash-recovery ladder (unlimited retries, stability over everything):
@@ -1895,24 +1973,31 @@ async fn dispatch_action(
                 .insert(name, "stopped".to_string());
         }
         Action::DeleteModule(name) => {
-            if let Some(proc) = supervisor.remove(&name) {
-                let mut proc = proc.lock().unwrap();
-                supervisor_log(state, format!("[supervisor] Killing {} (pid {})", name, proc.pid()));
-                proc.kill();
+            // Confirm before destroying the module's registration.
+            let prompt_id = format!("tui-local:delete-module:{}", name);
+            if !state.pending_prompt.iter().any(|p| p.prompt.prompt_id_uuid7 == prompt_id) {
+                let prompt = cockatiel_client::proto::Prompt {
+                    prompt_id_uuid7: prompt_id,
+                    prompt: format!("Delete {}?", name),
+                    details: "This KILLS the module process and REMOVES it from modules.json + the engine's config.json ordering. The module will no longer be known to Cockatiel (you'd have to re-add it).".to_string(),
+                    yes_dialog: "Yes — delete module".to_string(),
+                    no_dialog: "Cancel".to_string(),
+                    timeout: 60,
+                    origin: "tui".to_string(),
+                    origin_uuid7: String::new(),
+                    instructions: String::new(),
+                    link: String::new(),
+                    input_label: String::new(),
+                    prompt_type: 0, // unspecified → Boolean (y/n)
+                };
+                state.pending_prompt.push_back(crate::app::PendingPrompt {
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    prompt,
+                    text_input: String::new(),
+                });
+                state.active_window = WindowId::Prompts;
             }
-            state.module_runs.lock().unwrap().remove(&name);
-            supervisor::remove_from_ordering(&name);
-            // Also remove from modules.json via the engine registry file.
-            if let Ok(data) = std::fs::read_to_string(supervisor::modules_registry_path()) {
-                if let Ok(mut registry) = serde_json::from_str::<serde_json::Value>(&data) {
-                    if let Some(arr) = registry.as_array_mut() {
-                        arr.retain(|e| e.get("name").and_then(|v| v.as_str()) != Some(name.as_str()));
-                        if let Ok(pretty) = serde_json::to_string_pretty(&registry) {
-                            let _ = std::fs::write(supervisor::modules_registry_path(), pretty);
-                        }
-                    }
-                }
-            }
+            supervisor_log(state, format!("[supervisor] delete requested for {} — awaiting confirmation", name));
         }
         Action::ToggleAutostart(name) => {
             // Flip autostart in the plugin's manifest file directly.
