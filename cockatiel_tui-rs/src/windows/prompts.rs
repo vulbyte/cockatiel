@@ -180,10 +180,12 @@ impl Window for PromptsWindow {
         }
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, is_active: bool, _stats: &GlobalStats, colors: &ColorConfig, hotkeys: &HotkeyConfig, prompts: &[PendingPrompt]) {
+    fn render(&mut self, area: Rect, buf: &mut Buffer, is_active: bool, stats: &GlobalStats, colors: &ColorConfig, hotkeys: &HotkeyConfig, prompts: &[PendingPrompt]) {
         let pending_count = prompts.len();
         // Border states: empty+focused = green, empty+unfocused = gray,
         // queue+focused = orange, queue+unfocused = orange-red (blinking ~1/s).
+        // Missing backups escalate the border to red.
+        let no_backup = !stats.timeline_backup || !stats.userdb_backup;
         let mut border_style = match (pending_count, is_active) {
             (0, true) => Style::default().fg(Color::Green),
             (0, false) => Style::default().fg(Color::DarkGray),
@@ -192,9 +194,12 @@ impl Window for PromptsWindow {
                 .fg(Color::Red)
                 .add_modifier(Modifier::SLOW_BLINK), // orange-red blink
         };
+        if no_backup {
+            border_style = Style::default().fg(Color::Red).add_modifier(Modifier::SLOW_BLINK);
+        }
         // If a custom border color for "prompts" is configured, prefer it for
         // the non-blink states; the blink/attention states stay as above.
-        if pending_count == 0 && !is_active {
+        if pending_count == 0 && !is_active && !no_backup {
             border_style = Style::default().fg(colors.border_color("inactive"));
         }
 
@@ -210,12 +215,36 @@ impl Window for PromptsWindow {
             .border_style(border_style);
         let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
 
+        let mut y = inner.y;
+
+        // Persistent backup warning — shown until BOTH the timeline and the
+        // user database have a backup location configured.
+        if no_backup {
+            let mut missing = Vec::new();
+            if !stats.timeline_backup {
+                missing.push("TIMELINE");
+            }
+            if !stats.userdb_backup {
+                missing.push("USER DB");
+            }
+            let msg = format!(
+                "!! NO BACKUP DATABASE SET ({}) — A CORRUPTION COULD MEAN TOTAL DATA LOSS",
+                missing.join(" + ")
+            );
+            let warn = Line::from(vec![Span::styled(
+                msg,
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )]);
+            warn.render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
+            y += 1;
+        }
+
         if pending_count == 0 {
             let text = Paragraph::new(Line::from(Span::styled(
                 "No pending prompts",
                 Style::default().fg(Color::DarkGray),
             )));
-            text.render(inner, buf);
+            text.render(Rect { x: inner.x, y, width: inner.width, height: inner.height.saturating_sub(1) }, buf);
         } else {
             let idx = self.selected.min(pending_count.saturating_sub(1));
             self.draw_prompt_dialog(area, buf, &prompts[idx]);

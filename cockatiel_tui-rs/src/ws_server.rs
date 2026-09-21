@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::accept_async;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
@@ -8,7 +8,7 @@ use uuid::Uuid;
 use cockatiel_client::proto::*;
 use cockatiel_client::proto::container::Payload;
 
-use crate::ws_client::WsEvent;
+use crate::ws_client::{WsCommand, WsEvent};
 
 pub struct WsServer {
     pub addr: SocketAddr,
@@ -23,7 +23,9 @@ impl WsServer {
         Self { addr, auth_token }
     }
 
-    pub fn start(self, rx: broadcast::Receiver<WsEvent>) {
+    /// `ws_command_tx` relays queries that detached children issue (e.g. the
+    /// users window's `Action::UserQuery`) to the parent's engine connection.
+    pub fn start(self, rx: broadcast::Receiver<WsEvent>, ws_command_tx: mpsc::UnboundedSender<WsCommand>) {
         let addr = self.addr;
         let auth_token = self.auth_token.clone();
 
@@ -41,7 +43,8 @@ impl WsServer {
                     Ok((stream, peer_addr)) => {
                         let auth_token = auth_token.clone();
                         let rx = rx.resubscribe();
-                        tokio::spawn(handle_child(stream, peer_addr, auth_token, rx));
+                        let ws_command_tx = ws_command_tx.clone();
+                        tokio::spawn(handle_child(stream, peer_addr, auth_token, rx, ws_command_tx));
                     }
                     Err(e) => eprintln!("WS server: accept error: {}", e),
                 }
@@ -55,6 +58,7 @@ async fn handle_child(
     peer_addr: SocketAddr,
     auth_token: String,
     mut rx: broadcast::Receiver<WsEvent>,
+    ws_command_tx: mpsc::UnboundedSender<WsCommand>,
 ) {
     let mut ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
@@ -138,6 +142,7 @@ async fn handle_child(
     eprintln!("WS server: child {} authenticated", peer_addr);
 
     let (mut sink, mut stream) = ws_stream.split();
+    let child_uuid = my_uuid.clone();
 
     // Forward broadcast events to child
     let forward_task = tokio::spawn(async move {
@@ -153,6 +158,27 @@ async fn handle_child(
                             log: format!("[{}] {}", source, message),
                             blob: Vec::new(),
                         })),
+                    };
+                    if sink
+                        .send(tokio_tungstenite::tungstenite::Message::Binary(
+                            msg.encode_to_vec().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                // Query results (polled stats + the child's own one-shot
+                // userdb queries) are forwarded so the child runs the same
+                // `update_stats_from_query` merge into its GlobalStats.
+                Ok(WsEvent::QueryResult { result, .. }) => {
+                    let msg = Container {
+                        version: 1,
+                        auth_token: my_uuid.clone(),
+                        module_name: "cockatiel-tui".into(),
+                        module_instance_uuid7: my_uuid.clone(),
+                        payload: Some(Payload::DatabaseQueryResult(result)),
                     };
                     if sink
                         .send(tokio_tungstenite::tungstenite::Message::Binary(
@@ -190,8 +216,29 @@ async fn handle_child(
         }
     });
 
-    // Keep connection alive, ignore incoming
-    while let Some(_) = stream.next().await {}
+    // Forward child→parent messages: one-shot queries (e.g. the users window's
+    // `Action::UserQuery`) are relayed to the engine via the parent's command
+    // channel; the result comes back through the QueryResult broadcast.
+    let incoming_task = tokio::spawn(async move {
+        while let Some(msg) = stream.next().await {
+            let Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) = msg else {
+                continue;
+            };
+            let Ok(container) = Container::decode(data.as_slice()) else {
+                continue;
+            };
+            if container.auth_token != child_uuid {
+                continue;
+            }
+            if let Some(Payload::DatabaseQuery(query)) = container.payload {
+                let _ = ws_command_tx.send(WsCommand::SendQuery {
+                    query_id: query.query_id,
+                    sql: query.sql,
+                });
+            }
+        }
+    });
 
+    let _ = incoming_task.await;
     forward_task.abort();
 }

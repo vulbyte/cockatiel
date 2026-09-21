@@ -37,7 +37,7 @@ use cockatiel_client::PromptKind;
 use colors::load_colors;
 use event::AppEvent;
 use hotkeys::{load_hotkeys, Action};
-use windows::{LogoWindow, LogWindow, ModulesWindow, ChartWindow, PromptsWindow};
+use windows::{LogoWindow, LogWindow, ModulesWindow, ChartWindow, PromptsWindow, UsersWindow};
 use ws_client::{WsClient, WsCommand, WsEvent};
 use ws_server::WsServer;
 
@@ -53,12 +53,17 @@ fn find_engine_addr() -> (String, u16, u32) {
             }
         }
     }
-    // The engine's own config.json uses "port" and "paring_pin"
+    // The engine's own config.json uses "port"; the PIN (a secret) lives in
+    // the engine's .env as COCKATIEL_PIN, with a legacy config.json fallback.
     for path in &["../cockatiel_engine-rs/config.json", "cockatiel_engine-rs/config.json"] {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
                 let port = config.get("port").and_then(|v| v.as_u64()).unwrap_or(1111) as u16;
-                let pin = config.get("paring_pin").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let env_path = path.replace("config.json", ".env");
+                let pin = supervisor::read_env_value(std::path::Path::new(&env_path), "COCKATIEL_PIN")
+                    .and_then(|v| v.parse().ok())
+                    .or_else(|| config.get("paring_pin").and_then(|v| v.as_u64()).map(|v| v as u32))
+                    .unwrap_or(0);
                 return ("127.0.0.1".into(), port, pin);
             }
         }
@@ -174,7 +179,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let pid = child.id();
                     supervisor.insert(
                         "user-database".to_string(),
-                        Arc::new(Mutex::new(supervisor::ManagedProcess { child })),
+                        Arc::new(Mutex::new(supervisor::ManagedProcess {
+                            child,
+                            terminal_window: None,
+                            terminal_pidfile: None,
+                        })),
                     );
                     eprintln!("[supervisor] Launched user database (pid {})", pid);
                 }
@@ -193,7 +202,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let pid = child.id();
                     supervisor.insert(
                         "engine".to_string(),
-                        Arc::new(Mutex::new(supervisor::ManagedProcess { child })),
+                        Arc::new(Mutex::new(supervisor::ManagedProcess {
+                            child,
+                            terminal_window: None,
+                            terminal_pidfile: None,
+                        })),
                     );
                     eprintln!("[supervisor] Launched engine (pid {})", pid);
                     // Wait for the engine to write its config (port/pin) so
@@ -248,15 +261,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = AppState::new(colors, hotkeys);
 
+    // Auto-rebuild channel: a crashed module's name is sent here and the main
+    // loop rebuilds + relaunches it (capped to avoid infinite loops).
+    let (rebuild_tx, rebuild_rx) = mpsc::unbounded_channel::<String>();
+    state.rebuild_tx = Some(rebuild_tx);
+
+    // Runtime-crash channel: a module that died AFTER connecting is recovered
+    // through the crash ladder (restart → rebuild → rollback, unlimited retries).
+    let (restart_tx, restart_rx) = mpsc::unbounded_channel::<String>();
+    state.restart_tx = Some(restart_tx);
+
+    // Launch channel: background tasks resolve module launches (building if
+    // needed) and report back, so a cold build never blocks the UI loop.
+    let (launch_tx, launch_rx) =
+        mpsc::unbounded_channel::<(String, Result<(String, Vec<String>), String>)>();
+    state.launch_tx = Some(launch_tx);
+
     if let Some(ref window_name) = detached_window {
-        // Detached mode: only show one window
-        match window_name.as_str() {
-            "log" => state.windows.push(Box::new(LogWindow::new())),
-            "modules" => state.windows.push(Box::new(ModulesWindow::new())),
-            "chart" => state.windows.push(Box::new(ChartWindow::new())),
-            "prompts" => state.windows.push(Box::new(PromptsWindow::new())),
-            _ => state.windows.push(Box::new(LogoWindow)),
-        }
+        // Detached mode: only show one window. The window's id becomes the
+        // active window so its border/title colors render as focused.
+        let wid = match window_name.as_str() {
+            "log" => { state.windows.push(Box::new(LogWindow::new())); WindowId::Log }
+            "modules" => { state.windows.push(Box::new(ModulesWindow::new())); WindowId::Modules }
+            "chart" => { state.windows.push(Box::new(ChartWindow::new())); WindowId::Chart }
+            "prompts" => { state.windows.push(Box::new(PromptsWindow::new())); WindowId::Prompts }
+            "users" => { state.windows.push(Box::new(UsersWindow::new())); WindowId::Users }
+            _ => { state.windows.push(Box::new(LogoWindow)); WindowId::Logo }
+        };
+        state.active_window = wid;
     } else {
         state.windows.push(Box::new(LogoWindow));
         state.windows.push(Box::new(LogWindow::new()));
@@ -273,7 +305,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ws_addr = ws_server.addr;
     let ws_auth_token = ws_server.auth_token.clone();
     let (ws_broadcast_tx, _) = broadcast::channel::<WsEvent>(64);
-    ws_server.start(ws_broadcast_tx.subscribe());
+    let ws_server_cmd_tx = ws_command_tx.clone();
+    ws_server.start(ws_broadcast_tx.subscribe(), ws_server_cmd_tx);
 
     // Create WS client — parent mode if --ws-addr provided, else engine mode
     let mut ws_client = if let (Some(ref parent_addr), Some(ref parent_token)) = (&ws_parent_addr, &ws_parent_token) {
@@ -297,6 +330,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         plugins,
         port,
         pin,
+        rebuild_rx,
+        restart_rx,
+        launch_rx,
     ).await;
 
     // Tear down everything the TUI owns before exiting.
@@ -330,6 +366,9 @@ async fn run_app(
     plugins: Vec<crate::plugins::Plugin>,
     port: u16,
     pin: u32,
+    mut rebuild_rx: mpsc::UnboundedReceiver<String>,
+    mut restart_rx: mpsc::UnboundedReceiver<String>,
+    mut launch_rx: mpsc::UnboundedReceiver<(String, Result<(String, Vec<String>), String>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Input events arrive instantly from a background crossterm reader thread.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -339,6 +378,9 @@ async fn run_app(
     // expiry, streaming logs) updates even without input.
     let mut redraw = tokio::time::interval(Duration::from_millis(100));
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Unresponsive watchdog cadence (only runs when no input is pending).
+    let mut watchdog_last = Instant::now();
 
     loop {
         tokio::select! {
@@ -362,16 +404,15 @@ async fn run_app(
                     // relaunch the module now that its config is saved.
                     if let Some(name) = state.pending_launch.take() {
                         if !supervisor.contains_key(&name) {
-                            launch_module(
+                            request_launch(
                                 state,
                                 &name,
                                 supervisor,
                                 &plugins,
                                 port,
                                 pin,
-                                &ws_command_tx,
-                            )
-                            .await;
+                                supervisor::LaunchMode::Prebuilt,
+                            );
                         }
                     }
                 }
@@ -384,7 +425,92 @@ async fn run_app(
                     }
                 }
             }
-            _ = redraw.tick() => {}
+            maybe_rebuild = rebuild_rx.recv() => {
+                if let Some(name) = maybe_rebuild {
+                    // A module crashed before connecting (e.g. a corrupt or
+                    // mismatched prebuilt binary). Rebuild it from source and
+                    // relaunch — but cap attempts so we don't loop forever.
+                    let attempts = {
+                        let mut m = state.rebuild_attempts.lock().unwrap();
+                        let n = m.get(&name).copied().unwrap_or(0);
+                        m.insert(name.clone(), n + 1);
+                        n
+                    };
+                    if attempts < 3 {
+                        supervisor_log(state, format!("[supervisor] {} crashed — rebuilding and relaunching (attempt {})", name, attempts + 1));
+                        supervisor.remove(&name);
+                        request_launch(
+                            state,
+                            &name,
+                            supervisor,
+                            &plugins,
+                            port,
+                            pin,
+                            supervisor::LaunchMode::Rebuild,
+                        );
+                    } else {
+                        supervisor_log(state, format!("[supervisor] {} crashed {}x — giving up", name, attempts + 1));
+                    }
+                }
+            }
+            maybe_restart = restart_rx.recv() => {
+                if let Some(name) = maybe_restart {
+                    handle_crash(
+                        state,
+                        &name,
+                        supervisor,
+                        &plugins,
+                        port,
+                        pin,
+                    )
+                    .await;
+                }
+            }
+            maybe_launch = launch_rx.recv() => {
+                if let Some((name, result)) = maybe_launch {
+                    handle_launch_result(
+                        state,
+                        &name,
+                        result,
+                        supervisor,
+                        &plugins,
+                        &ws_command_tx,
+                    )
+                    .await;
+                }
+            }
+            _ = redraw.tick() => {
+                // Watchdog: recover locally-launched modules that the engine
+                // flagged unresponsive (hung, but the process may still be
+                // alive) or that dropped off the live-session list.
+                if watchdog_last.elapsed() >= Duration::from_secs(1) {
+                    watchdog_last = Instant::now();
+                    let dead: Vec<String> = state
+                        .module_runs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(name, status)| {
+                            status.as_str() == "connected" && supervisor.contains_key(*name)
+                        })
+                        .filter_map(|(name, _)| {
+                            let entry = state
+                                .stats
+                                .module_entries
+                                .iter()
+                                .find(|e| &e.name == name);
+                            match entry {
+                                Some(e) if !e.alive || e.status != "connected" => Some(name.clone()),
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    for name in dead {
+                        supervisor_log(state, format!("[supervisor] {} unresponsive — restarting", name));
+                        handle_crash(state, &name, supervisor, &plugins, port, pin).await;
+                    }
+                }
+            }
         }
 
         // Auto-deny any prompts that the user never answered before their timeout.
@@ -400,6 +526,11 @@ async fn run_app(
                 // (nothing is sent to the engine for these).
                 if prompt_is_credential(state, &prompt_id) {
                     cancel_credential_session(state);
+                    continue;
+                }
+                // TUI-local prompts (e.g. "disable autostart?") just expire.
+                if prompt_is_local(&prompt_id) {
+                    state.pending_prompt.retain(|p| p.prompt.prompt_id_uuid7 != prompt_id);
                     continue;
                 }
                 let _ = ws_command_tx.send(WsCommand::SendPromptResponse {
@@ -418,10 +549,14 @@ async fn run_app(
 
         // Drain lines captured from module stdout/stderr into the log window.
         {
-            let drained: Vec<crate::windows::log::LogEntry> = {
+            let mut drained: Vec<crate::windows::log::LogEntry> = {
                 let mut shared = state.module_logs.lock().unwrap();
                 shared.drain(..).collect()
             };
+            // Supervisor messages (start/stop/build/crash) go to the log window.
+            if let Some(q) = crate::app::SUPERVISOR_LOGS.get() {
+                drained.extend(q.lock().unwrap().drain(..));
+            }
             if !drained.is_empty() {
                 if let Some(window) = state.get_window_mut(WindowId::Log) {
                     for entry in drained {
@@ -491,14 +626,32 @@ async fn run_app(
         terminal.draw(|frame| {
             let size = frame.area();
             let areas = state.layout.compute(size);
+            // Detached pop-out windows run the same render loop over a single
+            // window; give it the FULL main area (the one-row status bar stays
+            // at the bottom) instead of its embedded layout sub-rect.
+            let single = state.windows.len() == 1;
 
             for window in &mut state.windows {
-                let (area, is_active) = match window.id() {
-                    WindowId::Logo => (areas.logo, state.active_window == WindowId::Logo),
-                    WindowId::Log => (areas.log, state.active_window == WindowId::Log),
-                    WindowId::Modules => (areas.modules, state.active_window == WindowId::Modules),
-                    WindowId::Chart => (areas.chart, state.active_window == WindowId::Chart),
-                    WindowId::Prompts => (areas.prompts, state.active_window == WindowId::Prompts),
+                let (area, is_active) = if single {
+                    (
+                        Rect {
+                            x: size.x,
+                            y: size.y,
+                            width: size.width,
+                            height: size.height.saturating_sub(1),
+                        },
+                        true,
+                    )
+                } else {
+                    match window.id() {
+                        WindowId::Logo => (areas.logo, state.active_window == WindowId::Logo),
+                        WindowId::Log => (areas.log, state.active_window == WindowId::Log),
+                        WindowId::Modules => (areas.modules, state.active_window == WindowId::Modules),
+                        WindowId::Chart => (areas.chart, state.active_window == WindowId::Chart),
+                        WindowId::Prompts => (areas.prompts, state.active_window == WindowId::Prompts),
+                        // Never embedded — belt-and-suspenders fallback.
+                        WindowId::Users => (areas.modules, state.active_window == WindowId::Users),
+                    }
                 };
 
                 // The prompts window highlights the currently-selected queue item.
@@ -612,13 +765,23 @@ async fn handle_input_event(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     match ev {
         AppEvent::Key(key) => {
+            // A window in config-editor mode consumes every key.
+            let hotkeys = state.hotkeys.clone();
+            if let Some(window) = state.get_window_mut(state.active_window) {
+                if window.in_editor() {
+                    if window.editor_key(key, &hotkeys) {
+                        return Ok(false);
+                    }
+                }
+            }
+
             // Prompts are answered in the dedicated prompts window (Tab to
             // focus it). While another window is focused, prompts wait in the
             // queue and the rest of the TUI stays fully navigable. Left/right
             // cycle the queue; y/n (or typed text + Enter) answers the focused
             // prompt.
             if state.active_window == WindowId::Prompts && !state.pending_prompt.is_empty() {
-                if handle_prompt_key(state, key, ws_command_tx) {
+                if handle_prompt_key(state, key, plugins, ws_command_tx) {
                     return Ok(false);
                 }
             }
@@ -644,6 +807,34 @@ async fn handle_input_event(
 
             let active_id = state.active_window;
             let window_name = active_id.name().to_string();
+
+            // Ctrl+Shift + the module "start" key → force-rebuild and start the
+            // selected module (overrides any prebuilt binary path).
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::SHIFT) {
+                let base = KeyEvent::new(key.code, KeyModifiers::empty());
+                let is_start = state
+                    .hotkeys
+                    .window_actions
+                    .get(&window_name)
+                    .and_then(|m| m.get(&base))
+                    .map(|a| matches!(a, Action::StartModule(_)))
+                    .unwrap_or(false);
+                if is_start {
+                    let name = selected_module_name(state);
+                    if !name.is_empty() {
+                        request_launch(
+                            state,
+                            &name,
+                            supervisor,
+                            plugins,
+                            port,
+                            pin,
+                            supervisor::LaunchMode::Rebuild,
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
 
             // Config-driven window actions (start/stop/del/auto/creds/test/...)
             if let Some(action) = state
@@ -701,6 +892,12 @@ async fn handle_input_event(
             Ok(false)
         }
         AppEvent::Paste(text) => {
+            // Paste into the active config editor first.
+            if let Some(window) = state.get_window_mut(state.active_window) {
+                if window.editor_paste(&text) {
+                    return Ok(false);
+                }
+            }
             // Pasting makes sense into a focused free-text prompt (e.g. an API
             // key or stream id). Ignore it everywhere else.
             if state.active_window == WindowId::Prompts && !state.pending_prompt.is_empty() {
@@ -739,7 +936,12 @@ async fn handle_input_event(
                     ].iter().find(|(_, area)| area.intersects(click_rect)).map(|(id, _)| *id);
 
                     if let Some(window_id) = clicked_window {
-                        state.active_window = window_id;
+                        // Only focus windows that actually exist (a detached
+                        // child has a single window; the layout sub-rects of
+                        // the other ids must not steal focus).
+                        if state.windows.iter().any(|w| w.id() == window_id) {
+                            state.active_window = window_id;
+                        }
                     }
 
                     // Start drag if near a border
@@ -781,7 +983,7 @@ async fn handle_input_event(
 /// Returns true if the key was consumed by the prompt (so the caller skips
 /// normal navigation/actions). Left/right cycle through the queue; y/n or
 /// typed text + Enter answers the focused prompt; Esc cancels it.
-fn handle_prompt_key(state: &mut AppState, key: KeyEvent, ws_command_tx: &mpsc::UnboundedSender<WsCommand>) -> bool {
+fn handle_prompt_key(state: &mut AppState, key: KeyEvent, plugins: &[crate::plugins::Plugin], ws_command_tx: &mpsc::UnboundedSender<WsCommand>) -> bool {
     let len = state.pending_prompt.len();
     if len == 0 {
         return false;
@@ -863,6 +1065,35 @@ fn handle_prompt_key(state: &mut AppState, key: KeyEvent, ws_command_tx: &mpsc::
             } else {
                 cancel_credential_session(state);
             }
+        } else if prompt_is_local(&prompt_id) {
+            // TUI-local prompts are resolved here (no engine round-trip).
+            if let Some(mod_name) = prompt_id.strip_prefix("tui-local:disable-autostart:") {
+                // On "yes" disable the module's autostart.
+                if accepted {
+                    set_autostart(plugins, mod_name, false);
+                    supervisor_log(state, format!("[supervisor] {} autostart disabled by operator", mod_name));
+                }
+            } else if let Some(mod_name) = prompt_id.strip_prefix("tui-local:clear-config:") {
+                // On "yes" empty the module's `.env` + `config.json` values
+                // (keys kept).
+                if accepted {
+                    if let Some(plugin) = plugins.iter().find(|p| p.manifest.name == mod_name) {
+                        match supervisor::clear_module_config(&plugin.directory) {
+                            Ok(()) => supervisor_log(
+                                state,
+                                format!("[supervisor] cleared all values from {}'s config (.env + config.json)", mod_name),
+                            ),
+                            Err(e) => supervisor_log(
+                                state,
+                                format!("[supervisor] failed to clear {}'s config: {}", mod_name, e),
+                            ),
+                        }
+                    } else {
+                        supervisor_log(state, format!("[supervisor] cannot clear {}'s config: module not found", mod_name));
+                    }
+                }
+            }
+            remove_prompt_at(state, state.selected_prompt);
         } else {
             let _ = ws_command_tx.send(WsCommand::SendPromptResponse {
                 prompt_id,
@@ -1056,7 +1287,10 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::DeleteModule(_)
             | Action::ToggleAutostart(_)
             | Action::EditCredentials(_)
+            | Action::EditConfig(_)
+            | Action::ClearModuleConfig(_)
             | Action::RunTests
+            | Action::UserQuery(_, _)
     )
 }
 
@@ -1085,96 +1319,385 @@ fn fill_window_action(state: &AppState, window_name: &str, action: Action) -> Ac
         Action::DeleteModule(_) => Action::DeleteModule(name),
         Action::ToggleAutostart(_) => Action::ToggleAutostart(name),
         Action::EditCredentials(_) => Action::EditCredentials(name),
-        Action::PopOut(_) => Action::PopOut(window_name.to_string()),
+        Action::EditConfig(_) => Action::EditConfig(name),
+        Action::ClearModuleConfig(_) => Action::ClearModuleConfig(name),
+        // PopOut carries its own window name when the binding set one (e.g.
+        // `u` → PopOut("users")); an empty payload falls back to the current
+        // window (the `w` per-window popout behavior).
+        Action::PopOut(inner) => {
+            if inner.is_empty() {
+                Action::PopOut(window_name.to_string())
+            } else {
+                Action::PopOut(inner)
+            }
+        }
         other => other,
     }
 }
 
 /// When the engine reports a module as connected, promote any "starting" run
 /// status to "connected".
-fn sync_module_runs(state: &AppState) {
-    let mut runs = state.module_runs.lock().unwrap();
-    for entry in &state.stats.module_entries {
-        if entry.status == "connected" {
+fn sync_module_runs(state: &mut AppState) {
+    // 1. Promote starting → connected once the engine reports the session.
+    {
+        let mut runs = state.module_runs.lock().unwrap();
+        for entry in &state.stats.module_entries {
+            if entry.status == "connected" {
+                if let Some(cur) = runs.get(&entry.name) {
+                    if cur == "starting" {
+                        runs.insert(entry.name.clone(), "connected".to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Overlay TUI-side lifecycle status ("building"/"starting"/...): the
+    // engine only reports offline/connected, so a module mid-build or
+    // mid-restart would otherwise look "offline".
+    {
+        let runs = state.module_runs.lock().unwrap();
+        for entry in &mut state.stats.module_entries {
             if let Some(cur) = runs.get(&entry.name) {
-                if cur == "starting" {
-                    runs.insert(entry.name.clone(), "connected".to_string());
+                match cur.as_str() {
+                    "building" | "starting" | "restarting" | "crashed" | "stopped" => {
+                        entry.status = cur.clone();
+                    }
+                    _ => {}
                 }
             }
         }
     }
 }
 
-/// Launch a module via the supervisor: set its run status to "starting", spawn
-/// the plugin, watch for it to connect or exit, and surface its stdout/stderr
-/// in the log window + the engine's timeline database.
-async fn launch_module(
+/// Request a module launch: resolve the launch command (building if needed) on
+/// a BACKGROUND task so a cold build never blocks the UI loop, then report the
+/// outcome back through `launch_rx` where `handle_launch_result` spawns it.
+/// Returns true when the request was accepted.
+fn request_launch(
     state: &mut AppState,
     name: &str,
     supervisor: &mut supervisor::ProcessTable,
     plugins: &[crate::plugins::Plugin],
     port: u16,
     pin: u32,
+    mode: supervisor::LaunchMode,
+) -> bool {
+    let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name) else {
+        return false;
+    };
+    if supervisor.contains_key(name) {
+        return false;
+    }
+    // Don't stack a launch while one is already resolving.
+    {
+        let runs = state.module_runs.lock().unwrap();
+        match runs.get(name).map(|s| s.as_str()) {
+            Some("building") | Some("starting") | Some("restarting") => return false,
+            _ => {}
+        }
+    }
+    state
+        .module_runs
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), "building".to_string());
+
+    let Some(launch_tx) = state.launch_tx.clone() else {
+        return false;
+    };
+    let plugin = plugin.clone();
+    tokio::spawn(async move {
+        let result = supervisor::resolve_launch(&plugin, port, pin, mode).await;
+        let _ = launch_tx.send((plugin.manifest.name, result));
+    });
+    true
+}
+
+/// Handle a completed background launch: spawn the resolved command, wire up
+/// the pipes + monitor, and set the run status. Runs on the main loop — the
+/// slow part (build) already happened in the background task.
+async fn handle_launch_result(
+    state: &mut AppState,
+    name: &str,
+    result: Result<(String, Vec<String>), String>,
+    supervisor: &mut supervisor::ProcessTable,
+    plugins: &[crate::plugins::Plugin],
     ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
 ) {
+    // The module may have been stopped (or relaunched) while the build ran.
+    {
+        let runs = state.module_runs.lock().unwrap();
+        if runs.get(name).map(|s| s.as_str()) == Some("stopped") {
+            return;
+        }
+    }
+    if result.is_err() {
+        let e = result.unwrap_err();
+        state
+            .module_runs
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), "crashed".to_string());
+        supervisor_log(state, format!("[supervisor] Failed to launch {}: {}", name, e));
+        return;
+    }
+    let (cmd, args) = result.unwrap();
     let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name) else {
         return;
     };
     if supervisor.contains_key(name) {
         return;
     }
-    state
-        .module_runs
-        .lock()
-        .unwrap()
-        .insert(name.to_string(), "starting".to_string());
-    match supervisor::launch_plugin(plugin, port, pin) {
-        Ok(mut child) => {
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-            let pid = child.id();
-            let proc = Arc::new(Mutex::new(supervisor::ManagedProcess { child }));
-            supervisor.insert(name.to_string(), proc.clone());
-            eprintln!(
-                "[supervisor] Launched {} (pid {}) — waiting to connect",
-                name, pid
-            );
-            spawn_monitor(name.to_string(), proc, state.module_runs.clone(), plugin.manifest.terminal);
-            if let Some(pipe) = stdout {
-                spawn_log_reader(
-                    state.module_logs.clone(),
-                    state.module_errors.clone(),
-                    ws_command_tx.clone(),
-                    name.to_string(),
-                    1,
-                    pipe,
-                );
-            }
-            if let Some(pipe) = stderr {
-                spawn_log_reader(
-                    state.module_logs.clone(),
-                    state.module_errors.clone(),
-                    ws_command_tx.clone(),
-                    name.to_string(),
-                    3,
-                    pipe,
-                );
-            }
-        }
+
+    let spawned = if plugin.manifest.terminal {
+        supervisor::spawn_terminal_from_parts(plugin, &cmd, &args)
+    } else {
+        supervisor::spawn_from_parts(plugin, &cmd, &args).map(|c| (c, None, None))
+    };
+    let (mut child, terminal_window, terminal_pidfile) = match spawned {
+        Ok(pair) => pair,
         Err(e) => {
             state
                 .module_runs
                 .lock()
                 .unwrap()
                 .insert(name.to_string(), "crashed".to_string());
-            eprintln!("[supervisor] Failed to launch {}: {}", name, e);
+            supervisor_log(state, format!("[supervisor] Failed to spawn {}: {}", name, e));
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let pid = child.id();
+    let proc = Arc::new(Mutex::new(supervisor::ManagedProcess {
+        child,
+        terminal_window,
+        terminal_pidfile,
+    }));
+    supervisor.insert(name.to_string(), proc.clone());
+    supervisor_log(
+        state,
+        format!("[supervisor] Launched {} (pid {}) — waiting to connect", name, pid),
+    );
+    state
+        .module_runs
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), "starting".to_string());
+
+    let restart_tx = state.restart_tx.clone().unwrap_or_else(|| {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        tx
+    });
+    spawn_monitor(
+        name.to_string(),
+        proc,
+        state.module_runs.clone(),
+        plugin.manifest.terminal,
+        state.rebuild_tx.clone().unwrap_or_else(|| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            tx
+        }),
+        restart_tx,
+    );
+    if let Some(pipe) = stdout {
+        spawn_log_reader(
+            state.module_logs.clone(),
+            state.module_errors.clone(),
+            ws_command_tx.clone(),
+            name.to_string(),
+            1,
+            pipe,
+        );
+    }
+    if let Some(pipe) = stderr {
+        spawn_log_reader(
+            state.module_logs.clone(),
+            state.module_errors.clone(),
+            ws_command_tx.clone(),
+            name.to_string(),
+            3,
+            pipe,
+        );
+    }
+}
+
+/// Crash-recovery ladder (unlimited retries, stability over everything):
+/// 1. restart with the prebuilt binary — a system issue may be the cause
+/// 2. a repeat crash within the 30-minute window escalates to a rebuild
+/// 3. if the rebuild fails (or there's no source), roll back to the prebuilt
+///    binary (a failed `cargo build` never clobbers the old binary)
+/// 4. no binary provided → rebuild anyway
+/// 5. after `CONSECUTIVE_CRASH_PROMPT` consecutive crashes, ask the operator
+///    whether to disable autostart to save system resources.
+async fn handle_crash(
+    state: &mut AppState,
+    name: &str,
+    supervisor: &mut supervisor::ProcessTable,
+    plugins: &[crate::plugins::Plugin],
+    port: u16,
+    pin: u32,
+) {
+    // Respect an explicit stop, and don't stack two recoveries for one module.
+    {
+        let runs = state.module_runs.lock().unwrap();
+        match runs.get(name).map(|s| s.as_str()) {
+            Some("stopped") | Some("restarting") => return,
+            _ => {}
         }
     }
+
+    // Crash bookkeeping: a module that survived the whole window resets its
+    // history, so the next one-off crash goes back to prebuilt-first. A repeat
+    // crash within the window escalates to a rebuild.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let (rebuild_mode, consecutive) = {
+        let mut cs = state.crash_state.lock().unwrap();
+        cs.entry(name.to_string()).or_default().record_crash(now_ms)
+    };
+
+    {
+        let mut runs = state.module_runs.lock().unwrap();
+        runs.insert(name.to_string(), "restarting".to_string());
+    }
+
+    // Kill any leftover process before relaunching.
+    if let Some(proc) = supervisor.remove(name) {
+        let mut proc = proc.lock().unwrap();
+        supervisor_log(state, format!("[supervisor] Killing {} (pid {})", name, proc.pid()));
+        proc.kill();
+    }
+
+    // Backoff so a crash loop doesn't thrash the machine.
+    tokio::time::sleep(crate::app::RESTART_BACKOFF).await;
+
+    // Ladder (mode decided above; the rebuild→rollback fallback happens inside
+    // resolve_launch). The launch itself runs in the background so a cold
+    // rebuild doesn't freeze the UI.
+    let mode = if rebuild_mode {
+        supervisor_log(state, format!("[supervisor] {} crashed again — rebuilding from source", name));
+        supervisor::LaunchMode::Rebuild
+    } else {
+        // Prebuilt first; the stale-binary check in module_run_parts will
+        // rebuild anyway if the source is newer than the binary.
+        supervisor::LaunchMode::Prebuilt
+    };
+    request_launch(state, name, supervisor, plugins, port, pin, mode);
+
+    // Crash-loop prompt (no retry cap — just ask about autostart).
+    if consecutive >= crate::app::CONSECUTIVE_CRASH_PROMPT {
+        push_crash_prompt(state, name);
+    }
+}
+
+/// Set a module's autostart flag in its manifest file on disk.
+fn set_autostart(plugins: &[crate::plugins::Plugin], name: &str, enabled: bool) {
+    if let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name) {
+        let manifest_path = plugin.directory.join(crate::plugins::MANIFEST_FILENAME);
+        if let Ok(data) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(mut manifest) = serde_json::from_str::<serde_json::Value>(&data) {
+                manifest["autostart"] = serde_json::json!(enabled);
+                if let Ok(pretty) = serde_json::to_string_pretty(&manifest) {
+                    let _ = std::fs::write(&manifest_path, pretty);
+                }
+            }
+        }
+    }
+}
+
+/// A module keeps crashing. Ask (in the prompts window, locally — no engine
+/// round-trip) whether to disable autostart to save system resources.
+fn push_crash_prompt(state: &mut AppState, name: &str) {
+    let prompt_id = format!("tui-local:disable-autostart:{}", name);
+    if state.pending_prompt.iter().any(|p| p.prompt.prompt_id_uuid7 == prompt_id) {
+        return;
+    }
+    let prompt = cockatiel_client::proto::Prompt {
+        prompt_id_uuid7: prompt_id,
+        prompt: format!("Module {} keeps crashing", name),
+        details: "It is being restarted automatically (no retry cap). Would you like to disable autostart to save system resources?".to_string(),
+        yes_dialog: "Yes — disable autostart".to_string(),
+        no_dialog: "Keep autostart".to_string(),
+        timeout: 60,
+        origin: "tui".to_string(),
+        origin_uuid7: String::new(),
+        instructions: String::new(),
+        link: String::new(),
+        input_label: String::new(),
+        prompt_type: 0, // unspecified → Boolean (y/n)
+    };
+    state.pending_prompt.push_back(crate::app::PendingPrompt {
+        deadline: Instant::now() + Duration::from_secs(60),
+        prompt,
+        text_input: String::new(),
+    });
+}
+
+/// True when a prompt is a TUI-local prompt (resolved here, not the engine).
+fn prompt_is_local(prompt_id: &str) -> bool {
+    prompt_id.starts_with("tui-local:")
 }
 
 /// Read lines from a module's stdout/stderr pipe: show them in the TUI log
 /// window, forward them to the engine so they persist in the timeline DB, and
 /// record when a module emits an error so its status can show "error".
+/// Route a supervisor message into the log window (instead of the terminal),
+/// so starting/stopping modules never scribbles clear text over the ratatui
+/// screen.
+fn supervisor_log(_state: &AppState, message: impl Into<String>) {
+    crate::app::supervisor_log_global(message.into());
+}
+
+/// Strip ANSI escape sequences and carriage returns from a line, so module /
+/// cargo output (progress bars, colors) never corrupts the ratatui screen or
+/// the log window.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    // CSI: consume params until the final byte (0x40..=0x7e).
+                    chars.next();
+                    for n in chars.by_ref() {
+                        if (0x40..=0x7e).contains(&(n as u32)) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC: consume until BEL or ST (ESC \).
+                    chars.next();
+                    for n in chars.by_ref() {
+                        if n == '\u{7}' {
+                            break;
+                        }
+                        if n == '\u{1b}' {
+                            let _ = chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // Bare ESC + one char.
+                    let _ = chars.next();
+                }
+            }
+        } else if c == '\r' {
+            continue;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn spawn_log_reader(
     logs: Arc<Mutex<VecDeque<crate::windows::log::LogEntry>>>,
     errors: Arc<Mutex<HashMap<String, Instant>>>,
@@ -1188,7 +1711,7 @@ fn spawn_log_reader(
         let reader = std::io::BufReader::new(pipe);
         for line in reader.lines() {
             let Ok(line) = line else { break };
-            let line = line.trim().to_string();
+            let line = strip_ansi(&line).trim().to_string();
             if line.is_empty() {
                 continue;
             }
@@ -1223,17 +1746,23 @@ fn line_indicates_error(line: &str) -> bool {
     lower.contains("error") || lower.contains("panic") || lower.contains("failed to") || lower.contains("rejected")
 }
 
-/// Spawn a background monitor for a just-launched module: it flips the run
-/// status to "crashed" ONLY when the child process actually exits (or the
-/// launch failed). A process that is still alive but hasn't connected yet is
-/// left as "starting" — sync_module_runs promotes it to "connected" the moment
-/// the engine reports it. For terminal modules the launcher process (e.g.
+/// Spawn a background monitor for a just-launched module. It polls the child
+/// for the process's lifetime:
+///  - exits while "starting" → startup crash → auto-rebuild from source
+///  - exits while "connected" → runtime crash → the crash ladder restarts it
+///  - exits while "restarting"/"stopped" → deliberate (the ladder is relaunching
+///    it, or the user stopped it) → silent
+/// A process that is still alive but hasn't connected yet is left as
+/// "starting" — sync_module_runs promotes it to "connected" the moment the
+/// engine reports it. For terminal modules the launcher process (e.g.
 /// osascript) detaches immediately, so exit is never a crash signal.
 fn spawn_monitor(
     name: String,
     proc: Arc<Mutex<supervisor::ManagedProcess>>,
     runs: Arc<Mutex<HashMap<String, String>>>,
     is_terminal: bool,
+    rebuild_tx: mpsc::UnboundedSender<String>,
+    restart_tx: mpsc::UnboundedSender<String>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -1243,10 +1772,30 @@ fn spawn_monitor(
                 let mut guard = proc.lock().unwrap();
                 match guard.child.try_wait() {
                     Ok(Some(_)) => {
-                        let mut r = runs.lock().unwrap();
-                        if r.get(&name).map(|s| s.as_str()) == Some("starting") {
+                        let status = runs
+                            .lock()
+                            .unwrap()
+                            .get(&name)
+                            .map(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let startup = status == "starting";
+                        let connected = status == "connected";
+                        if startup {
+                            let mut r = runs.lock().unwrap();
                             r.insert(name.clone(), "crashed".to_string());
+                            drop(r);
+                            // A startup crash (before the engine saw it connect)
+                            // is an unexpected failure — rebuild from source.
+                            let _ = rebuild_tx.send(name.clone());
+                        } else if connected {
+                            let mut r = runs.lock().unwrap();
+                            r.insert(name.clone(), "crashed".to_string());
+                            drop(r);
+                            // Died while running — the ladder recovers it.
+                            let _ = restart_tx.send(name.clone());
                         }
+                        // deliberate (restarting/stopped) → silent
                         break;
                     }
                     Ok(None) => {}
@@ -1257,16 +1806,13 @@ fn spawn_monitor(
                     }
                 }
             }
-            // Connected: the engine reported it (set by sync_module_runs).
+            // Stop polling a module the user stopped.
             {
                 let r = runs.lock().unwrap();
-                if r.get(&name).map(|s| s.as_str()) == Some("connected") {
+                if r.get(&name).map(|s| s.as_str()) == Some("stopped") {
                     break;
                 }
             }
-            // Still running but not connected yet — keep waiting. We do NOT
-            // report a crash for a live process (it may be compiling or
-            // waiting on config); sync_module_runs will flip it when it lands.
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
     });
@@ -1324,14 +1870,22 @@ async fn dispatch_action(
                         start_credential_session(state, module);
                     }
                 } else {
-                    launch_module(state, &name, supervisor, plugins, port, pin, ws_command_tx).await;
+                    request_launch(
+                        state,
+                        &name,
+                        supervisor,
+                        plugins,
+                        port,
+                        pin,
+                        supervisor::LaunchMode::Prebuilt,
+                    );
                 }
             }
         }
         Action::StopModule(name) => {
             if let Some(proc) = supervisor.remove(&name) {
                 let mut proc = proc.lock().unwrap();
-                eprintln!("[supervisor] Killing {} (pid {})", name, proc.pid());
+                supervisor_log(state, format!("[supervisor] Killing {} (pid {})", name, proc.pid()));
                 proc.kill();
             }
             state
@@ -1343,7 +1897,7 @@ async fn dispatch_action(
         Action::DeleteModule(name) => {
             if let Some(proc) = supervisor.remove(&name) {
                 let mut proc = proc.lock().unwrap();
-                eprintln!("[supervisor] Killing {} (pid {})", name, proc.pid());
+                supervisor_log(state, format!("[supervisor] Killing {} (pid {})", name, proc.pid()));
                 proc.kill();
             }
             state.module_runs.lock().unwrap().remove(&name);
@@ -1389,6 +1943,44 @@ async fn dispatch_action(
                 }
             }
         }
+        Action::EditConfig(name) => {
+            // Open the inline config editor (edits `.env` + `config.json`).
+            if let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name) {
+                if let Some(window) = state.get_window_mut(WindowId::Modules) {
+                    window.start_config_editor(&name, plugin.directory.clone());
+                    state.active_window = WindowId::Modules;
+                    supervisor_log(state, format!("[supervisor] editing config for {} (j/k move, type to edit, Esc save+exit)", name));
+                }
+            }
+        }
+        Action::ClearModuleConfig(name) => {
+            // Ask the operator first (prompts window, locally — no engine
+            // round-trip), then empty the module's config values.
+            let prompt_id = format!("tui-local:clear-config:{}", name);
+            if !state.pending_prompt.iter().any(|p| p.prompt.prompt_id_uuid7 == prompt_id) {
+                let prompt = cockatiel_client::proto::Prompt {
+                    prompt_id_uuid7: prompt_id,
+                    prompt: format!("Clear {}'s config?", name),
+                    details: "This will empty every value in the module's .env and config.json (keys and structure stay). You will need to re-enter credentials/settings before the module can run.".to_string(),
+                    yes_dialog: "Yes — clear all values".to_string(),
+                    no_dialog: "Cancel".to_string(),
+                    timeout: 60,
+                    origin: "tui".to_string(),
+                    origin_uuid7: String::new(),
+                    instructions: String::new(),
+                    link: String::new(),
+                    input_label: String::new(),
+                    prompt_type: 0, // unspecified → Boolean (y/n)
+                };
+                state.pending_prompt.push_back(crate::app::PendingPrompt {
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    prompt,
+                    text_input: String::new(),
+                });
+                state.active_window = WindowId::Prompts;
+            }
+            supervisor_log(state, format!("[supervisor] clear config requested for {} — awaiting confirmation", name));
+        }
         Action::RunTests => {
             // Run the compliance suite against the selected module.
             let selected_name = selected_module_name(state);
@@ -1397,12 +1989,75 @@ async fn dispatch_action(
                 "module": selected_name,
                 "iterations": 20,
             });
-            let _ = ws_command_tx.send(WsCommand::SendQuery {
-                query_id: "test_run".to_string(),
-                sql: payload.to_string(),
-            });
+            send_engine_query(
+                ws_command_tx,
+                "test_run".to_string(),
+                payload.to_string(),
+            );
+        }
+        Action::UserQuery(query_id, sql) => {
+            // One-shot user-database query from the detached users window.
+            send_engine_query(ws_command_tx, query_id, sql);
         }
         _ => {}
     }
     Ok(false)
+}
+
+/// Send a one-shot query to the engine (via the WebSocket command channel).
+fn send_engine_query(ws_command_tx: &mpsc::UnboundedSender<WsCommand>, query_id: String, sql: String) {
+    let _ = ws_command_tx.send(WsCommand::SendQuery { query_id, sql });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_ansi_and_carriage_returns() {
+        // CSI color sequence.
+        assert_eq!(strip_ansi("\u{1b}[31mred\u{1b}[0m"), "red");
+        // OSC (hyperlink) sequence up to BEL.
+        assert_eq!(strip_ansi("\u{1b}]8;;https://x\u{7}link\u{1b}]8;;\u{7}"), "link");
+        // Cargo-style progress with \r and inline escapes.
+        assert_eq!(strip_ansi("\u{1b}[2K\u{1b}[1GCompiling foo\rFinished"), "Compiling fooFinished");
+        // Bare ESC.
+        assert_eq!(strip_ansi("a\u{1b}Kb"), "ab");
+    }
+
+    #[test]
+    fn user_query_dispatches_send_query() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+        send_engine_query(
+            &tx,
+            "userdb_get_user".to_string(),
+            r#"{"uuid7":"u1"}"#.to_string(),
+        );
+        match rx.try_recv() {
+            Ok(WsCommand::SendQuery { query_id, sql }) => {
+                assert_eq!(query_id, "userdb_get_user");
+                assert_eq!(sql, r#"{"uuid7":"u1"}"#);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn user_query_is_dispatchable() {
+        assert!(is_dispatchable(&Action::UserQuery(
+            "userdb_list_users".to_string(),
+            String::new(),
+        )));
+    }
+
+    #[test]
+    fn fill_window_action_preserves_popout_payload() {
+        let colors = crate::colors::load_colors(&std::path::PathBuf::from(""));
+        let state = AppState::new(colors, crate::hotkeys::default_hotkeys());
+        let a = fill_window_action(&state, "modules", Action::PopOut("users".to_string()));
+        assert_eq!(a, Action::PopOut("users".to_string()));
+        // An empty payload still pops out the current window (per-window `w`).
+        let b = fill_window_action(&state, "modules", Action::PopOut(String::new()));
+        assert_eq!(b, Action::PopOut("modules".to_string()));
+    }
 }

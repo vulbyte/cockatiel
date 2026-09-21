@@ -10,9 +10,11 @@
     "x": "StopModule",
     "d": "DeleteModule",
     "a": "ToggleAutostart",
-    "c": "EditCredentials",
+    "c": "ClearModuleConfig",
+    "e": "EditConfig",
     "t": "RunTests",
-    "Enter": "SelectModule"
+    "Enter": "SelectModule",
+    "C": "EditCredentials"
   },
   "chart": {
     "1": "TimeWindow5m",
@@ -23,5 +25,15 @@
     "-": "ZoomOut",
     "Enter": "TogglePlatform",
     "Space": "TogglePlatform"
+  },
+  "editor": {
+    "j": "MoveDown",
+    "Down": "MoveDown",
+    "k": "MoveUp",
+    "Up": "MoveUp",
+    "Left": "CursorLeft",
+    "Right": "CursorRight",
+    "Enter": "Commit",
+    "Esc": "SaveExit"
   }
 }

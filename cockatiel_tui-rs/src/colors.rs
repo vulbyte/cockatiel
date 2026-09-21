@@ -88,11 +88,14 @@ pub fn default_colors() -> ColorConfig {
     borders.insert("hotkey_bar".to_string(), Color::Green);
     borders.insert("chart".to_string(), Color::Blue);
     borders.insert("prompts".to_string(), Color::Magenta);
+    borders.insert("users".to_string(), Color::LightCyan);
 
     let mut status = HashMap::new();
     status.insert("online".to_string(), Color::Green);
     status.insert("connected".to_string(), Color::Green);
     status.insert("starting".to_string(), Color::Yellow);
+    status.insert("building".to_string(), Color::Cyan);
+    status.insert("restarting".to_string(), Color::Yellow);
     status.insert("offline".to_string(), Color::DarkGray);
     status.insert("stopped".to_string(), Color::Yellow);
     status.insert("disconnected".to_string(), Color::Yellow);

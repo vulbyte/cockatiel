@@ -119,6 +119,8 @@ impl FakeEngine {
                 }),
                 processed_message: String::new(),
                 abandon_message: false,
+                audio: vec![],
+                audio_type: String::new(),
             });
             let container = Container {
                 version: 1,

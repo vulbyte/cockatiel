@@ -10,5 +10,27 @@
     "--release"
   ],
   "autostart": true,
-  "terminal": false
+  "terminal": false,
+  "binary": {
+    "macos": {
+      "x86_64": "target/release/cockatiel-test-runner",
+      "aarch64": "target/release/cockatiel-test-runner",
+      "arm": "target/release/cockatiel-test-runner"
+    },
+    "linux": {
+      "x86_64": "target/release/cockatiel-test-runner",
+      "aarch64": "target/release/cockatiel-test-runner",
+      "arm": "target/release/cockatiel-test-runner"
+    },
+    "windows": {
+      "x86_64": "target/release/cockatiel-test-runner.exe",
+      "aarch64": "target/release/cockatiel-test-runner.exe",
+      "arm": "target/release/cockatiel-test-runner.exe"
+    }
+  },
+  "build_command": "cargo",
+  "build_flags": [
+    "build",
+    "--release"
+  ]
 }

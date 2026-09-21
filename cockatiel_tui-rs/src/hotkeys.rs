@@ -31,7 +31,13 @@ pub enum Action {
     TogglePlatform,
     PopOut(String),
     EditCredentials(String),
+    EditConfig(String),
+    /// Confirm then empty a module's `.env` + `config.json` values (keys kept).
+    ClearModuleConfig(String),
     RunTests,
+    /// One-shot user-database query from the detached users window
+    /// (`query_id`, JSON payload in `sql`), sent via `WsCommand::SendQuery`.
+    UserQuery(String, String),
     Noop,
 }
 
@@ -42,6 +48,19 @@ struct HotkeyFile {
     modules: HashMap<String, String>,
     #[serde(default)]
     chart: HashMap<String, String>,
+    #[serde(default)]
+    editor: HashMap<String, String>,
+}
+
+/// Config-editor actions (bound via the `editor` section of the key map).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EditorAction {
+    MoveUp,
+    MoveDown,
+    CursorLeft,
+    CursorRight,
+    Commit,
+    SaveExit,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +68,15 @@ pub struct HotkeyConfig {
     pub global: HashMap<KeyEvent, Action>,
     #[allow(dead_code)]
     pub window_actions: HashMap<String, HashMap<KeyEvent, Action>>,
+    /// Config-editor bindings (j/k/arrows/Enter/Esc by default).
+    pub editor_actions: HashMap<KeyEvent, EditorAction>,
+}
+
+impl HotkeyConfig {
+    /// The config-editor action bound to `key`, if any.
+    pub fn editor_action(&self, key: &KeyEvent) -> Option<EditorAction> {
+        self.editor_actions.get(key).copied()
+    }
 }
 
 fn parse_key(s: &str) -> Option<KeyEvent> {
@@ -117,51 +145,60 @@ fn parse_action(s: &str) -> Action {
         "ZoomOut" => Action::ZoomOut,
         "TogglePlatform" => Action::TogglePlatform,
         "EditCredentials" => Action::EditCredentials(String::new()),
+        "EditConfig" => Action::EditConfig(String::new()),
+        "ClearModuleConfig" => Action::ClearModuleConfig(String::new()),
         "RunTests" => Action::RunTests,
         _ => Action::Noop,
     }
 }
 
 pub fn load_hotkeys(path: &PathBuf) -> HotkeyConfig {
+    // Start from the defaults and overlay the file on top, so default
+    // bindings (e.g. `e` → EditConfig) always apply unless the file rebinds
+    // that key.
+    let mut cfg = default_hotkeys();
+
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return default_hotkeys(),
+        Err(_) => return cfg,
     };
 
     let file: HotkeyFile = match serde_json::from_str(&content) {
         Ok(f) => f,
-        Err(_) => return default_hotkeys(),
+        Err(_) => return cfg,
     };
 
-    let mut global = HashMap::new();
     for (key, action) in &file.nav {
         if let Some(k) = parse_key(key) {
-            global.insert(k, parse_action(action));
+            cfg.global.insert(k, parse_action(action));
         }
     }
 
-    let mut window_actions = HashMap::new();
-
-    let mut module_actions = HashMap::new();
     for (key, action) in &file.modules {
         if let Some(k) = parse_key(key) {
-            module_actions.insert(k, parse_action(action));
+            cfg.window_actions
+                .entry("modules".to_string())
+                .or_default()
+                .insert(k, parse_action(action));
         }
     }
-    window_actions.insert("modules".to_string(), module_actions);
 
-    let mut chart_actions = HashMap::new();
     for (key, action) in &file.chart {
         if let Some(k) = parse_key(key) {
-            chart_actions.insert(k, parse_action(action));
+            cfg.window_actions
+                .entry("chart".to_string())
+                .or_default()
+                .insert(k, parse_action(action));
         }
     }
-    window_actions.insert("chart".to_string(), chart_actions);
 
-    HotkeyConfig {
-        global,
-        window_actions,
+    for (key, action) in &file.editor {
+        if let Some(k) = parse_key(key) {
+            cfg.editor_actions.insert(k, parse_editor_action(action));
+        }
     }
+
+    cfg
 }
 
 /// Human-readable label for an action, used in the `<command>:[<keys>]` bars.
@@ -172,9 +209,15 @@ pub fn action_label(action: &Action) -> &'static str {
         Action::DeleteModule(_) => "del",
         Action::ToggleAutostart(_) => "auto",
         Action::EditCredentials(_) => "creds",
+        Action::EditConfig(_) => "edit",
+        Action::ClearModuleConfig(_) => "clear",
         Action::RunTests => "test",
         Action::SelectModule => "select",
+        // The users pop-out gets its own label (`users:[u]`); the per-window
+        // `w` pop-out stays `popout`.
+        Action::PopOut(name) if name == "users" => "users",
         Action::PopOut(_) => "popout",
+        Action::UserQuery(_, _) => "userdb",
         Action::Quit => "quit",
         Action::FocusNext => "window-next",
         Action::FocusPrev => "window-prev",
@@ -271,6 +314,33 @@ impl HotkeyConfig {
     }
 }
 
+fn parse_editor_action(s: &str) -> EditorAction {
+    match s {
+        "MoveUp" => EditorAction::MoveUp,
+        "MoveDown" => EditorAction::MoveDown,
+        "CursorLeft" => EditorAction::CursorLeft,
+        "CursorRight" => EditorAction::CursorRight,
+        "Commit" => EditorAction::Commit,
+        "SaveExit" => EditorAction::SaveExit,
+        _ => EditorAction::SaveExit,
+    }
+}
+
+/// Default config-editor bindings: j/k + arrows navigate, ←/→ move the cursor,
+/// Enter commits, Esc saves + exits.
+fn default_editor_actions() -> HashMap<KeyEvent, EditorAction> {
+    let mut m = HashMap::new();
+    m.insert(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()), EditorAction::MoveDown);
+    m.insert(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()), EditorAction::MoveDown);
+    m.insert(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()), EditorAction::MoveUp);
+    m.insert(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()), EditorAction::MoveUp);
+    m.insert(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()), EditorAction::CursorLeft);
+    m.insert(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()), EditorAction::CursorRight);
+    m.insert(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()), EditorAction::Commit);
+    m.insert(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()), EditorAction::SaveExit);
+    m
+}
+
 pub fn default_hotkeys() -> HotkeyConfig {
     let mut global = HashMap::new();
     // Window focus is Tab / Shift+Tab only.
@@ -287,11 +357,14 @@ pub fn default_hotkeys() -> HotkeyConfig {
     module_actions.insert(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()), Action::StopModule(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()), Action::DeleteModule(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()), Action::ToggleAutostart(String::new()));
-    module_actions.insert(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()), Action::EditCredentials(String::new()));
+    module_actions.insert(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()), Action::ClearModuleConfig(String::new()));
+    module_actions.insert(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT), Action::EditCredentials(String::new()));
+    module_actions.insert(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()), Action::EditConfig(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()), Action::RunTests);
     module_actions.insert(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()), Action::AddNote);
     module_actions.insert(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()), Action::ShowInfo);
     module_actions.insert(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()), Action::SelectModule);
+    module_actions.insert(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty()), Action::PopOut("users".to_string()));
 
     let mut chart_actions = HashMap::new();
     chart_actions.insert(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()), Action::TimeWindow5m);
@@ -310,5 +383,56 @@ pub fn default_hotkeys() -> HotkeyConfig {
     HotkeyConfig {
         global,
         window_actions,
+        editor_actions: default_editor_actions(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e_binds_editconfig_and_defaults_survive_the_file() {
+        let cfg = load_hotkeys(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hotkey_config.json"),
+        );
+        let modules = cfg.window_actions.get("modules").expect("modules map");
+        // `e` → EditConfig (present in the file and/or defaults).
+        assert!(modules.contains_key(&KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty())));
+        assert!(modules
+            .values()
+            .any(|a| matches!(a, Action::EditConfig(_))));
+        // A default binding NOT in the file still survives the merge:
+        // `n` → AddNote is a default that the file omits.
+        assert!(modules
+            .values()
+            .any(|a| matches!(a, Action::AddNote)));
+    }
+
+    #[test]
+    fn editor_bindings_load_from_the_key_map() {
+        let cfg = load_hotkeys(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hotkey_config.json"),
+        );
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty());
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(cfg.editor_action(&j), Some(EditorAction::MoveDown));
+        assert_eq!(cfg.editor_action(&esc), Some(EditorAction::SaveExit));
+    }
+
+    #[test]
+    fn u_binds_users_popout_in_modules_window() {
+        let cfg = load_hotkeys(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("hotkey_config.json"),
+        );
+        let modules = cfg.window_actions.get("modules").expect("modules map");
+        let u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::empty());
+        // The `u` default survives the config-file merge.
+        assert_eq!(modules.get(&u), Some(&Action::PopOut("users".to_string())));
+        // And it renders the dedicated `users` label in the hotkey bar.
+        assert_eq!(action_label(&Action::PopOut("users".to_string())), "users");
+        assert_eq!(action_label(&Action::PopOut("log".to_string())), "popout");
+        let bar = cfg.format_window("modules", &["start", "stop", "del", "auto", "creds", "edit", "test", "select"]);
+        assert!(bar.contains("users:[u]"), "bar: {}", bar);
     }
 }

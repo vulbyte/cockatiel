@@ -492,14 +492,43 @@ fn run_force_binary(p: &Plugin, port: u16, pin: u32) -> Option<(String, Vec<Stri
     Some((parts.remove(0), parts))
 }
 
+/// Extract `--pin <value>` from the resolved args and return (value, args
+/// without the pin pair). The pin is moved off the command line (visible in
+/// `ps`) and delivered to the module via the `COCKATIEL_PIN` env var instead.
+fn strip_pin_from_args(args: &[String]) -> (Option<String>, Vec<String>) {
+    let mut pin = None;
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--pin" && i + 1 < args.len() {
+            pin = Some(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        out.push(args[i].clone());
+        i += 1;
+    }
+    (pin, out)
+}
+
 /// Spawn a non-terminal module's child from an already-resolved command.
 /// Fast — called on the main loop once `resolve_launch` reports back.
+/// stdin is set to null so a module can never consume the operator's TUI
+/// keystrokes (modules that need interactive input use engine prompts instead).
+/// The PIN is stripped from argv and injected as `COCKATIEL_PIN` instead.
 pub fn spawn_from_parts(p: &Plugin, cmd: &str, args: &[String]) -> Result<Child, String> {
-    Command::new(cmd)
-        .args(args)
+    let (pin, clean_args) = strip_pin_from_args(args);
+    let mut command = Command::new(cmd);
+    command
+        .args(&clean_args)
         .current_dir(&p.directory)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(pin) = pin {
+        command.env("COCKATIEL_PIN", pin);
+    }
+    command
         .spawn()
         .map_err(|e| format!("Failed to launch '{}': {}", p.manifest.name, e))
 }
@@ -524,7 +553,14 @@ pub fn spawn_terminal_from_parts(
     cmd: &str,
     args: &[String],
 ) -> Result<(Child, Option<String>, Option<PathBuf>), String> {
-    let cmd_line = format!("{} {}", shell_quote(cmd), args.join(" "));
+    // The PIN must not appear in the shell command line (visible in `ps`);
+    // export it in the wrapper script instead.
+    let (pin, clean_args) = strip_pin_from_args(args);
+    let pin_export = match pin {
+        Some(pin) => format!("export COCKATIEL_PIN={}; ", shell_quote(&pin)),
+        None => String::new(),
+    };
+    let cmd_line = format!("{} {}", shell_quote(cmd), clean_args.join(" "));
     let dir = p.directory.to_string_lossy().to_string();
     // Unique per launch so a close can't target a freshly relaunched window.
     let marker = format!("cockatiel:{}:{}", p.manifest.name, uuid::Uuid::now_v7());
@@ -539,7 +575,8 @@ pub fn spawn_terminal_from_parts(
     // for the window to close later: Terminal.app refuses to close a window
     // whose shell has exited).
     let run = format!(
-        "printf '\\033]0;{}\\007'; cd \"{}\" && sh -c 'echo $$ > \"{}\"; exec {}'",
+        "{}printf '\\033]0;{}\\007'; cd \"{}\" && sh -c 'echo $$ > \"{}\"; exec {}'",
+        pin_export,
         shell_quote(&marker),
         shell_quote(&dir),
         shell_quote(&pidfile.to_string_lossy()),

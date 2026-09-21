@@ -224,6 +224,8 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
             Payload::MessagePreProcess(MessagePreProcess {
                 message_uuid7: String::new(),
                 raw_message: Some(chat),
+                audio: vec![],
+                audio_type: String::new(),
             }),
         );
         let start = std::time::Instant::now();
@@ -500,7 +502,7 @@ async fn benchmark_one_module(
     m
 }
 
-// ── Timeline archival via engine DatabaseQuery (option a) ───────────
+// ── Timeline archival via engine test_archive (dedicated virtual query) ─
 
 async fn archive_to_timeline(batch_uuid: &str, results: &[Metrics], ip: &str, port: u16, pin: i32) {
     let url = format!("ws://{}:{}", ip, port);
@@ -521,34 +523,28 @@ async fn archive_to_timeline(batch_uuid: &str, results: &[Metrics], ip: &str, po
     let Ok(auth_container) = receive_container(&mut ws, 5000).await else { return };
     let auth = auth_container.auth_token;
 
-    for r in results {
-        let json = r.to_json().to_string();
-        // INSERT into timeline_events via the engine's SQL fallback.
-        // command carries the batch uuid for easy queries.
-        let sql = format!(
-            "INSERT INTO timeline_events (uuid7, schema_version, event_type, platform, raw_message, command, flags, pipeline_status) \
-             VALUES ('{}', 1, 4, 'test', '{}', '{}', '{}', 'queued')",
-            uuid::Uuid::now_v7().to_string(),
-            json.replace('\'', "''"),
-            batch_uuid,
-            "test-runner",
-        );
-        let _ = send_container(
-            &mut ws,
-            &make_container(
-                "cockatiel-test-runner",
-                &uuid,
-                &auth,
-                Payload::DatabaseQuery(DatabaseQuery {
-                    query_id: "archive".into(),
-                    sql,
-                    params: vec![],
-                }),
-            ),
-        )
-        .await;
-        let _ = receive_container(&mut ws, 3000).await;
-    }
+    // Send every metric in one test_archive query; the engine inserts the
+    // archival rows via its own method (no raw INSERT allowed anymore).
+    let entries: Vec<serde_json::Value> = results
+        .iter()
+        .map(|r| serde_json::json!({ "json": r.to_json().to_string() }))
+        .collect();
+    let payload = serde_json::json!({ "batch_uuid": batch_uuid, "entries": entries }).to_string();
+    let _ = send_container(
+        &mut ws,
+        &make_container(
+            "cockatiel-test-runner",
+            &uuid,
+            &auth,
+            Payload::DatabaseQuery(DatabaseQuery {
+                query_id: "test_archive".into(),
+                sql: payload,
+                params: vec![],
+            }),
+        ),
+    )
+    .await;
+    let _ = receive_container(&mut ws, 5000).await;
     let _ = ws.close(None).await;
 }
 

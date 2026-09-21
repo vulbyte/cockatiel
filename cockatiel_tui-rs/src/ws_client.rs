@@ -140,27 +140,89 @@ impl WsClient {
         });
 
         if self.parent_mode {
-            // Parent mode: just receive state updates
+            // Parent mode: the child re-authenticates with its assigned uuid
+            // (which the parent's WsServer waits for), then both receives
+            // forwarded events (logs, query results) and forwards its own
+            // one-shot queries back to the parent.
+            self.auth_token = self.instance_uuid7.clone();
+            let auth_cont = Container {
+                version: 1,
+                auth_token: self.instance_uuid7.clone(),
+                module_name: "cockatiel-tui-child".into(),
+                module_instance_uuid7: self.instance_uuid7.clone(),
+                payload: Some(Payload::ConnectionRequest(ConnectionRequest {
+                    pin: 0,
+                    process_position: 4,
+                    priority: 1,
+                    module_instance_uuid7: self.instance_uuid7.clone(),
+                })),
+            };
+            let mut auth_buf = Vec::new();
+            if auth_cont.encode(&mut auth_buf).is_ok() {
+                let _ = write.send(WsMessage::Binary(auth_buf)).await;
+            }
+
+            let auth_token = self.auth_token.clone();
+            let instance_uuid7 = self.instance_uuid7.clone();
             loop {
-                match read.next().await {
-                    Some(Ok(WsMessage::Binary(data))) => {
-                        let container = Container::decode(data.as_ref())?;
-                        if container.auth_token != self.auth_token {
-                            continue;
+                tokio::select! {
+                    msg = read.next() => {
+                        match msg {
+                            Some(Ok(WsMessage::Binary(data))) => {
+                                let container = match Container::decode(data.as_ref()) {
+                                    Ok(c) => c,
+                                    Err(_) => continue,
+                                };
+                                if container.auth_token != auth_token {
+                                    continue;
+                                }
+                                match container.payload {
+                                    Some(Payload::Log(log)) => {
+                                        let _ = self.event_tx.send(WsEvent::Log {
+                                            source: container.module_name,
+                                            message: log.log,
+                                            event_type: 1,
+                                        });
+                                    }
+                                    Some(Payload::DatabaseQueryResult(result)) => {
+                                        let query_id = result.query_id.clone();
+                                        db::update_stats_from_query(&mut self.stats, &query_id, &result);
+                                        let _ = self.event_tx.send(WsEvent::QueryResult {
+                                            query_id,
+                                            result,
+                                        });
+                                        let _ = self.event_tx.send(WsEvent::StatsUpdate(self.stats.clone()));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(_)) | None => break,
                         }
-                        match container.payload {
-                            Some(Payload::Log(log)) => {
-                                let _ = self.event_tx.send(WsEvent::Log {
-                                    source: container.module_name,
-                                    message: log.log,
-                                    event_type: 1,
-                                });
+                    }
+                    cmd = self.command_rx.recv() => {
+                        let Some(cmd) = cmd else { break };
+                        match cmd {
+                            WsCommand::SendQuery { query_id, sql } => {
+                                let container = Container {
+                                    version: 1,
+                                    auth_token: auth_token.clone(),
+                                    module_name: "cockatiel-tui-child".into(),
+                                    module_instance_uuid7: instance_uuid7.clone(),
+                                    payload: Some(Payload::DatabaseQuery(DatabaseQuery {
+                                        query_id,
+                                        sql,
+                                        params: Vec::new(),
+                                    })),
+                                };
+                                let mut buf = Vec::new();
+                                if container.encode(&mut buf).is_ok() {
+                                    let _ = write.send(WsMessage::Binary(buf.into())).await;
+                                }
                             }
                             _ => {}
                         }
                     }
-                    Some(Ok(_)) => {}
-                    Some(Err(_)) | None => break,
                 }
             }
         } else {
