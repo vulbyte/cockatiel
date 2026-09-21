@@ -90,15 +90,25 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 [[package]]
 name = "cockatiel-client"
 version = "0.1.0"
+source = "git+https://github.com/vulbyte/cockatiel_client-rs?rev=a37fe0e2ba5fad13b417cfdbbf067a95b3844249#a37fe0e2ba5fad13b417cfdbbf067a95b3844249"
 dependencies = [
+ "cockatiel-proto",
  "futures-util",
  "prost 0.14.4",
- "prost-build",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
  "uuid",
+]
+
+[[package]]
+name = "cockatiel-proto"
+version = "0.1.0"
+source = "git+https://github.com/vulbyte/cockatiel_proto?rev=012845421731ccd8a9fc3e58ad1e89a4e4900fbe#012845421731ccd8a9fc3e58ad1e89a4e4900fbe"
+dependencies = [
+ "prost 0.14.4",
+ "prost-build",
 ]
 
 [[package]]
