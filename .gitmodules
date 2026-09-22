@@ -37,3 +37,9 @@
 [submodule "cockatiel_lib"]
 	path = cockatiel_lib
 	url = git@github.com:vulbyte/cockatiel_lib.git
+[submodule "modules/cockatiel_module-reprimand-rs"]
+	path = modules/cockatiel_module-reprimand-rs
+	url = git@github.com:vulbyte/cockatiel_module-reprimand-rs.git
+[submodule "modules/cockatiel_module-commend-rs"]
+	path = modules/cockatiel_module-commend-rs
+	url = git@github.com:vulbyte/cockatiel_module-commend-rs.git
