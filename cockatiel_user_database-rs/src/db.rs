@@ -339,20 +339,20 @@ impl UserDatabase {
             )
             .await?;
         } else {
-            // Atomic cooldown: insert only if no 24h reprimand from the same
-            // giver to this recipient exists.
-            let changed = conn.execute(
-                "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
-                 WHERE NOT EXISTS (
-                     SELECT 1 FROM rating_history
-                     WHERE giver_uuid7 = ?2 AND recipient_uuid7 = ?3 AND kind = 'reprimand'
-                       AND created_at > (?8 - 86400000)
-                 )",
-                turso::params![id, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, now],
-            )
-            .await?;
-            if changed == 0 {
+            // 24h cooldown: check for an existing reprimand from the same giver
+            // to this recipient within the last 24 hours. (A check-then-insert
+            // rather than a single INSERT...WHERE NOT EXISTS — the turso/Limbo
+            // driver can't translate the subquery form. The race window between
+            // two perfectly-simultaneous reprimands is negligible.)
+            let mut rows = conn
+                .query(
+                    "SELECT 1 FROM rating_history
+                     WHERE giver_uuid7 = ?1 AND recipient_uuid7 = ?2 AND kind = 'reprimand'
+                       AND created_at > ?3 LIMIT 1",
+                    turso::params![giver_uuid7, recipient_uuid7, now - 86400000],
+                )
+                .await?;
+            if let Some(_row) = rows.next().await? {
                 return Ok(RatingOutcome {
                     applied: false,
                     message: format!(
@@ -361,6 +361,12 @@ impl UserDatabase {
                     ),
                 });
             }
+            conn.execute(
+                "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                turso::params![id, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, now],
+            )
+            .await?;
         }
 
         self.adjust_score(recipient_uuid7, if is_commendation { 1 } else { -1 }, is_commendation)
@@ -561,5 +567,54 @@ impl UserDatabase {
         }
 
         Ok(users)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn temp_db() -> UserDatabase {
+        let dir = std::env::temp_dir().join(format!("cok_udb_test_{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = UserDatabase::new();
+        db.initialize(&dir.join("t.db")).await.unwrap();
+        db
+    }
+
+    async fn add(db: &UserDatabase, username: &str, channel_id: &str) -> String {
+        let chan = ChannelRef { platform: "test".into(), channel_id: channel_id.into(), handle: username.into() };
+        db.add_user(username, Some(&chan)).await.unwrap().uuid7
+    }
+
+    #[tokio::test]
+    async fn reprimand_cooldown_blocks_second_within_24h() {
+        let db = temp_db().await;
+        let giver = add(&db, "giver", "cg").await;
+        let target = add(&db, "target", "ct").await;
+
+        let first = db.rate_user(&giver, &target, false, "test", "target", "rude").await.unwrap();
+        assert!(first.applied, "first reprimand should apply");
+
+        // Second reprimand from the same giver -> denied by the 24h cooldown.
+        let second = db.rate_user(&giver, &target, false, "test", "target", "still rude").await.unwrap();
+        assert!(!second.applied, "second reprimand within 24h must be denied");
+        assert!(second.message.contains("24 hours"));
+
+        // A DIFFERENT giver may still reprimand the same target (recipient unlimited).
+        let giver2 = add(&db, "giver2", "cg2").await;
+        let other = db.rate_user(&giver2, &target, false, "test", "target", "also rude").await.unwrap();
+        assert!(other.applied, "a different giver may reprimand the same recipient");
+
+        // Commend is unlimited (same giver, same target, no cooldown).
+        let comm = db.rate_user(&giver, &target, true, "test", "target", "nice").await.unwrap();
+        assert!(comm.applied, "commend should always apply");
+        let comm2 = db.rate_user(&giver, &target, true, "test", "target", "nice again").await.unwrap();
+        assert!(comm2.applied, "commend is unlimited");
+
+        // Score/counters reflect it: -2 (reprimands) + 2 (commends) = 0.
+        let t = db.get_user_by_uuid(&target).await.unwrap().unwrap();
+        assert_eq!(t.score, 0);
+        assert_eq!(t.reprimands, 2);
+        assert_eq!(t.commendations, 2);
     }
 }
