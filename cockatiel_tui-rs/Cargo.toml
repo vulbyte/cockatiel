@@ -6,7 +6,7 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "d237be549927992d41d985dd5ccff06e89de664a" }
+cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "1dae41ef48682fb1af0e230531842043791eb709" }
 ratatui = "0.29"
 crossterm = "0.28"
 tokio-tungstenite = "0.24"
