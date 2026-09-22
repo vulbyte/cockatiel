@@ -783,7 +783,6 @@ fn handle_ws_event(
                 }
             }
         }
-        _ => {}
     }
 }
 
