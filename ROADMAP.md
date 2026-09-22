@@ -99,9 +99,9 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 
 ### Pending
 - [x] One-file import: **C++** (`#import <cockatiel_lib.h/c>` or cmake) — `cockatiel_lib/cpp11/cockatiel_lib.hpp`, C++11 RAII wrapper over the C client, smoke-tested live.
-- [ ] One-file import: **odin** (`import "<path/to/file/cockatiel_lib>"`)
-- [ ] One-file import: **java** (???)
-- [ ] One-file import: **lua** (`local my_lib = require("mymodule")`)
+- [x] One-file import: **odin** (`import "<path/to/file/cockatiel_lib>"`) — `cockatiel_lib/odin/`, native Odin (hand-rolled codec + WS over `core:net`), chain-tested live.
+- [x] One-file import: **java** (??? — done as a single `Cockatiel.java` + vendored `protobuf-java` jar) — `cockatiel_lib/java/`, chain-tested live.
+- [x] One-file import: **lua** (`local my_lib = require("mymodule")`) — `cockatiel_lib/lua/cockatiel_lib.lua`, LuaJIT FFI, chain-tested live.
 - [ ] `web_chat_renderer` — config check/create, take in PostProcessMessage with user data, display in a CSS-based chat window; options: disappear after x seconds, animations on/off, disable custom colors.
 
 ---
@@ -110,7 +110,7 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 
 - [ ] Real remote sync (`sync_to_remote()`) — currently a local-only stub.
 - [ ] TUI user-db UI — results currently surface in the log window only.
-- [ ] Local DB size warning logic (5 MB floor, 95% target warning).
+- [x] Local DB size warning logic (5 MB floor, 95% target warning) — `timeline_database_target_mb` + one-shot broadcast + `db_status` fields.
 - [ ] YouTube adapter needs a real Data API key (config holds a placeholder the API rejects).
 
 ---
