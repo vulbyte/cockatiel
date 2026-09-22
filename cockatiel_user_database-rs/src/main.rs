@@ -16,16 +16,119 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
+/// Load a KEY=VALUE `.env` file into the process environment (real env wins).
+fn load_env_file(path: &str) {
+    let Ok(content) = std::fs::read_to_string(path) else { return };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_string();
+            let value = value.trim().trim_matches('"').to_string();
+            if key.is_empty() {
+                continue;
+            }
+            if env::var(&key).is_err() {
+                // Startup-only, values from a file we own.
+                unsafe {
+                    env::set_var(key, value);
+                }
+            }
+        }
+    }
+}
+
+/// Merge key=value pairs into a `.env` file (creating it if missing), owner-only.
+fn write_env_file(path: &str, pairs: &[(&str, &str)]) {
+    let mut lines: Vec<String> = std::fs::read_to_string(path)
+        .map(|c| c.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    for (key, value) in pairs {
+        let entry = format!("{}={}", key, value);
+        let prefix = format!("{}=", key);
+        if let Some(idx) = lines.iter().position(|l| l.trim().starts_with(&prefix)) {
+            lines[idx] = entry;
+        } else {
+            lines.push(entry);
+        }
+    }
+    let mut content = lines.join("\n");
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    if std::fs::write(path, content).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Secrets + settings follow the pattern: a `.env` file (next to the DB, in
+    // the workdir) supplies them; real environment variables win.
+    load_env_file(".env");
+
     let port: u16 = env::var("USER_DB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9736);
-    let token = env::var("USER_DB_TOKEN").unwrap_or_else(|_| "userdb-default-token".to_string());
+    let token = match env::var("USER_DB_TOKEN") {
+        Ok(t) if !t.trim().is_empty() => t,
+        _ => {
+            // Standalone run with no token configured: mint one and persist it
+            // so the operator (and the supervisor on next launch) can use it.
+            let generated = uuid::Uuid::new_v4().to_string();
+            write_env_file(".env", &[("USER_DB_TOKEN", &generated)]);
+            eprintln!(
+                "[UserDB] No USER_DB_TOKEN configured — generated one and wrote it to .env"
+            );
+            generated
+        }
+    };
     let db_path: PathBuf = env::var("USER_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("user_data.db"));
+    let backup_path: Option<PathBuf> = env::var("USER_DB_BACKUP_PATH")
+        .map(PathBuf::from)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty());
 
     let db = Arc::new(UserDatabase::new());
-    db.initialize(&db_path).await?;
+    if let Err(e) = db.initialize(&db_path).await {
+        // Local DB unavailable — restore from the backup if one exists.
+        if let Some(bp) = &backup_path {
+            if bp.exists() {
+                eprintln!("[UserDB] local DB unavailable — restoring from backup {}", bp.display());
+                let _ = std::fs::copy(bp, &db_path);
+                db.initialize(&db_path).await?;
+            } else {
+                return Err(e);
+            }
+        } else {
+            return Err(e);
+        }
+    }
+
+    // Periodic backup to the configured location (if any).
+    if let Some(bp) = &backup_path {
+        let db = Arc::clone(&db);
+        let bp_task = bp.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                match db.backup_to(&bp_task).await {
+                    Ok(()) => println!("[UserDB] backed up to {}", bp_task.display()),
+                    Err(e) => eprintln!("[UserDB] backup failed: {}", e),
+                }
+            }
+        });
+        println!("[UserDB] Backup enabled at {}", bp.display());
+    } else {
+        println!("[UserDB] NO BACKUP SET — a corruption could mean TOTAL DATA LOSS");
+    }
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     println!("[UserDB] Listening on port {} (engine-only access)", port);

@@ -1,0 +1,13 @@
+name: git-hygiene
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check-tracked-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if secrets or databases are tracked
+        run: ./scripts/check_git_secrets.sh

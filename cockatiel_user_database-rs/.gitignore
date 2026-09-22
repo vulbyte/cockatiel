@@ -1,5 +1,6 @@
 # User database runtime files — contains user data. Never commit.
 user_data.db
+user_data_backup.db
 *.db-wal
 *.db-shm
 *.db-journal

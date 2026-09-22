@@ -45,12 +45,14 @@ CREATE TABLE IF NOT EXISTS user_values (
 #[derive(Debug, Clone)]
 pub struct UserDatabase {
     local: Arc<Mutex<Option<turso::Connection>>>,
+    path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl UserDatabase {
     pub fn new() -> Self {
         Self {
             local: Arc::new(Mutex::new(None)),
+            path: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -68,6 +70,10 @@ impl UserDatabase {
             let mut local = self.local.lock().await;
             *local = Some(conn);
         }
+        {
+            let mut p = self.path.lock().await;
+            *p = Some(path.clone());
+        }
 
         println!("[UserDB] Initialized at {:?}", path);
         Ok(())
@@ -83,6 +89,29 @@ impl UserDatabase {
     async fn conn(&self) -> Result<turso::Connection, Box<dyn std::error::Error>> {
         let guard = self.local.lock().await;
         guard.as_ref().cloned().ok_or("User database not initialized".into())
+    }
+
+/// Create a consistent snapshot of the DB at `path` by checkpointing the WAL
+    /// and copying the main file while the DB lock is held (no concurrent
+    /// writes), then atomically renaming into place.
+    pub async fn backup_to(&self, path: &std::path::Path) -> Result<(), String> {
+        let conn = self.conn().await.map_err(|e| e.to_string())?;
+        let src = self.path.lock().await.clone().ok_or("User database has no path")?;
+        // Merge the WAL so the main file is authoritative before the copy.
+        // (PRAGMA returns a result row — drain it so the driver doesn't error.)
+        if let Ok(mut stmt) = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
+            while let Ok(Some(_)) = stmt.next().await {}
+        }
+
+        let tmp = format!("{}.tmp", path.to_string_lossy());
+        let _ = std::fs::remove_file(&tmp);
+        std::fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
+        drop(conn);
+        drop(src);
+
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     // ── Core operations ────────────────────────────────────

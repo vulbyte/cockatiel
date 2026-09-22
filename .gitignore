@@ -192,3 +192,16 @@ target/
 *.log
 *.tmp
 *.bak
+
+# Module runtime config files — contain secrets (tokens/oauth). Never commit.
+modules/*/config.json
+cockatiel_tui-rs/config.json
+
+# Runtime databases (timeline / user-db / test-runner). Never commit.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+cockatiel_tui-rs/cockatiel_data.db*
