@@ -80,7 +80,7 @@ dependencies = [
 [[package]]
 name = "cockatiel-client"
 version = "0.1.0"
-source = "git+https://github.com/vulbyte/cockatiel_client-rs?rev=d237be549927992d41d985dd5ccff06e89de664a#d237be549927992d41d985dd5ccff06e89de664a"
+source = "git+https://github.com/vulbyte/cockatiel_client-rs?rev=1dae41ef48682fb1af0e230531842043791eb709#1dae41ef48682fb1af0e230531842043791eb709"
 dependencies = [
  "cockatiel-proto",
  "futures-util",
