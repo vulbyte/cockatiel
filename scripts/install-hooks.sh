@@ -26,7 +26,7 @@ EOF
 
 # shellcheck disable=SC2207
 REPOS=("$ROOT")
-for sm in "$ROOT"/cockatiel_engine-rs "$ROOT"/modules/*/; do
+for sm in "$ROOT"/cockatiel_engine-rs "$ROOT"/cockatiel_lib "$ROOT"/modules/*/; do
   [[ -d "$sm/.git" || -f "$sm/.git" ]] && REPOS+=("$sm")
 done
 
