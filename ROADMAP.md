@@ -19,8 +19,11 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] One-file import: **C#** (dotnet package) — `cockatiel_lib/dotnet/Cockatiel.cs` (single .cs + `Google.Protobuf` PackageReference), chain-tested live.
 - [x] One-file import: **gdScript** (paste-into-project folder; `preload("res://...")`) — `cockatiel_lib/gdscript/cockatiel_lib.gd`, codec self-test + live chain test under `godot --headless`.
 - [x] Test input module — the C/C#/gdScript clients each pass a live chain-dataflow test (ingest `MessagePreProcess` → timeline row verified), covering adapter→pre→in→post dataflow.
+- [x] **Engine command system** — modules register `<flag><command>` subscriptions via `commands_payload` (empty list = catch-all, receives everything; `alert_on_unknown_command` opts into the apology reply). The engine parses `<flag><command> -flag:value … args` (strips the `-`, accepts `-p 2` and `-p:2`, bare flags as booleans), attaches the parsed `Command` (with flag values) to `ChatMessage.command`, and routes a known command ONLY to its owner + catch-alls. Built-in `!help` lists registered commands; an invalid command on an alerting flag replies "sorry \<user\>, that command isn't valid…".
+- [x] **Chat ratings** — `chat_commend` / `chat_reprimand` engine queries (any verified user, gated to the two modules) backed by the user-db `rating_history` table (24h reprimand cooldown per giver→recipient, unit-tested). Modules: `cockatiel_module-commend-rs` (unlimited) + `cockatiel_module-reprimand-rs` (24h cooldown).
 
 ### Pending
+- [ ] **Adapter command migration** — twitch/kick/discord/youtube `!ban`/`!timeout` still parse raw chat themselves; migrate them to register + consume the engine-parsed command (they must be registered as pre-process command owners for routing).
 
 ## Checkpoint 2 — Engine modules
 
@@ -37,8 +40,8 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] `youtube_adapter` — config, proto, read chat, pass as pre-process, send messages (Google OAuth `youtube.force-ssl`; auto browser flow or pasted refresh token), ban (`-d`/`-r`), timeout (`-d`/`-r`).
 
 ### Pending
-- [ ] discord: receive a `Send` and post as an **embed** (discordjs-style).
-- [ ] discord: ban with `-d --duration` (discord bans are permanent; timeouts currently use `-d`).
+- [x] discord: receive a `Send` and post as an **embed** (discordjs-style) — `embed_sends` toggle in `config.json` (default off).
+- [x] discord: ban with `-d --duration` (discord bans are permanent; timeouts currently use `-d`) — `!ban @user -d <secs>` routes to `mod_timeout`.
 
 ## Checkpoint 4 — Processing modules
 
@@ -50,8 +53,8 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 
 ### Pending
 - [ ] banned_words: optional lightweight LLM review — thorough check with flags via [llama-guard-3-1b](https://huggingface.co/meta-llama/Llama-Guard-3-1B); quick 0–1 probability check via [deberta-v3-small](https://huggingface.co/microsoft/deberta-v3-small).
-- [ ] tts: allow users to choose a custom model from a local file.
-- [ ] tts: add a fallback when rendering fails (model missing, render fail, etc.).
+- [x] tts: allow users to choose a custom model from a local file — `config.json` `model_source` (HF id or local dir) passed to the worker's `load(model=…)`.
+- [x] tts: add a fallback when rendering fails — tries every worker in order, then replies with empty audio so the stage acks/completes.
 
 ## Checkpoint 5 — Minimal UI (term-chat)
 

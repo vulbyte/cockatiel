@@ -45,6 +45,27 @@ Any program can be a module — adapters, chatbots, TTS, in-game communication. 
 
 See `cockatiel_lib/CLIENT_CONTRACT.md` for the exact wire behavior every client implements.
 
+## Chat commands
+
+The engine parses commands out of raw messages, sorts them, and routes them to
+the module that owns them. A module subscribes by sending a `Commands` payload
+(`commands_payload`) listing its commands; an **empty** list makes it a
+catch-all (it receives everything). `alert_on_unknown_command` opts it into the
+apology reply when a user tries an unregistered command under one of its flags.
+
+Syntax: `<command_flag><command> <flag:value(optional)> <args>` — e.g.
+`!reprimand @user saying offensive things` or `!tts -p 2 -r 1.4 -v 88 hey!`.
+Flag names ship without the `-` (the engine strips it); both `-p 2` and `-p:2`
+are accepted, bare `-d` is a boolean. Flag values are validated against the
+owner's registered `Flag` definitions (`ANY`/`OPTIONS`/`RANGE`).
+
+Flow: does the message start with a registered flag? → is the command known?
+→ route it **only** to the owning module + catch-alls (skips the rest of the
+preprocess fanout). The parsed `Command` (with flag values) rides on
+`ChatMessage.command` for downstream modules. `!help` lists every registered
+command. What a module returns depends on its position: pre-process can return
+anything, in-process expects a message, post-process can return anything.
+
 ## Module manifest reference
 
 Each module in `modules/` (or anywhere the TUI searches) declares a `cockatiel_module_info.json` telling Cockatiel how to launch it, what it does, and where it plugs into the pipeline. It is parsed with **strict JSON** (`serde_json`) — no comments. Modules that connect remotely, or are managed by another application (e.g. in-game communication), don't need a manifest.
