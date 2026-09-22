@@ -67,9 +67,9 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] Display images/gifs as ascii art — toggle; adaptive sizing (longest dimension ~80% of the terminal, re-measured on resize); built-in converter (`image` crate, prefers `ascii-image-converter` when installed); `image_map.json` string→URL map; `image_min_rank` rank/score gating with `<image>` placeholder + logged reasons.
 
 ### Pending
+- [x] Disappear after x seconds — implemented as `message_fade_secs` (0 = off) + `message_fade_mode` (`remove`|`dim`) in `chat_config.json`.
 - [ ] Show user status: toggle for reprimend; toggle for colors.
 - [ ] Show user rank: toggle for colors.
-- [ ] Disappear after x seconds — options for how the message is removed, on/off toggle, setting.
 
 ## Checkpoint 6 — Mod tools
 
@@ -89,7 +89,7 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] `timeline_web_ui` (first half): the terminal audit viewer (`cockatiel-audit-viewer`) — live messages/errors/audit/logs + module health from the timeline; the pattern to mirror in the web viewer.
 
 ### Pending
-- [ ] Disappear after x seconds — toggle + setting.
+- [x] Disappear after x seconds — term-chat `message_fade_secs`/`message_fade_mode` (see Checkpoint 5).
 - [ ] `timeline_web_ui` (web/HTML+JS viewer): config check/create, get messages from user, user notes (get/display/adjust on type), get errors, get logs, get users by property (bans, commendations, reprimands, totalscore, etc.), display user properties.
 
 ## Checkpoint 7 — Extend modules and features
