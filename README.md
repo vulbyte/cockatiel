@@ -29,6 +29,22 @@ cd cockatiel_tui-rs
 
 The TUI is the supervisor: it launches the engine and the user-database service, discovers every module that ships a `cockatiel_module_info.json` (recursively from the `modules/` folder), and registers them in the pipeline. Modules start **disabled** by default — start them from the modules window (`s`). The engine itself is a passive router: it owns no processes, it only orders the pipeline and routes messages between connected modules.
 
+## One-file client imports
+
+Any program can be a module — adapters, chatbots, TTS, in-game communication. The one-file clients live in the [`cockatiel_lib`](https://github.com/vulbyte/cockatiel_lib) submodule; each implements the same contract (single-connection PIN→JWT auth, full 23-field `Container` codec, auto `AuthVerify` liveness answer):
+
+| Language | One-line import | Client file |
+|---|---|---|
+| JavaScript | `import { connectToEngine } from 'cockatiel-lib-js';` | `javascript/lib-cockatiel.mjs` |
+| Python | `from lib_cockatiel import CockatielClient` | `vulbyte/cockatiel_client-py` |
+| Rust | `use cockatiel_client::CockatielClient;` | `vulbyte/cockatiel_client-rs` |
+| C# | `using Cockatiel;` + `PackageReference` | `dotnet/Cockatiel.cs` |
+| C | `#include <cockatiel_lib.h>` + 1 cmake link line | `c/cockatiel_lib.h` |
+| C++ | `#include <cockatiel_lib.hpp>` | `cpp11/cockatiel_lib.hpp` |
+| gdScript | `preload("res://cockatiel_lib.gd")` | `gdscript/cockatiel_lib.gd` |
+
+See `cockatiel_lib/CLIENT_CONTRACT.md` for the exact wire behavior every client implements.
+
 ## Module manifest reference
 
 Each module in `modules/` (or anywhere the TUI searches) declares a `cockatiel_module_info.json` telling Cockatiel how to launch it, what it does, and where it plugs into the pipeline. It is parsed with **strict JSON** (`serde_json`) — no comments. Modules that connect remotely, or are managed by another application (e.g. in-game communication), don't need a manifest.

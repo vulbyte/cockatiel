@@ -15,11 +15,12 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
   - [x] TUI `t` triggers suites; `--suite/--module/--iterations` CLI
 - [x] Message `Container` proto — `version`, `auth_token`, `module_name`, `module_instance_uuid7`, plus the payload oneof (ConnectionRequest/Return, AuthVerify, AuthNew, Command(s), MessagePre/In/PostProcess, TimelineEvent, UserData, Shutdown, Log, Err, SendToPlatforms, MessageAck, DatabaseQuery/Result, ModuleControl/Result, Prompt, PromptResponse, AuditFlag).
 
+- [x] One-file import: **C** (`#import <cockatiel_lib.h/c>` or cmake) — `cockatiel_lib/c/`, nanopb codegen + libwebsockets, chain-tested live.
+- [x] One-file import: **C#** (dotnet package) — `cockatiel_lib/dotnet/Cockatiel.cs` (single .cs + `Google.Protobuf` PackageReference), chain-tested live.
+- [x] One-file import: **gdScript** (paste-into-project folder; `preload("res://...")`) — `cockatiel_lib/gdscript/cockatiel_lib.gd`, codec self-test + live chain test under `godot --headless`.
+- [x] Test input module — the C/C#/gdScript clients each pass a live chain-dataflow test (ingest `MessagePreProcess` → timeline row verified), covering adapter→pre→in→post dataflow.
+
 ### Pending
-- [ ] One-file import: **C** (`#import <cockatiel_lib.h/c>` or cmake)
-- [ ] One-file import: **C#** (dotnet package)
-- [ ] One-file import: **gdScript** (paste-into-project folder; `preload("res://...")`)
-- [ ] Test input module that connects as adapter, preprocess, inprocess, and postprocess to verify dataflow (the `Container` proto is done and the test-runner chain suite already verifies dataflow end-to-end, but the standalone module itself isn't confirmed).
 
 ## Checkpoint 2 — Engine modules
 
@@ -97,7 +98,7 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] `language_constrainer` — config check/create, proto, UTF-8 valid-character codes for the target language (toggles for emojis and expressive characters like `ඞ` or `(๑ > ᴗ < ๑)`), per-language map file + construction, out-of-language messages held for audit (a moderator approves/rejects via the prompt bus).
 
 ### Pending
-- [ ] One-file import: **C++** (`#import <cockatiel_lib.h/c>` or cmake)
+- [x] One-file import: **C++** (`#import <cockatiel_lib.h/c>` or cmake) — `cockatiel_lib/cpp11/cockatiel_lib.hpp`, C++11 RAII wrapper over the C client, smoke-tested live.
 - [ ] One-file import: **odin** (`import "<path/to/file/cockatiel_lib>"`)
 - [ ] One-file import: **java** (???)
 - [ ] One-file import: **lua** (`local my_lib = require("mymodule")`)
