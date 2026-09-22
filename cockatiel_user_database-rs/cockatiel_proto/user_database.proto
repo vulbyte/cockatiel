@@ -63,6 +63,15 @@ message ScoreRequest {
   string reason = 3;
 }
 
+message RatingRequest {
+  string giver_uuid7 = 1;
+  string recipient_uuid7 = 2;
+  bool is_commendation = 3;  // true = commend, false = reprimand
+  string platform = 4;
+  string handle = 5;         // the recipient's handle (for messages)
+  string reason = 6;
+}
+
 message AddChannelRequest {
   string uuid7 = 1;
   ChannelRef channel = 2;
@@ -145,6 +154,7 @@ message UserDbRequest {
     UserValueRequest write_user_value = 13;
     UserValueDeleteRequest delete_user_value = 14;
     UserValueListRequest list_user_values = 15;
+    RatingRequest rate_user = 16;
   }
 }
 

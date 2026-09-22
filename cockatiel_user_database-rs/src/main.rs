@@ -243,6 +243,22 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                 Err(e) => fail("Score remove failed", &e.to_string()),
             }
         }
+        user_db_request::Op::RateUser(r) => {
+            match db
+                .rate_user(&r.giver_uuid7, &r.recipient_uuid7, r.is_commendation, &r.platform, &r.handle, &r.reason)
+                .await
+            {
+                Ok(outcome) if outcome.applied => ok(None, outcome.message),
+                Ok(outcome) => {
+                    // Cooldown denial — not an internal error, but not applied.
+                    let mut resp = ok(None, outcome.message.clone());
+                    resp.success = false;
+                    resp.error = outcome.message;
+                    resp
+                }
+                Err(e) => fail("Rating failed", &e.to_string()),
+            }
+        }
         user_db_request::Op::AddChannel(ac) => {
             match db.add_channel(&ac.uuid7, ac.channel.as_ref()).await {
                 Ok(Some(user)) => ok(Some(user), "Channel added".to_string()),

@@ -7,6 +7,24 @@ use crate::proto::{ChannelRef, User};
 
 pub const SCHEMA_VERSION: i32 = 1;
 
+/// History of commend/reprimand events (giver → recipient), the source of the
+/// 24h reprimand cooldown. All user rating data lives here — centralized and
+/// searchable (see PLANNING/ROADMAP command-system work).
+const CREATE_RATING_HISTORY: &str = "
+CREATE TABLE IF NOT EXISTS rating_history (
+    uuid7 TEXT PRIMARY KEY,
+    giver_uuid7 TEXT NOT NULL,
+    recipient_uuid7 TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT '',
+    handle TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rating_history_giver ON rating_history(giver_uuid7, recipient_uuid7, kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_rating_history_recipient ON rating_history(recipient_uuid7, kind, created_at);
+";
+
 const CREATE_USERS: &str = "
 CREATE TABLE IF NOT EXISTS users (
     uuid7 TEXT PRIMARY KEY,
@@ -48,6 +66,12 @@ pub struct UserDatabase {
     path: Arc<Mutex<Option<PathBuf>>>,
 }
 
+/// Result of a rating (commend/reprimand) attempt.
+pub struct RatingOutcome {
+    pub applied: bool,
+    pub message: String,
+}
+
 impl UserDatabase {
     pub fn new() -> Self {
         Self {
@@ -65,6 +89,7 @@ impl UserDatabase {
         conn.execute(CREATE_USERS, ()).await?;
         conn.execute(CREATE_CHANNELS, ()).await?;
         conn.execute(CREATE_USER_VALUES, ()).await?;
+        conn.execute(CREATE_RATING_HISTORY, ()).await?;
 
         {
             let mut local = self.local.lock().await;
@@ -285,6 +310,65 @@ impl UserDatabase {
         ).await?;
 
         self.get_user_by_uuid(uuid7).await
+    }
+
+    /// Commend or reprimand a user. For a REPRIMAND the 24h cooldown is
+    /// enforced atomically: the history row is inserted only when no
+    /// reprimand from the same giver to this recipient exists within the
+    /// last 24 hours (single `INSERT ... WHERE NOT EXISTS`, so concurrent
+    /// attempts can't both pass). Commends are unlimited.
+    pub async fn rate_user(
+        &self,
+        giver_uuid7: &str,
+        recipient_uuid7: &str,
+        is_commendation: bool,
+        platform: &str,
+        handle: &str,
+        reason: &str,
+    ) -> Result<RatingOutcome, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let now = Self::now_ms();
+        let kind = if is_commendation { "commend" } else { "reprimand" };
+        let id = uuid::Uuid::now_v7().to_string();
+
+        if is_commendation {
+            conn.execute(
+                "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                turso::params![id, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, now],
+            )
+            .await?;
+        } else {
+            // Atomic cooldown: insert only if no 24h reprimand from the same
+            // giver to this recipient exists.
+            let changed = conn.execute(
+                "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM rating_history
+                     WHERE giver_uuid7 = ?2 AND recipient_uuid7 = ?3 AND kind = 'reprimand'
+                       AND created_at > (?8 - 86400000)
+                 )",
+                turso::params![id, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, now],
+            )
+            .await?;
+            if changed == 0 {
+                return Ok(RatingOutcome {
+                    applied: false,
+                    message: format!(
+                        "reprimand cooldown: you already reprimanded {} within the last 24 hours",
+                        handle
+                    ),
+                });
+            }
+        }
+
+        self.adjust_score(recipient_uuid7, if is_commendation { 1 } else { -1 }, is_commendation)
+            .await?;
+        Ok(RatingOutcome {
+            applied: true,
+            message: format!("{} applied", kind),
+        })
     }
 
     pub async fn add_channel(
