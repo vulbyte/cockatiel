@@ -11,7 +11,13 @@ pub struct Metrics {
     pub latency_p50_ms: f64,
     pub latency_p95_ms: f64,
     pub latency_p99_ms: f64,
+    pub latency_min_ms: f64,
+    pub latency_max_ms: f64,
+    pub latency_avg_ms: f64,
     pub msgs_per_min_projected: f64,
+    /// Per-test / per-module detail: `{ test, passed, failed, duration_ms,
+    /// avg_ms, min_ms, max_ms, notes }` — how each module handled each test.
+    pub detail: Vec<serde_json::Value>,
     pub notes: Vec<String>,
 }
 
@@ -40,6 +46,38 @@ impl Metrics {
         self.latency_p50_ms = p(0.50);
         self.latency_p95_ms = p(0.95);
         self.latency_p99_ms = p(0.99);
+        self.latency_min_ms = sorted[0];
+        self.latency_max_ms = sorted[sorted.len() - 1];
+        self.latency_avg_ms = sorted.iter().sum::<f64>() / sorted.len() as f64;
+    }
+
+    /// Record a single test outcome with its timing breakdown.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_detail(
+        &mut self,
+        test: impl Into<String>,
+        passed: bool,
+        duration_ms: u128,
+        avg_ms: f64,
+        min_ms: f64,
+        max_ms: f64,
+        note: impl Into<String>,
+    ) {
+        if passed {
+            self.passed += 1;
+        } else {
+            self.failed += 1;
+        }
+        self.detail.push(serde_json::json!({
+            "test": test.into(),
+            "passed": passed,
+            "failed": !passed,
+            "duration_ms": duration_ms,
+            "avg_ms": avg_ms,
+            "min_ms": min_ms,
+            "max_ms": max_ms,
+            "notes": note.into(),
+        }));
     }
 
     pub fn finalize(&mut self) {
@@ -62,7 +100,11 @@ impl Metrics {
             "latency_p50_ms": self.latency_p50_ms,
             "latency_p95_ms": self.latency_p95_ms,
             "latency_p99_ms": self.latency_p99_ms,
+            "latency_min_ms": self.latency_min_ms,
+            "latency_max_ms": self.latency_max_ms,
+            "latency_avg_ms": self.latency_avg_ms,
             "msgs_per_min_projected": self.msgs_per_min_projected,
+            "detail": self.detail,
             "notes": self.notes,
         })
     }

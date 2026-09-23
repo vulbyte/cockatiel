@@ -7,6 +7,8 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use cockatiel_client::proto::{container::Payload, *};
 
 mod fake_engine;
+mod hardening;
+mod screening;
 mod metrics;
 
 use metrics::Metrics;
@@ -14,8 +16,9 @@ use metrics::Metrics;
 
 // ── CLI (hand-rolled) ─────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Cli {
-    suite: String, // "chain" | "modules" | "all"
+    suite: String, // "chain" | "modules" | "screening" | "hardening" | "all"
     module: Option<String>,
     iterations: u64,
     json: bool,
@@ -32,7 +35,7 @@ USAGE:
   cockatiel-test-runner [OPTIONS]
 
 OPTIONS:
-  --suite <name>       "chain" | "modules" | "all"   (default: all)
+  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "all"   (default: all)
   --module <name>      run only this module (runtime probe)
   --iterations <n>     messages per test burst        (default: 100)
   --json               output machine-readable JSON summary
@@ -120,7 +123,7 @@ fn parse_args(args: &[String]) -> Cli {
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn connect_engine(cli: &Cli) -> Result<WsStream, String> {
+pub(crate) async fn connect_engine(cli: &Cli) -> Result<WsStream, String> {
     let url = format!("ws://{}:{}", cli.ip, cli.port);
     let (ws, _) = tokio_tungstenite::connect_async(url)
         .await
@@ -128,7 +131,7 @@ async fn connect_engine(cli: &Cli) -> Result<WsStream, String> {
     Ok(ws)
 }
 
-async fn send_container(ws: &mut WsStream, c: &Container) -> Result<(), String> {
+pub(crate) async fn send_container(ws: &mut WsStream, c: &Container) -> Result<(), String> {
     let mut buf = Vec::new();
     c.encode(&mut buf).map_err(|e| e.to_string())?;
     ws.send(WsMessage::Binary(buf.into()))
@@ -136,7 +139,7 @@ async fn send_container(ws: &mut WsStream, c: &Container) -> Result<(), String> 
         .map_err(|e| format!("send: {}", e))
 }
 
-async fn receive_container(ws: &mut WsStream, timeout_ms: u64) -> Result<Container, String> {
+pub(crate) async fn receive_container(ws: &mut WsStream, timeout_ms: u64) -> Result<Container, String> {
     let r = tokio::time::timeout(Duration::from_millis(timeout_ms), ws.next()).await;
     match r {
         Ok(Some(Ok(WsMessage::Binary(data)))) => Container::decode(data.as_ref()).map_err(|e| e.to_string()),
@@ -148,7 +151,7 @@ async fn receive_container(ws: &mut WsStream, timeout_ms: u64) -> Result<Contain
     }
 }
 
-fn make_container(module: &str, uuid: &str, auth: &str, payload: Payload) -> Container {
+pub(crate) fn make_container(module: &str, uuid: &str, auth: &str, payload: Payload) -> Container {
     Container {
         version: 1,
         auth_token: auth.to_string(),
@@ -213,6 +216,7 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
             user_uuid7: String::new(),
             command: None,
             user_data: None,
+            channel_id: String::new(),
         };
         // Ingest like an adapter: EMPTY message_uuid7 so the engine assigns the
         // row uuid and starts the pipeline (a non-empty uuid would be treated as
@@ -567,6 +571,12 @@ async fn main() {
     if cli.suite == "modules" || cli.suite == "all" {
         all.extend(run_module_suite(&cli).await);
     }
+    if cli.suite == "screening" || cli.suite == "all" {
+        all.extend(screening::run_screening_suite(&cli).await);
+    }
+    if cli.suite == "hardening" || cli.suite == "all" {
+        all.extend(hardening::run_hardening_suite(&cli).await);
+    }
 
     // Summary
     let mut passed = 0u32;
@@ -579,9 +589,22 @@ async fn main() {
     println!("batch {}: {} passed, {} failed, {} suites", batch_uuid, passed, failed, all.len());
     for m in &all {
         println!(
-            "  {:<28} req/s={:.1}  msgs/min~{:.0}  p50={:.1}ms  p95={:.1}ms  pass={} fail={}",
-            m.name, m.req_per_sec, m.msgs_per_min_projected, m.latency_p50_ms, m.latency_p95_ms, m.passed, m.failed
+            "  {:<28} req/s={:.1}  msgs/min~{:.0}  p50={:.1}ms  p95={:.1}ms  min={:.1}ms  avg={:.1}ms  max={:.1}ms  pass={} fail={}",
+            m.name, m.req_per_sec, m.msgs_per_min_projected, m.latency_p50_ms, m.latency_p95_ms,
+            m.latency_min_ms, m.latency_avg_ms, m.latency_max_ms, m.passed, m.failed
         );
+        for d in &m.detail {
+            println!(
+                "      {:<26} pass={} fail={}  avg={:.1}ms  min={:.1}ms  max={:.1}ms  {}",
+                d["test"].as_str().unwrap_or("?"),
+                d["passed"].as_bool().unwrap_or(false) as u64,
+                d["failed"].as_bool().unwrap_or(false) as u64,
+                d["avg_ms"].as_f64().unwrap_or(0.0),
+                d["min_ms"].as_f64().unwrap_or(0.0),
+                d["max_ms"].as_f64().unwrap_or(0.0),
+                d["notes"].as_str().unwrap_or(""),
+            );
+        }
     }
     println!("{}", "=".repeat(60));
 

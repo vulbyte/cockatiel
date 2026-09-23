@@ -116,6 +116,7 @@ impl FakeEngine {
                     user_uuid7: String::new(),
                     command: None,
                     user_data: None,
+                    channel_id: String::new(),
                 }),
                 processed_message: String::new(),
                 abandon_message: false,
