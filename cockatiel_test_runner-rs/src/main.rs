@@ -8,6 +8,7 @@ use cockatiel_client::proto::{container::Payload, *};
 
 mod fake_engine;
 mod hardening;
+mod probe;
 mod screening;
 mod metrics;
 
@@ -18,7 +19,7 @@ use metrics::Metrics;
 
 #[derive(Clone)]
 struct Cli {
-    suite: String, // "chain" | "modules" | "screening" | "hardening" | "all"
+    suite: String, // "chain" | "modules" | "screening" | "hardening" | "probe" | "all"
     module: Option<String>,
     iterations: u64,
     json: bool,
@@ -35,7 +36,7 @@ USAGE:
   cockatiel-test-runner [OPTIONS]
 
 OPTIONS:
-  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "all"   (default: all)
+  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "probe" | "all"   (default: all)
   --module <name>      run only this module (runtime probe)
   --iterations <n>     messages per test burst        (default: 100)
   --json               output machine-readable JSON summary
@@ -312,7 +313,7 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
 /// True when a module declares non-optional credentials and NONE of them are
 /// present (non-empty) in its saved config — such modules would stall waiting
 /// for setup. If at least one required credential is configured, we run it.
-fn module_missing_required_credentials(dir: &std::path::Path, manifest: &serde_json::Value) -> bool {
+pub(crate) fn module_missing_required_credentials(dir: &std::path::Path, manifest: &serde_json::Value) -> bool {
     let Some(creds) = manifest.get("credentials").and_then(|v| v.as_array()) else {
         return false;
     };
@@ -576,6 +577,9 @@ async fn main() {
     }
     if cli.suite == "hardening" || cli.suite == "all" {
         all.extend(hardening::run_hardening_suite(&cli).await);
+    }
+    if cli.suite == "probe" || cli.suite == "all" {
+        all.extend(probe::run_probe_suite(&cli).await);
     }
 
     // Summary

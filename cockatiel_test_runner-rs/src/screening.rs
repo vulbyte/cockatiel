@@ -13,7 +13,8 @@ use crate::{
 };
 use cockatiel_client::proto::{container::Payload, *};
 
-type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// Shared test-runner WebSocket type (screening / probe harness).
+pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Authenticate as the test-runner (always trusted). Returns the write half +
 /// auth token + a fresh module uuid.
@@ -538,26 +539,20 @@ async fn concurrent_adapters(cli: &Cli, m: &mut Metrics) {
         format!("{} workers x {} msgs; sent={} landed={}/{}", workers, per, total_sent, count, want),
     );
 }
-/// E/F — per-module probes: for each connected module, send a probe payload
-/// (log + auth_verify) via test_probe and record responded/min/avg/max latency.
-async fn per_module_probes(cli: &Cli, m: &mut Metrics) {
-    let (mut ws, auth, uuid) = match auth_as_test_runner(cli).await {
-        Ok(x) => x,
-        Err(e) => {
-            m.push_detail("per_module_probes", false, 0, 0.0, 0.0, 0.0, e);
-            return;
-        }
-    };
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Discover connected modules via module_list.
+/// Query the engine's module_list and return the names of CONNECTED modules
+/// (live sessions; discovered-but-offline entries are skipped, as are the
+/// test/control surfaces). Shared by screening + the probe harness.
+pub(crate) async fn connected_modules(
+    ws: &mut WsStream,
+    auth: &str,
+    uuid: &str,
+) -> Vec<String> {
     let q = make_container(
-"cockatiel-test-runner", &uuid, &auth,
+        "cockatiel-test-runner", uuid, auth,
         Payload::DatabaseQuery(DatabaseQuery { query_id: "module_list".into(), sql: "".into(), params: vec![] }),
     );
-    if send_container(&mut ws, &q).await.is_err() {
-        m.push_detail("per_module_probes", false, 0, 0.0, 0.0, 0.0, "module_list send failed");
-        return;
+    if send_container(ws, &q).await.is_err() {
+        return Vec::new();
     }
     let mut modules: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -570,8 +565,7 @@ async fn per_module_probes(cli: &Cli, m: &mut Metrics) {
                             if let Some(arr) = v.as_array() {
                                 for e in arr {
                                     let name = e.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                    // Only CONNECTED sessions have a uuid7; discovered-but-
-                                    // offline modules are skipped (a note, not a failure).
+                                    // Only CONNECTED sessions have connected_at set.
                                     let connected = e.get("connected_at").and_then(|c| c.as_i64()).map(|c| c > 0).unwrap_or(false);
                                     let skip = matches!(name, "cockatiel-test-runner" | "cockatiel-tui" | "cockatiel-tui-child");
                                     if connected && !name.is_empty() && !skip {
@@ -586,7 +580,23 @@ async fn per_module_probes(cli: &Cli, m: &mut Metrics) {
             }
         }
     }
+    modules
+}
 
+/// E/F — per-module probes: for each connected module, send a probe payload
+/// (log + auth_verify) via test_probe and record responded/min/avg/max latency.
+async fn per_module_probes(cli: &Cli, m: &mut Metrics) {
+    let (mut ws, auth, uuid) = match auth_as_test_runner(cli).await {
+        Ok(x) => x,
+        Err(e) => {
+            m.push_detail("per_module_probes", false, 0, 0.0, 0.0, 0.0, e);
+            return;
+        }
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Discover connected modules via module_list.
+    let modules = connected_modules(&mut ws, &auth, &uuid).await;
     if modules.is_empty() {
         m.notes.push("per_module_probes: no modules connected to probe".to_string());
         return;
@@ -617,7 +627,7 @@ async fn per_module_probes(cli: &Cli, m: &mut Metrics) {
 
 /// Send N test_probe queries for one module + a payload type; return the
 /// per-probe latencies (only the responded ones).
-async fn probe_module(
+pub(crate) async fn probe_module(
     ws: &mut WsStream,
     auth: &str,
     uuid: &str,
