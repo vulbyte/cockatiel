@@ -73,8 +73,8 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 
 ### Pending
 - [x] Disappear after x seconds — implemented as `message_fade_secs` (0 = off) + `message_fade_mode` (`remove`|`dim`) in `chat_config.json`.
-- [ ] Show user status: toggle for reprimend; toggle for colors.
-- [ ] Show user rank: toggle for colors.
+- [x] Show user status: toggle for reprimand; toggle for colors — `show_reprimand` (compact red `R`, reads the enriched `reprimands` counter) + `show_status_color` (role badge letters).
+- [x] Show user rank: toggle for colors — `show_rank_color` (rank text).
 
 ## Checkpoint 6 — Mod tools
 
