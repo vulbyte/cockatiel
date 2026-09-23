@@ -23,7 +23,9 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] **Chat ratings** — `chat_commend` / `chat_reprimand` engine queries (any verified user, gated to the two modules) backed by the user-db `rating_history` table (24h reprimand cooldown per giver→recipient, unit-tested). Modules: `cockatiel_module-commend-rs` (unlimited) + `cockatiel_module-reprimand-rs` (24h cooldown).
 
 ### Pending
-- [ ] **Adapter command migration** — twitch/kick/discord/youtube `!ban`/`!timeout` still parse raw chat themselves; migrate them to register + consume the engine-parsed command (they must be registered as pre-process command owners for routing).
+- [x] **Adapter command migration** — twitch/kick/discord/youtube `!ban`/`!timeout` register via `commands_payload` and consume the engine-parsed command (routed with the parsed `Command` on `ChatMessage.command`); ingest-side raw parsing removed.
+- [x] **Targeted command replies** — `ChatMessage.channel_id` + `SendToPlatforms.channel_id`: `!help`/invalid-command replies target the source channel (discord routes to it; single-channel adapters unaffected).
+- [x] **Standalone command invocation** — engine handles `Payload::CommandPayload`: a module/UI can invoke a registered command outside any chat message.
 
 ## Checkpoint 2 — Engine modules
 

@@ -69,9 +69,9 @@ preprocess fanout). The parsed `Command` (with flag values) rides on
 command. What a module returns depends on its position: pre-process can return
 anything, in-process expects a message, post-process can return anything.
 
-Note: the engine's `!help` and invalid-command replies go out through
-`SendToPlatforms`, which today broadcasts to **all** channels of the target
-platform (a per-channel target is a planned follow-up).
+Note: the engine's `!help` and invalid-command replies target the **source
+channel** (the message's `channel_id` flows to `SendToPlatforms`; multi-channel
+adapters route it, single-channel adapters are unaffected).
 
 ## Module manifest reference
 
