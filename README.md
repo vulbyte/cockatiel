@@ -2,7 +2,7 @@
 
 Chat automation and moderation engine for streamers.
 
-Cockatiel is a platform-agnostic chat engine. Platform adapters (Twitch, Kick, YouTube, Discord) feed every message into a 5-stage engine pipeline — pre-process → in-process → post-process — where your modules censor, score, constrain, translate, synthesize speech, or archive whatever they want. All messages live in a timeline database that doubles as the queue, so nothing is lost and everything can be audited. You supervise the whole thing from a terminal TUI, and watch the chat in term-chat.
+Cockatiel is a platform-agnostic chat engine. Platform adapters (Twitch, Kick, YouTube, Discord) feed every message into a 5-state engine pipeline — queued → pre-process → in-process → post-process → complete — where your modules censor, score, constrain, translate, synthesize speech, or archive whatever they want. All messages live in a timeline database that doubles as the queue, so nothing is lost and everything can be audited. You supervise the whole thing from a terminal TUI, and watch the chat in term-chat.
 
 ## Why make this?
 
@@ -42,6 +42,9 @@ Any program can be a module — adapters, chatbots, TTS, in-game communication. 
 | C | `#include <cockatiel_lib.h>` + 1 cmake link line | `c/cockatiel_lib.h` |
 | C++ | `#include <cockatiel_lib.hpp>` | `cpp11/cockatiel_lib.hpp` |
 | gdScript | `preload("res://cockatiel_lib.gd")` | `gdscript/cockatiel_lib.gd` |
+| Odin | `import ck "cockatiel_lib"` | `odin/cockatiel_lib/cockatiel_lib.odin` |
+| Java | `import cockatiel.Cockatiel;` | `java/Cockatiel.java` |
+| Lua | `local lib = require("cockatiel_lib")` | `lua/cockatiel_lib.lua` |
 
 See `cockatiel_lib/CLIENT_CONTRACT.md` for the exact wire behavior every client implements.
 
@@ -65,6 +68,10 @@ preprocess fanout). The parsed `Command` (with flag values) rides on
 `ChatMessage.command` for downstream modules. `!help` lists every registered
 command. What a module returns depends on its position: pre-process can return
 anything, in-process expects a message, post-process can return anything.
+
+Note: the engine's `!help` and invalid-command replies go out through
+`SendToPlatforms`, which today broadcasts to **all** channels of the target
+platform (a per-channel target is a planned follow-up).
 
 ## Module manifest reference
 
@@ -90,6 +97,11 @@ Fields:
 - `binary` — prebuilt binary routes per OS → CPU architecture (e.g. `macos`/`aarch64`). When present and the file exists, the supervisor runs it directly instead of compiling. A legacy `os → path` form is also accepted.
 - `build_command` / `build_flags` — how to build the module when no (fresh) binary exists. Falls back to `cargo build --release`.
 - `unresponsive_timeout_secs` / `probe_response_secs` — optional per-module overrides for the engine's dead-air liveness probing.
+
+**Config convention:** module settings live in `config.json`'s `module_specific`
+(non-secret) or the module's `.env` (secrets, owner-only), and a module should
+**create the value with its default when it's missing** — so every setting always
+exists and is editable in place.
 
 Example (strict JSON):
 
@@ -117,11 +129,18 @@ Example (strict JSON):
   "binary": {
     "macos": {
       "aarch64": "target/release/example_module",
-      "x86_64": "target/release/example_module"
+      "x86_64": "target/release/example_module",
+      "arm": "target/release/example_module"
     },
     "linux": {
       "aarch64": "target/release/example_module",
-      "x86_64": "target/release/example_module"
+      "x86_64": "target/release/example_module",
+      "arm": "target/release/example_module"
+    },
+    "windows": {
+      "aarch64": "target/release/example_module.exe",
+      "x86_64": "target/release/example_module.exe",
+      "arm": "target/release/example_module.exe"
     }
   },
   "build_command": "cargo",
@@ -133,7 +152,7 @@ Example (strict JSON):
 
 **Repos.** Every component is its own repository and builds **standalone** or runs together over the WS/protobuf protocol: the protocol lives in `vulbyte/cockatiel_proto` (a Rust crate), the client SDKs in `vulbyte/cockatiel_client-rs` / `-py`, and each module in its own `vulbyte/cockatiel_module-*` repo. Consumers pin the client/proto by **exact commit SHA** (`rev =`), so the wire format a module is built against never shifts underneath it. The engine, TUI, user-database, and test-runner live in their own repos too; this monorepo tracks everything as submodules.
 
-**Pipeline.** An adapter sends a message into the engine, which inserts it into the timeline database as `queued`, then runs the 5-stage chain: pre-process fanout (concurrent) → in-process chain (sequential) → post-process fanout (concurrent) → marked `complete`. Every stage is acked; the timeline table *is* the queue, so a restart just re-queues anything still in flight. Messages flagged for audit are held (`audit` status) until a moderator approves (→ `complete`) or rejects (→ `failed`, row kept). Errors land in the timeline with `failed` status for later review. Displays (term-chat, audit-viewer) connect as post-process/output consumers and render the finished messages.
+**Pipeline.** An adapter sends a message into the engine, which inserts it into the timeline database as `queued`, then runs the 5-state chain: `queued` → pre-process fanout (concurrent) → in-process chain (sequential) → post-process fanout (concurrent) → marked `complete`. Every stage is acked; the timeline table *is* the queue, so a restart just re-queues anything still in flight. Messages flagged for audit are held (`audit` status) until a moderator approves (→ `complete`) or rejects (→ `failed`, row kept). Errors land in the timeline with `failed` status for later review. Displays (term-chat, audit-viewer) connect as post-process/output consumers and render the finished messages.
 
 **User database.** `cockatiel_user_database-rs` is a separate WebSocket service holding users, scores, roles, and per-user key/values. The engine is its only privileged client; mod commands (`commend`, `reprimand`, `ban`, `timeout`) map onto it. Platform roles (owner/mod/sponsor) are verified on login and merged with the user-db tier.
 
