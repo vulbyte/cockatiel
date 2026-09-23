@@ -54,7 +54,7 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 - [x] `language_constrainer` — see Checkpoint 7.
 
 ### Pending
-- [ ] banned_words: optional lightweight LLM review — thorough check with flags via [llama-guard-3-1b](https://huggingface.co/meta-llama/Llama-Guard-3-1B); quick 0–1 probability check via [deberta-v3-small](https://huggingface.co/microsoft/deberta-v3-small).
+- [x] banned_words: optional lightweight LLM review — thorough check with flags via [llama-guard-3-1b](https://huggingface.co/meta-llama/Llama-Guard-3-1B); quick 0–1 probability check via [deberta-v3-small](https://huggingface.co/microsoft/deberta-v3-small).
 - [x] tts: allow users to choose a custom model from a local file — `config.json` `model_source` (HF id or local dir) passed to the worker's `load(model=…)`.
 - [x] tts: add a fallback when rendering fails — tries every worker in order, then replies with empty audio so the stage acks/completes.
 
