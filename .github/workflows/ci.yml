@@ -1,0 +1,118 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-suites:
+    runs-on: ubuntu-latest
+    env:
+      CI_PIN: "738291"
+      USER_DB_TOKEN: "ci-userdb-token-4b7f2a"
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      # The engine/user-db config + approval files are gitignored (they hold
+      # secrets locally). Seed CI-only values so the services boot + the test
+      # identities (banned-words etc.) are auto-approved.
+      - name: Seed engine locals (PIN + approved modules)
+        run: |
+          cd cockatiel_engine-rs
+          printf 'COCKATIEL_PIN=%s\n' "$CI_PIN" > .env
+          cat > modules.json <<'EOF'
+          [
+            {"name": "banned-words", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "commend", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "reprimand", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "stress-test", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "score-messages", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "language-constrainer", "auto_auth": true, "position": "preprocess", "priority": 100}
+          ]
+          EOF
+
+      - name: Build + unit test engine and user-db
+        run: |
+          cargo build --manifest-path cockatiel_engine-rs/Cargo.toml
+          cargo test --manifest-path cockatiel_engine-rs/Cargo.toml
+          cargo build --manifest-path cockatiel_user_database-rs/Cargo.toml
+          cargo test --manifest-path cockatiel_user_database-rs/Cargo.toml
+
+      - name: Build test-runner + eligible modules (for the probe suite)
+        run: |
+          cargo build --manifest-path cockatiel_test_runner-rs/Cargo.toml
+          for m in banned_words commend reprimand stress_test score_messages language_constrainer; do
+            cargo build --release --manifest-path modules/cockatiel_module-$m-rs/Cargo.toml || true
+          done
+
+      - name: Seed module configs (so they connect instead of prompting)
+        run: |
+          for m in stress_test score_messages language_constrainer; do
+            printf '{\n  "module_specific": {}\n}\n' > modules/cockatiel_module-$m-rs/config.json
+          done
+
+      - name: Boot user-db + engine
+        run: |
+          cd cockatiel_user_database-rs
+          ./target/debug/cockatiel-user-database > /tmp/userdb.log 2>&1 &
+          echo $! > /tmp/userdb.pid
+          cd ../cockatiel_engine-rs
+          ./target/debug/cockatiel-engine-rs > /tmp/engine.log 2>&1 &
+          echo $! > /tmp/engine.pid
+          # Wait for the engine's WS port to accept connections.
+          for i in $(seq 1 30); do
+            if kill -0 $(cat /tmp/engine.pid) 2>/dev/null && bash -c 'exec 3<>/dev/tcp/127.0.0.1/9734' 2>/dev/null; then
+              echo "engine accepting connections"
+              break
+            fi
+            sleep 1
+          done
+          if ! kill -0 $(cat /tmp/engine.pid) 2>/dev/null; then
+            echo "ENGINE FAILED TO START"
+            tail -40 /tmp/engine.log
+            exit 1
+          fi
+
+      - name: Run screening suite
+        run: |
+          cd cockatiel_test_runner-rs
+          cargo run -- --suite screening --iterations 25 --pin "$CI_PIN" 2>&1 | tee /tmp/screening.log
+          if ! rg -q "0 failed" /tmp/screening.log; then
+            echo "SCREENING NOT GREEN"
+            exit 1
+          fi
+
+      - name: Run hardening suite
+        run: |
+          cd cockatiel_test_runner-rs
+          cargo run -- --suite hardening --pin "$CI_PIN" 2>&1 | tee /tmp/hardening.log
+          if ! rg -q "0 failed" /tmp/hardening.log; then
+            echo "HARDENING NOT GREEN"
+            exit 1
+          fi
+
+      - name: Run probe suite (per-module, real modules)
+        run: |
+          cd cockatiel_test_runner-rs
+          cargo run -- --suite probe --pin "$CI_PIN" 2>&1 | tee /tmp/probe.log
+          # The probe suite fails if a launched module fails its auth_verify probe.
+          if ! rg -q "0 failed" /tmp/probe.log; then
+            echo "PROBE NOT GREEN"
+            exit 1
+          fi
+
+      - name: Cleanup services
+        if: always()
+        run: |
+          kill $(cat /tmp/engine.pid) 2>/dev/null || true
+          kill $(cat /tmp/userdb.pid) 2>/dev/null || true

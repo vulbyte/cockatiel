@@ -46,7 +46,7 @@ fn resolve_binary(dir: &std::path::Path, manifest: &serde_json::Value) -> Option
 
 /// Launch a module binary against the real engine (CLI overrides win over any
 /// on-disk connection config). Returns the spawned child or None.
-fn launch_module(dir: &std::path::Path, manifest: &serde_json::Value, cli: &Cli) -> Option<std::process::Child> {
+fn launch_module(dir: &std::path::Path, manifest: &serde_json::Value, name: &str, cli: &Cli) -> Option<std::process::Child> {
     let (program, mut args) = resolve_binary(dir, manifest)?;
     let mut cmd = std::process::Command::new(&program);
     cmd.args(&args)
@@ -56,6 +56,10 @@ fn launch_module(dir: &std::path::Path, manifest: &serde_json::Value, cli: &Cli)
         .arg(cli.port.to_string())
         .arg("--pin")
         .arg(cli.pin.to_string())
+        // Pin the module's identity so it connects as itself even without a
+        // local connection file (which may be absent or stale in CI).
+        .arg("--name")
+        .arg(name)
         .current_dir(dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -104,7 +108,7 @@ pub async fn run_probe_suite(cli: &Cli) -> Vec<Metrics> {
             continue;
         }
         println!("[probe] launching '{}' against the real engine...", name);
-        match launch_module(&dir, &manifest, cli) {
+        match launch_module(&dir, &manifest, &name, cli) {
             Some(child) => {
                 launched.push(name);
                 children.push(child);
