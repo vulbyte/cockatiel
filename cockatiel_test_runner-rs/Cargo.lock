@@ -80,7 +80,7 @@ dependencies = [
 [[package]]
 name = "cockatiel-client"
 version = "0.1.0"
-source = "git+https://github.com/vulbyte/cockatiel_client-rs?rev=a74ebf1e63784be39876a55cf3a963933220bf15#a74ebf1e63784be39876a55cf3a963933220bf15"
+source = "git+https://github.com/vulbyte/cockatiel_client-rs?rev=ca14783689eb0364ff987c0eb171e8e9dd0e7bd3#ca14783689eb0364ff987c0eb171e8e9dd0e7bd3"
 dependencies = [
  "cockatiel-proto",
  "futures-util",
@@ -95,7 +95,7 @@ dependencies = [
 [[package]]
 name = "cockatiel-proto"
 version = "0.1.0"
-source = "git+https://github.com/vulbyte/cockatiel_proto?rev=94a881455e4fea9fa05d35739f3698ae6a43dc41#94a881455e4fea9fa05d35739f3698ae6a43dc41"
+source = "git+https://github.com/vulbyte/cockatiel_proto?rev=87fc04bf19e8b5c9de778c296b3e4dd005048f0d#87fc04bf19e8b5c9de778c296b3e4dd005048f0d"
 dependencies = [
  "prost 0.14.4",
  "prost-build",
