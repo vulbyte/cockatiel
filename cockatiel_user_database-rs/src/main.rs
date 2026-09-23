@@ -176,7 +176,19 @@ async fn handle_connection(
             continue;
         }
 
-        let response = dispatch(&db, &request).await;
+        let db2 = Arc::clone(&db);
+        let req = request.clone();
+        // Run each request in a contained task so a turso/Limbo "not yet
+        // implemented" panic (unsupported SQL) returns an error response
+        // instead of killing the whole connection.
+        let handle = tokio::spawn(async move { dispatch(&db2, &req).await });
+        let response = match handle.await {
+            Ok(resp) => resp,
+            Err(join) => {
+                eprintln!("[UserDB] request panicked: {}", join);
+                fail("Query panicked", &format!("a database operation panicked (unsupported SQL?): {}", join))
+            }
+        };
         send_response(&mut write, response).await?;
     }
 
