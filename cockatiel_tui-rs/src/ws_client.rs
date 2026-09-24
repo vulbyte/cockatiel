@@ -42,12 +42,18 @@ pub struct WsClient {
 
 impl WsClient {
     pub fn new(ip: String, port: u16, pin: u32, event_tx: mpsc::UnboundedSender<WsEvent>, command_rx: mpsc::UnboundedReceiver<WsCommand>) -> Self {
+        // Engine mode: replay the identity this TUI registered in a previous
+        // session (pinned in the engine's modules.json). A warm engine's
+        // auto-approve for control-surface names requires the registered
+        // instance uuid, so a fresh process must present it or it hangs.
+        let (instance_uuid7, auth_token) = crate::supervisor::registered_engine_identity("cockatiel-tui")
+            .unwrap_or_else(|| (String::new(), String::new()));
         Self {
             ip,
             port,
             pin,
-            auth_token: String::new(),
-            instance_uuid7: String::new(),
+            auth_token,
+            instance_uuid7,
             event_tx,
             command_rx,
             stats: db::GlobalStats::default(),
@@ -135,6 +141,15 @@ impl WsClient {
         match response.payload {
             Some(Payload::ConnectionRequestReturn(ret)) => {
                 if ret.module_instance_uuid7.is_empty() {
+                    // Engine rejected the connection. Downgrade the identity so
+                    // the run() retry loop tries the next fallback instead of
+                    // retrying the same doomed identity forever:
+                    //   token + registered uuid → PIN + registered uuid → PIN + fresh (bootstrap).
+                    if !self.auth_token.is_empty() {
+                        self.auth_token.clear();
+                    } else if !self.instance_uuid7.is_empty() {
+                        self.instance_uuid7.clear();
+                    }
                     return Err("Engine rejected connection (empty UUID)".into());
                 }
                 self.auth_token = response.auth_token;

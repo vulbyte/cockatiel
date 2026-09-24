@@ -5,17 +5,27 @@ use std::sync::{Arc, Mutex};
 
 use crate::plugins::Plugin;
 
-/// Write a file atomically: write to a temp sibling then rename over the
-/// target. `modules.json`/`config.json` are written by BOTH the TUI supervisor
-/// and the engine — a torn write must never leave a half-written JSON.
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+/// Write a file atomically with mode 0o600: write to a `.tmp-<uuid>` sibling,
+/// chmod it to 0o600 BEFORE renaming (so a secret never exists world-readable,
+/// not even transiently, and no symlink is followed — we only chmod our own
+/// temp inode), fsync it, then rename over the target. `modules.json`/
+/// `config.json`/`.env` are written by BOTH the TUI supervisor and the engine —
+/// a torn write must never leave a half-written file. The unique temp name also
+/// means two concurrent writers can never clobber each other's temp file.
+pub fn write_atomic_0600(path: &Path, content: &str) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
-        ".{}.tmp{}",
+        ".{}.tmp-{}",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        uuid::Uuid::new_v4()
     ));
     std::fs::write(&tmp, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::File::open(&tmp)?.sync_all()?;
     std::fs::rename(&tmp, path)
 }
 
@@ -37,12 +47,7 @@ pub fn clear_module_config(dir: &Path) -> std::io::Result<()> {
                 out.push_str(&format!("{}={}\n", trimmed, ""));
             }
         }
-        std::fs::write(&env_path, out)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
-        }
+        write_atomic_0600(&env_path, &out)?;
     }
 
     let json_path = dir.join("config.json");
@@ -50,7 +55,7 @@ pub fn clear_module_config(dir: &Path) -> std::io::Result<()> {
         if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&content) {
             clear_json_values(&mut root);
             if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-                let _ = std::fs::write(&json_path, pretty);
+                let _ = write_atomic_0600(&json_path, &pretty);
             }
         }
     }
@@ -115,6 +120,89 @@ pub fn modules_registry_path() -> PathBuf {
     engine_dir().join("modules.json")
 }
 
+/// Read the engine's modules.json and return the registered identity
+/// (instance_uuid7, auth_token) for a module name. A fresh TUI/control-surface
+/// process loads its own identity here so it can reconnect to a warm engine via
+/// the pinned uuid (the engine's auto-approve now requires the registered
+/// instance uuid for control-surface names).
+pub fn registered_engine_identity(name: &str) -> Option<(String, String)> {
+    registered_engine_identity_at(&modules_registry_path(), name)
+}
+
+/// Read a specific modules.json and return the registered identity
+/// (instance_uuid7, auth_token) for a module name. Parameterized on the path so
+/// unit tests can point it at a temp file instead of the live engine registry.
+fn registered_engine_identity_at(path: &Path, name: &str) -> Option<(String, String)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&content).ok()?;
+    for e in entries {
+        if e.get("name").and_then(|v| v.as_str()) == Some(name) {
+            let uuid = e
+                .get("instance_uuid7")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let token = e
+                .get("auth_token")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !uuid.is_empty() && !token.is_empty() {
+                return Some((uuid, token));
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort startup pass: tighten the permissions of known secret-bearing
+/// files (engine/user-db `.env`, engine `config.json`/`modules.json`) and every
+/// module `.env` found under the repo's `modules/` tree to 0o600. Fixes files
+/// left world-readable by earlier non-atomic writers. Logs failures, never
+/// crashes — a lax file just stays lax until its next 0600 write.
+pub fn remediate_secret_file_permissions() {
+    for p in [
+        engine_env_path(),
+        user_db_env_path(),
+        engine_config_path(),
+        modules_registry_path(),
+    ] {
+        chmod_0600_best_effort(&p);
+    }
+    if let Some(modules_dir) = Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(|p| p.join("modules")) {
+        chmod_env_files_best_effort(&modules_dir);
+    }
+}
+
+fn chmod_0600_best_effort(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            eprintln!("[supervisor] could not tighten permissions on {}: {}", path.display(), e);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+fn chmod_env_files_best_effort(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            chmod_env_files_best_effort(&path);
+        } else if path.file_name().map(|f| f == ".env").unwrap_or(false) {
+            chmod_0600_best_effort(&path);
+        }
+    }
+}
+
 /// Read engine address info: port from config.json (a setting), PIN from the
 /// engine's `.env` (a secret, with a legacy config.json fallback).
 pub fn read_engine_addr() -> Option<(u16, u32)> {
@@ -175,7 +263,6 @@ pub fn user_db_dir() -> PathBuf {
         .join("cockatiel_user_database-rs")
 }
 
-pub const USER_DB_DEFAULT_TOKEN: &str = "userdb-default-token";
 pub const USER_DB_DEFAULT_PORT: u16 = 9736;
 
 /// The user-database `.env` (secrets + settings for the service).
@@ -183,13 +270,52 @@ pub fn user_db_env_path() -> PathBuf {
     user_db_dir().join(".env")
 }
 
-/// The shared user-database auth token, stored in the service's `.env`.
-/// Defaults to `USER_DB_DEFAULT_TOKEN` if the file doesn't exist yet (the
-/// engine and user_db are launched with the same value, so they always agree).
+/// Insert or update a `KEY=VALUE` pair in a `.env` file, preserving every other
+/// key/comment, and creating the file (and its parent dir) if missing. Written
+/// atomically with 0o600 permissions. Failure is logged, never fatal — the
+/// caller still has the generated value in hand.
+fn upsert_env_key(path: &Path, key: &str, value: &str) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut out = String::new();
+    let prefix = format!("{}=", key);
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let mut found = false;
+            for line in content.lines() {
+                if line.trim().starts_with(&prefix) {
+                    out.push_str(&format!("{}={}\n", key, value));
+                    found = true;
+                } else {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            if !found {
+                out.push_str(&format!("{}={}\n", key, value));
+            }
+        }
+        Err(_) => out.push_str(&format!("{}={}\n", key, value)),
+    }
+    if let Err(e) = write_atomic_0600(path, &out) {
+        eprintln!("[supervisor] failed to persist {} in {}: {}", key, path.display(), e);
+    }
+}
+
+/// The shared user-database auth token, stored in the service's `.env`. When
+/// `USER_DB_TOKEN` is missing from that file a fresh random token is generated
+/// (never a publicly known constant), persisted to the `.env` via the atomic
+/// 0o600 writer, and returned — the engine and user_db are launched with the
+/// same value, so they always agree.
 pub fn user_db_token() -> String {
-    read_env_value(&user_db_env_path(), "USER_DB_TOKEN")
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| USER_DB_DEFAULT_TOKEN.to_string())
+    let path = user_db_env_path();
+    if let Some(token) = read_env_value(&path, "USER_DB_TOKEN").filter(|t| !t.trim().is_empty()) {
+        return token;
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    upsert_env_key(&path, "USER_DB_TOKEN", &token);
+    token
 }
 
 /// Launch the user database service as a child process (owned by the TUI).
@@ -548,9 +674,58 @@ pub fn spawn_from_parts(p: &Plugin, cmd: &str, args: &[String]) -> Result<Child,
         .map_err(|e| format!("Failed to launch '{}': {}", p.manifest.name, e))
 }
 
-/// Escape a string for embedding inside a double-quoted shell / AppleScript string.
+/// Escape a string for embedding inside a SINGLE-quoted `sh -c '...'` string.
+/// The value sits between literal single quotes, so a `'` in the value would
+/// terminate the string and inject arbitrary commands (the module manifest's
+/// untrusted `name`/`command_flags` land here). Escape it with the POSIX idiom
+/// `'\''` — close the quote, emit an escaped literal quote, reopen. `\`, `"`
+/// and backtick are literal inside single quotes but are still backslash-escaped
+/// for defense-in-depth (a value may be re-embedded in a double-quoted context).
 fn shell_quote(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('`', "\\`")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('\'', "'\\''")
+}
+
+/// Encode ONE command-line element (command or arg) for the NESTED shell
+/// wrapper the supervisor builds: the assembled `run` script is parsed by an
+/// OUTER shell, whose `sh -c '...'` string is stripped and then RE-PARSED as
+/// code by the INNER shell (the module's actual interpreter). An element must
+/// therefore survive two shell passes as a single word — a bare value with `'`,
+/// `;`, `&`, `|`, spaces etc. would be split or turned into command separators
+/// when the inner shell re-parses it.
+///
+/// Do it in two steps:
+///   1. wrap the value in single quotes with the POSIX `'` idiom for the INNER
+///      shell (`'<value>'` → the whole value is ONE literal word for it), then
+///   2. run the same idiom over that wrapping so the OUTER shell's single-quoted
+///      `sh -c '...'` treats the inner quotes as literal text.
+///
+/// The value round-trips byte-for-byte and no metacharacter reaches a command
+/// boundary in either shell.
+fn nested_shell_quote(s: &str) -> String {
+    let inner = format!("'{}'", s.replace('\'', "'\\''"));
+    inner.replace('\'', "'\\''")
+}
+
+/// Escape a string for embedding inside a DOUBLE-quoted sh string (`cd "..."`).
+/// `\`/`"`/`` ` ``/`$` are escaped so they stay literal. A `'` needs NO escaping
+/// here and must NOT get the single-quote idiom — inside double quotes that
+/// would decode to three literal quotes instead of one.
+fn shell_double_quote(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$")
+}
+
+/// Escape a string for embedding inside a double-quoted AppleScript string
+/// (`do script "..."`). AppleScript decodes `\` and `"`. A literal `'` needs no
+/// escaping here — applying the POSIX single-quote idiom would corrupt the shell
+/// syntax the embedded script contains.
+fn apple_quote(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Is a process with `pid` alive? Uses `kill -0` (signal 0, no-op probe) on
@@ -596,15 +771,24 @@ pub fn spawn_terminal_from_parts(
     // export it in the wrapper script instead.
     let (pin, clean_args) = strip_pin_from_args(args);
     let pin_export = match pin {
-        Some(pin) => format!("export COCKATIEL_PIN={}; ", shell_quote(&pin)),
+        Some(pin) => format!("export COCKATIEL_PIN='{}'; ", shell_quote(&pin)),
         None => String::new(),
     };
     // Point the module at the engine's TLS cert so it connects over WSS.
     let tls_export = match engine_tls_cert_path() {
-        Some(cert) => format!("export COCKATIEL_TLS_CERT={}; ", shell_quote(&cert.to_string_lossy())),
+        Some(cert) => format!("export COCKATIEL_TLS_CERT='{}'; ", shell_quote(&cert.to_string_lossy())),
         None => String::new(),
     };
-    let cmd_line = format!("{} {}", shell_quote(cmd), clean_args.join(" "));
+    // EVERY element is individually quoted before joining: the command line is
+    // embedded inside the nested `sh -c '...'` wrapper below, where each element
+    // must survive BOTH the outer shell's quote-stripping AND the inner shell's
+    // re-parse — nested_shell_quote makes each one a single literal word in both
+    // passes, so a malicious value can't terminate the wrapper, split into extra
+    // commands, or smuggle `;`/`&`/`|` to a command boundary.
+    let cmd_line = std::iter::once(nested_shell_quote(cmd))
+        .chain(clean_args.iter().map(|a| nested_shell_quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
     let dir = p.directory.to_string_lossy().to_string();
     // Stable marker: the module's window is found and REUSED by this name on
     // every launch, and closed by it on kill. A per-launch UUID would leave
@@ -633,7 +817,7 @@ pub fn spawn_terminal_from_parts(
         tls_export,
         pin_export,
         shell_quote(&marker),
-        shell_quote(&dir),
+        shell_double_quote(&dir),
         shell_quote(&pidfile.to_string_lossy()),
         cmd_line,
     );
@@ -651,9 +835,9 @@ pub fn spawn_terminal_from_parts(
             kill_stale_terminal_processes(&p.manifest.name);
             let script = format!(
                 "tell application \"Terminal\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\nrepeat with i from (count of wins) to 2 by -1\nclose (item i of wins) saving no\nend repeat\ndo script \"{}\" in w\nend if\nend tell",
-                shell_quote(&marker),
-                shell_quote(&run),
-                shell_quote(&run),
+                apple_quote(&marker),
+                apple_quote(&run),
+                apple_quote(&run),
             );
             Command::new("osascript")
                 .arg("-e")
@@ -814,7 +998,7 @@ fn close_terminal_windows(marker: &str) {
                 .arg("-e")
                 .arg(format!(
                     "set frontmost of (first window whose name contains \"{}\") to true",
-                    shell_quote(marker)
+                    apple_quote(marker)
                 ))
                 .arg("-e")
                 .arg("end tell")
@@ -849,7 +1033,7 @@ fn close_terminal_windows(marker: &str) {
                 .arg("-e")
                 .arg(format!(
                     "tell application \"Terminal\" to get name of (every window whose name contains \"{}\")",
-                    shell_quote(marker)
+                    apple_quote(marker)
                 ))
                 .output()
                 .ok()
@@ -894,7 +1078,7 @@ pub fn register_module(name: &str, position: &str, priority: i32) {
     }
 
     if let Ok(pretty) = serde_json::to_string_pretty(&registry) {
-        let _ = write_atomic(&path, &pretty);
+        let _ = write_atomic_0600(&path, &pretty);
     }
 }
 
@@ -924,7 +1108,7 @@ pub fn register_module_approved(name: &str, position: &str, priority: i32) {
     }
 
     if let Ok(pretty) = serde_json::to_string_pretty(&registry) {
-        let _ = write_atomic(&path, &pretty);
+        let _ = write_atomic_0600(&path, &pretty);
     }
 }
 
@@ -963,7 +1147,7 @@ pub fn add_to_ordering(name: &str, capabilities: &str, priority: i32) {
     }
 
     if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-        let _ = write_atomic(&path, &pretty);
+        let _ = write_atomic_0600(&path, &pretty);
     }
 }
 
@@ -978,7 +1162,7 @@ pub fn remove_from_ordering(name: &str) {
         }
     }
     if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-        let _ = write_atomic(&path, &pretty);
+        let _ = write_atomic_0600(&path, &pretty);
     }
 }
 
@@ -1352,5 +1536,232 @@ mod tests {
     fn libc_kill_alive(pid: i32) -> bool {
         let _ = pid;
         true
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes_for_sh_single_quote_context() {
+        // The value is embedded inside `sh -c '...'`: a literal `'` would close
+        // the string and inject commands. The POSIX idiom must round-trip it.
+        assert_eq!(shell_quote("a'b"), "a'\\''b");
+        assert_eq!(shell_quote("'; rm -rf ~; '"), "'\\''; rm -rf ~; '\\''");
+        // Existing escaping is preserved alongside the new single-quote idiom.
+        assert_eq!(shell_quote("a\"b`c\\d"), "a\\\"b\\`c\\\\d");
+        // Everything else passes through untouched.
+        assert_eq!(shell_quote("cargo run --release"), "cargo run --release");
+    }
+
+    #[test]
+    fn nested_shell_quote_survives_both_shell_passes() {
+        // A simple value becomes a single-quoted word wrapped again for the
+        // outer shell's `sh -c '...'` string.
+        assert_eq!(nested_shell_quote("foo bar"), "'\\''foo bar'\\''");
+        // The inner sh must receive the value byte-for-byte.
+        for v in ["plain", "with space", "semi;colon", "amp&ersand", "pipe|s", "quote'", "back`tick", "dollar$"] {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sh -c 'exec /bin/echo {}'", nested_shell_quote(v)))
+                .output()
+                .unwrap_or_else(|_| panic!("sh spawn for {:?}", v));
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                format!("{}\n", v),
+                "value {:?} did not round-trip through both shells",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_cmd_line_quotes_every_element() {
+        // Regression: malicious metacharacters in manifest-derived args must not
+        // break out of the nested `sh -c '...'` wrapper.
+        let malicious = [
+            "x';touch /tmp/cockatiel-pwned;'".to_string(),
+            "x&touch /tmp/cockatiel-pwned2".to_string(),
+            "x|cat;touch /tmp/cockatiel-pwned3".to_string(),
+        ];
+        for arg in &malicious {
+            let cmd_line = std::iter::once(nested_shell_quote("/bin/echo"))
+                .chain(std::iter::once(nested_shell_quote(arg)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Mirrors the production wrapper (outer `sh -c <run>` → inner sh).
+            let run = format!("sh -c 'echo $$ > /dev/null; exec {}'", cmd_line);
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&run)
+                .output()
+                .expect("sh spawn");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                format!("{}\n", arg),
+                "arg {:?} did not round-trip",
+                arg
+            );
+        }
+        assert!(
+            !std::path::Path::new("/tmp/cockatiel-pwned").exists()
+                && !std::path::Path::new("/tmp/cockatiel-pwned2").exists()
+                && !std::path::Path::new("/tmp/cockatiel-pwned3").exists(),
+            "command injection executed a malicious payload"
+        );
+        let _ = std::fs::remove_file("/tmp/cockatiel-pwned");
+        let _ = std::fs::remove_file("/tmp/cockatiel-pwned2");
+        let _ = std::fs::remove_file("/tmp/cockatiel-pwned3");
+    }
+
+    #[test]
+    fn shell_double_quote_and_apple_quote_leave_single_quotes_alone() {
+        // The `cd "..."` and AppleScript `do script "..."` contexts must NOT get
+        // the single-quote idiom — it would decode to three literal quotes.
+        assert_eq!(shell_double_quote("a'b"), "a'b");
+        assert_eq!(shell_double_quote("a\"b$c"), "a\\\"b\\$c");
+        assert_eq!(apple_quote("sh -c 'echo hi'"), "sh -c 'echo hi'");
+        assert_eq!(apple_quote("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_shell_quote_neutralizes_metacharacter_injection() {
+        // `exec` alone doesn't stop `&`/`|` in an unquoted arg from splitting
+        // into extra commands on the inner shell; nested_shell_quote must.
+        for arg in ["x;touch /tmp/cockatiel-pwned;", "x&touch /tmp/cockatiel-pwned", "x|touch /tmp/cockatiel-pwned"] {
+            let cmd_line = std::iter::once(nested_shell_quote("/bin/echo"))
+                .chain(std::iter::once(nested_shell_quote(arg)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let run = format!("sh -c 'echo $$ > /dev/null; exec {}'", cmd_line);
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&run)
+                .output()
+                .expect("sh spawn");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                format!("{}\n", arg),
+                "arg {:?} did not round-trip",
+                arg
+            );
+        }
+        assert!(
+            !std::path::Path::new("/tmp/cockatiel-pwned").exists(),
+            "command injection executed a malicious payload"
+        );
+        let _ = std::fs::remove_file("/tmp/cockatiel-pwned");
+    }
+
+    #[test]
+    fn write_atomic_0600_sets_mode_and_replaces() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-w0600-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("secrets.env");
+        write_atomic_0600(&path, "TOKEN=abc").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TOKEN=abc");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Overwrite keeps atomicity + mode.
+        write_atomic_0600(&path, "TOKEN=def").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TOKEN=def");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // No temp files are left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {:?}", leftovers.len());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn upsert_env_key_generates_and_preserves() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-upsert-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join(".env");
+        std::fs::write(&path, "# comment\nPORT=9736\n").unwrap();
+
+        // Updates an existing key, preserves others + comments.
+        upsert_env_key(&path, "PORT", "9740");
+        // Inserts a new key.
+        upsert_env_key(&path, "USER_DB_TOKEN", "tok-123");
+        // Reads back through the same reader the supervisor uses.
+        assert_eq!(read_env_value(&path, "USER_DB_TOKEN").as_deref(), Some("tok-123"));
+        assert_eq!(read_env_value(&path, "PORT").as_deref(), Some("9740"));
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# comment"), "content: {}", content);
+        assert!(!content.contains("9736"), "old PORT value not replaced: {}", content);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+
+        // Creating the file from scratch (missing parent dir) also works.
+        let nested = tmp.join("nested").join("sub").join(".env");
+        upsert_env_key(&nested, "USER_DB_TOKEN", "tok-456");
+        assert_eq!(read_env_value(&nested, "USER_DB_TOKEN").as_deref(), Some("tok-456"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registered_engine_identity_returns_matching_entry() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-regid-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("modules.json");
+        std::fs::write(
+            &path,
+            r#"[
+              {"name":"other-mod","instance_uuid7":"00000000-0000-7000-8000-000000000002","auth_token":"tok-other","position":"5","priority":2,"auto_auth":true},
+              {"name":"cockatiel-tui","instance_uuid7":"00000000-0000-7000-8000-000000000001","auth_token":"tok-tui","position":"4","priority":1,"auto_auth":true}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            registered_engine_identity_at(&path, "cockatiel-tui"),
+            Some(("00000000-0000-7000-8000-000000000001".to_string(), "tok-tui".to_string()))
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registered_engine_identity_missing_file_or_name_is_none() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-regid2-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Missing file → None.
+        let missing = tmp.join("does-not-exist.json");
+        assert_eq!(registered_engine_identity_at(&missing, "cockatiel-tui"), None);
+
+        // Missing name → None.
+        let path = tmp.join("modules.json");
+        std::fs::write(
+            &path,
+            r#"[
+              {"name":"other-mod","instance_uuid7":"00000000-0000-7000-8000-000000000002","auth_token":"tok-other","position":"5","priority":2,"auto_auth":true}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(registered_engine_identity_at(&path, "cockatiel-tui"), None);
+
+        // Entry with empty uuid/token is treated as no identity.
+        std::fs::write(
+            &path,
+            r#"[
+              {"name":"cockatiel-tui","instance_uuid7":"","auth_token":"tok-tui","position":"4","priority":1,"auto_auth":true}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(registered_engine_identity_at(&path, "cockatiel-tui"), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

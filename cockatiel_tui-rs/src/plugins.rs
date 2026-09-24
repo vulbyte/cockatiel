@@ -141,6 +141,55 @@ mod tests {
         let m: ModuleManifest = serde_json::from_str(none).unwrap();
         assert!(m.binary.0.is_empty());
     }
+
+    #[test]
+    fn module_name_must_be_a_single_shell_safe_token() {
+        for ok in ["alpha", "Alpha_9", "my-mod", "x", "_", "-", " a ", "x ".trim()] {
+            assert!(is_valid_module_name(ok), "expected valid: {:?}", ok);
+        }
+        for bad in [
+            "has space",
+            "semi;colon",
+            "amp&ersand",
+            "back`tick",
+            "dollar$",
+            "quote'",
+            "under.score",
+            "dot.",
+            "..",
+            "slash/ed",
+            "back\\slash",
+            "star*",
+            "pipe|",
+            "",
+            "  ",
+        ] {
+            assert!(!is_valid_module_name(bad), "expected invalid: {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn discovery_skips_manifests_with_invalid_names() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-plug-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(tmp.join("ok_mod")).unwrap();
+        std::fs::create_dir_all(tmp.join("bad mod")).unwrap();
+        std::fs::write(
+            tmp.join("ok_mod").join(MANIFEST_FILENAME),
+            r#"{"name":"ok_mod","launch_command":"echo"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("bad mod").join(MANIFEST_FILENAME),
+            r#"{"name":"evil name;rm -rf /","launch_command":"echo"}"#,
+        )
+        .unwrap();
+
+        let found = discover_plugins(&tmp);
+        assert_eq!(found.len(), 1, "only the valid-name module should be discovered");
+        assert_eq!(found[0].manifest.name, "ok_mod");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
 
 /// Recursively walk `root` (and all descendants), collecting directories that
@@ -151,6 +200,15 @@ pub fn discover_plugins(root: &Path) -> Vec<Plugin> {
     walk(root, &mut plugins);
     plugins.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
     plugins
+}
+
+/// A manifest `name` must be a single, shell-safe token: ASCII alphanumerics,
+/// `_` and `-` only (`^[A-Za-z0-9_-]+$`). The name is interpolated into shell
+/// command lines, pidfile paths and Terminal window markers, so anything else
+/// (spaces, shell metacharacters, path separators, `.`/`..`) is rejected.
+pub fn is_valid_module_name(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn walk(dir: &Path, out: &mut Vec<Plugin>) {
@@ -178,7 +236,12 @@ fn load_plugin(dir: &Path) -> Option<Plugin> {
     let manifest_path = dir.join(MANIFEST_FILENAME);
     let contents = std::fs::read_to_string(&manifest_path).ok()?;
     let manifest: ModuleManifest = serde_json::from_str(&contents).ok()?;
-    if manifest.name.trim().is_empty() {
+    if !is_valid_module_name(&manifest.name) {
+        eprintln!(
+            "[plugins] skipping {}: invalid module name {:?} — must match ^[A-Za-z0-9_-]+$ (no spaces, shell metacharacters, path separators, or '.'/'..')",
+            dir.display(),
+            manifest.name
+        );
         return None;
     }
     Some(Plugin {

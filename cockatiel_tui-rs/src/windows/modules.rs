@@ -401,17 +401,11 @@ impl ModulesWindow {
         if !env_content.is_empty() {
             env_content.push('\n');
         }
-        if std::fs::write(&env_path, env_content).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600));
-            }
-        }
+        let _ = crate::supervisor::write_atomic_0600(&env_path, &env_content);
 
         let json_path = ed.dir.join("config.json");
         if let Ok(pretty) = serde_json::to_string_pretty(&json_root) {
-            let _ = std::fs::write(&json_path, pretty);
+            let _ = crate::supervisor::write_atomic_0600(&json_path, &pretty);
         }
         eprintln!("[supervisor] saved config for {} (.env + config.json)", module_name);
         self.last_saved_module = Some(module_name);

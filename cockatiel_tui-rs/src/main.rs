@@ -161,6 +161,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut supervisor = crate::supervisor::ProcessTable::new();
     let mut plugins: Vec<crate::plugins::Plugin> = Vec::new();
     if detached_window.is_none() {
+        // Harden secrets left world-readable by older non-atomic writers before
+        // anything reads or rewrites them.
+        supervisor::remediate_secret_file_permissions();
         // Prefer engine config values for port/pin, BUT explicit CLI overrides
         // (--port/--pin) win — a user pointing at a remote/renumbered engine
         // must be able to override the local config.json.
@@ -1682,7 +1685,7 @@ fn delete_module(state: &mut AppState, supervisor: &mut supervisor::ProcessTable
             if let Some(arr) = registry.as_array_mut() {
                 arr.retain(|e| e.get("name").and_then(|v| v.as_str()) != Some(name));
                 if let Ok(pretty) = serde_json::to_string_pretty(&registry) {
-                    let _ = std::fs::write(supervisor::modules_registry_path(), pretty);
+                    let _ = supervisor::write_atomic_0600(&supervisor::modules_registry_path(), &pretty);
                 }
             }
         }

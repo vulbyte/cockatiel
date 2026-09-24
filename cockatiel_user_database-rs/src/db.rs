@@ -117,11 +117,10 @@ impl UserDatabase {
     }
 
 /// Create a consistent snapshot of the DB at `path` by checkpointing the WAL
-    /// and copying the main file while the connection lock is held (new queries
-    /// are briefly serialized behind the copy, but the snapshot can never be a
-    /// torn/stale mix), then atomically renaming into place. If the checkpoint
-    /// fails the main file may be stale — abort rather than clobber the last
-    /// good backup.
+    /// (best-effort) and copying the main file while the connection lock is held
+    /// (new queries are briefly serialized behind the copy, but the snapshot can
+    /// never be a torn/stale mix), then atomically renaming into place over any
+    /// existing backup. The last good backup is never deleted.
     pub async fn backup_to(&self, path: &std::path::Path) -> Result<(), String> {
         let src = self
             .path
@@ -139,17 +138,20 @@ impl UserDatabase {
             .as_ref()
             .cloned()
             .ok_or("User database not initialized")?;
-        // Merge the WAL so the main file is authoritative before the copy.
-        // (PRAGMA returns a result row — drain it so the driver doesn't error.)
-        match conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
-            Ok(mut stmt) => {
+        // If a WAL is present, merge it into the main file so the copy is not
+        // stale. Best-effort: a checkpoint failure still yields a usable (if
+        // possibly slightly stale) backup rather than none at all.
+        let wal_path = format!("{}-wal", src.to_string_lossy());
+        if std::path::Path::new(&wal_path).exists() {
+            if let Ok(mut stmt) = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
+                // PRAGMA returns a result row — drain it so the driver doesn't error.
                 while let Ok(Some(_)) = stmt.next().await {}
             }
-            Err(e) => return Err(format!("backup checkpoint failed: {}", e)),
         }
         let _ = std::fs::remove_file(&tmp);
         tokio::fs::copy(&src, &tmp).await.map_err(|e| e.to_string())?;
-        let _ = std::fs::remove_file(path);
+        // rename atomically replaces any existing backup on POSIX; the last good
+        // backup must never be removed before the new one is in place.
         tokio::fs::rename(&tmp, path).await.map_err(|e| e.to_string())?;
         Ok(())
     }

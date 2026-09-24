@@ -74,40 +74,75 @@ async fn recv_frame(sess: &mut Session, timeout_ms: u64) -> Result<Container, St
     }
 }
 
-async fn connect_session(cli: &Cli, name: &str, position: ProcessPosition) -> Result<Session, String> {
-    for _ in 0..3 {
-        let ws = connect_engine(cli).await?;
-        let (mut write, read) = ws.split();
-        let uuid = uuid::Uuid::now_v7().to_string();
-        let req = make_container(
-            name, &uuid, "",
-            Payload::ConnectionRequest(ConnectionRequest {
-                pin: cli.pin,
-                process_position: position as i32,
-                priority: if position == ProcessPosition::Connection { 1 } else { 100 },
-                module_instance_uuid7: uuid.clone(),
-            }),
-        );
-        if send_split(&mut write, &req).await.is_err() {
-            continue;
-        }
-        let (tx, mut rx) = mpsc::channel(256);
-        spawn_reader(read, tx);
-        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-            Ok(Some(c)) if !c.auth_token.is_empty() => {
-                let sess = Session {
-                    write,
-                    rx,
-                    auth: c.auth_token,
-                    uuid,
-                    name: name.to_string(),
-                };
-                // Settle past the engine's post-auth drain window so the first
-                // follow-up query isn't discarded as "sent before authorization".
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                return Ok(sess);
+/// The instance uuid the engine pinned for a registered module name, read from
+/// the engine's modules.json. Control-surface auto-approve now requires the
+/// pinned uuid (not name alone), so sessions must present it on a warm engine.
+fn registered_instance_uuid(name: &str) -> Option<String> {
+    let path = std::env::current_dir().ok()?.parent()?.join("cockatiel_engine-rs").join("modules.json");
+    registered_instance_uuid_at(&path, name)
+}
+
+/// Read `modules.json` from `path` and return the `instance_uuid7` pinned for a
+/// module whose `name` matches. `None` when the file is absent/unreadable, the
+/// name isn't registered, or the pinned uuid is empty.
+fn registered_instance_uuid_at(path: &std::path::Path, name: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&content).ok()?;
+    for e in entries {
+        if e.get("name").and_then(|v| v.as_str()) == Some(name) {
+            let uuid = e.get("instance_uuid7").and_then(|v| v.as_str()).unwrap_or("");
+            if !uuid.is_empty() {
+                return Some(uuid.to_string());
             }
-            _ => continue,
+        }
+    }
+    None
+}
+
+async fn connect_session(cli: &Cli, name: &str, position: ProcessPosition) -> Result<Session, String> {
+    // Present the pinned instance uuid first (required for control-surface
+    // auto-approve on a warm engine), then fall back to a fresh uuid for a
+    // fresh engine's first registration / regular module auto-approve by name.
+    let mut uuids = Vec::new();
+    if let Some(u) = registered_instance_uuid(name) {
+        uuids.push(u);
+    }
+    uuids.push(uuid::Uuid::now_v7().to_string());
+
+    for uuid in uuids {
+        for _ in 0..3 {
+            let ws = connect_engine(cli).await?;
+            let (mut write, read) = ws.split();
+            let req = make_container(
+                name, &uuid, "",
+                Payload::ConnectionRequest(ConnectionRequest {
+                    pin: cli.pin,
+                    process_position: position as i32,
+                    priority: if position == ProcessPosition::Connection { 1 } else { 100 },
+                    module_instance_uuid7: uuid.clone(),
+                }),
+            );
+            if send_split(&mut write, &req).await.is_err() {
+                continue;
+            }
+            let (tx, mut rx) = mpsc::channel(256);
+            spawn_reader(read, tx);
+            match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                Ok(Some(c)) if !c.auth_token.is_empty() => {
+                    let sess = Session {
+                        write,
+                        rx,
+                        auth: c.auth_token,
+                        uuid,
+                        name: name.to_string(),
+                    };
+                    // Settle past the engine's post-auth drain window so the first
+                    // follow-up query isn't discarded as "sent before authorization".
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    return Ok(sess);
+                }
+                _ => continue,
+            }
         }
     }
     Err(format!("auth failed after retries: '{}'", name))
@@ -504,4 +539,59 @@ async fn c10_prompt_impersonation(cli: &Cli, m: &mut Metrics) {
     );
     let alive = send_split(&mut sess.write, &q).await.is_ok() && recv_frame(&mut sess, 2000).await.is_ok();
     m.push_detail("c10_prompt_impersonation", sent && alive, start.elapsed().as_millis(), 0.0, 0.0, 0.0, "bogus prompt ignored; engine alive");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registered_instance_uuid_at;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_modules_json(content: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cockatiel_test_runner_modules_{}_{}.json",
+            std::process::id(),
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::write(&path, content).expect("write temp modules.json");
+        path
+    }
+
+    #[test]
+    fn returns_pinned_uuid_for_matching_name() {
+        let path = temp_modules_json(
+            r#"[{"name":"cockatiel-test-runner","instance_uuid7":"01a0d490-1bb7-72c5-afa3-0c3c67b87027"}]"#,
+        );
+        let got = registered_instance_uuid_at(&path, "cockatiel-test-runner");
+        let _ = fs::remove_file(&path);
+        assert_eq!(got, Some("01a0d490-1bb7-72c5-afa3-0c3c67b87027".to_string()));
+    }
+
+    #[test]
+    fn returns_none_for_unregistered_name() {
+        let path = temp_modules_json(
+            r#"[{"name":"cockatiel-test-runner","instance_uuid7":"01a0d490-1bb7-72c5-afa3-0c3c67b87027"}]"#,
+        );
+        let got = registered_instance_uuid_at(&path, "banned-words");
+        let _ = fs::remove_file(&path);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn returns_none_for_empty_pinned_uuid() {
+        let path = temp_modules_json(r#"[{"name":"cockatiel-test-runner","instance_uuid7":""}]"#);
+        let got = registered_instance_uuid_at(&path, "cockatiel-test-runner");
+        let _ = fs::remove_file(&path);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn returns_none_for_missing_file() {
+        let path = std::env::temp_dir().join(format!("definitely_missing_{}.json", std::process::id()));
+        let _ = fs::remove_file(&path);
+        assert_eq!(registered_instance_uuid_at(&path, "cockatiel-test-runner"), None);
+    }
 }

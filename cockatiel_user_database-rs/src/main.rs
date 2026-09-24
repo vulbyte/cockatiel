@@ -101,6 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(bp) = &backup_path {
             if bp.exists() {
                 eprintln!("[UserDB] local DB unavailable — restoring from backup {}", bp.display());
+                let _ = std::fs::remove_file(format!("{}-wal", db_path.to_string_lossy()));
+                let _ = std::fs::remove_file(format!("{}-shm", db_path.to_string_lossy()));
                 let _ = std::fs::copy(bp, &db_path);
                 db.initialize(&db_path).await?;
             } else {
@@ -130,8 +132,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[UserDB] NO BACKUP SET — a corruption could mean TOTAL DATA LOSS");
     }
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-    println!("[UserDB] Listening on port {} (engine-only access)", port);
+    let bind = env::var("USER_DB_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let listener = TcpListener::bind(format!("{}:{}", bind, port)).await?;
+    println!("[UserDB] Listening on {}:{} (engine-only access)", bind, port);
 
     loop {
         let (stream, addr) = listener.accept().await?;
@@ -223,12 +226,12 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
         user_db_request::Op::DeleteUser(del) => {
             // Permission: only the user themselves, or owner/admin.
             let target = db.get_user_by_uuid(&del.uuid7).await.ok().flatten();
-            let Some(target) = target else {
+            if target.is_none() {
                 return fail("Delete failed", "User not found");
-            };
+            }
             let role = del.actor_role.to_lowercase();
             let is_self = del.actor_uuid7 == del.uuid7;
-            let privileged = role == "owner" || role == "admin" || target.is_owner || target.is_admin;
+            let privileged = role == "owner" || role == "admin";
             if !is_self && !privileged {
                 return fail(
                     "Permission denied",
