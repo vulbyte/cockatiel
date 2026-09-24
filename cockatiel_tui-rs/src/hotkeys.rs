@@ -19,6 +19,10 @@ pub enum Action {
     StopModule(String),
     DeleteModule(String),
     ToggleAutostart(String),
+    /// Duplicate the selected module under a NEW module name (the engine gives
+    /// it a fresh instance UUID) and launch it as its own process — a second,
+    /// independent instance sharing the original's binary + config.
+    DuplicateModule(String),
     AddNote,
     ShowInfo,
     SelectModule,
@@ -134,6 +138,7 @@ fn parse_action(s: &str) -> Action {
         "StopModule" => Action::StopModule(String::new()),
         "DeleteModule" => Action::DeleteModule(String::new()),
         "ToggleAutostart" => Action::ToggleAutostart(String::new()),
+        "DuplicateModule" => Action::DuplicateModule(String::new()),
         "AddNote" => Action::AddNote,
         "ShowInfo" => Action::ShowInfo,
         "SelectModule" => Action::SelectModule,
@@ -208,6 +213,7 @@ pub fn action_label(action: &Action) -> &'static str {
         Action::StopModule(_) => "stop",
         Action::DeleteModule(_) => "del",
         Action::ToggleAutostart(_) => "auto",
+        Action::DuplicateModule(_) => "copy",
         Action::EditCredentials(_) => "creds",
         Action::EditConfig(_) => "edit",
         Action::ClearModuleConfig(_) => "clear",
@@ -357,7 +363,8 @@ pub fn default_hotkeys() -> HotkeyConfig {
     module_actions.insert(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()), Action::StopModule(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()), Action::DeleteModule(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()), Action::ToggleAutostart(String::new()));
-    module_actions.insert(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()), Action::ClearModuleConfig(String::new()));
+    module_actions.insert(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()), Action::DuplicateModule(String::new()));
+    module_actions.insert(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()), Action::ClearModuleConfig(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT), Action::EditCredentials(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()), Action::EditConfig(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()), Action::RunTests);
@@ -404,6 +411,13 @@ mod tests {
         assert!(modules
             .values()
             .any(|a| matches!(a, Action::PopOut(ref w) if w == "users")));
+        // `c` duplicates the selected module; `b` clears its config.
+        assert!(modules
+            .values()
+            .any(|a| matches!(a, Action::DuplicateModule(_))));
+        assert!(modules
+            .values()
+            .any(|a| matches!(a, Action::ClearModuleConfig(_))));
     }
 
     #[test]

@@ -390,7 +390,7 @@ async fn run_app(
     ws_addr: std::net::SocketAddr,
     ws_auth_token: String,
     supervisor: &mut supervisor::ProcessTable,
-    plugins: Vec<crate::plugins::Plugin>,
+    mut plugins: Vec<crate::plugins::Plugin>,
     port: u16,
     pin: u32,
     mut rebuild_rx: mpsc::UnboundedReceiver<String>,
@@ -424,7 +424,7 @@ async fn run_app(
                         terminal,
                         state,
                         supervisor,
-                        &plugins,
+                        &mut plugins,
                         port,
                         pin,
                         &ws_command_tx,
@@ -856,7 +856,7 @@ async fn handle_input_event(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
     supervisor: &mut supervisor::ProcessTable,
-    plugins: &[crate::plugins::Plugin],
+    plugins: &mut Vec<crate::plugins::Plugin>,
     port: u16,
     pin: u32,
     ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
@@ -938,7 +938,7 @@ async fn handle_input_event(
                             state,
                             &name,
                             supervisor,
-                            plugins,
+                            &*plugins,
                             port,
                             pin,
                             supervisor::LaunchMode::Rebuild,
@@ -1422,6 +1422,7 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::StopModule(_)
             | Action::DeleteModule(_)
             | Action::ToggleAutostart(_)
+            | Action::DuplicateModule(_)
             | Action::EditCredentials(_)
             | Action::EditConfig(_)
             | Action::ClearModuleConfig(_)
@@ -1454,6 +1455,7 @@ fn fill_window_action(state: &AppState, window_name: &str, action: Action) -> Ac
         Action::StopModule(_) => Action::StopModule(name),
         Action::DeleteModule(_) => Action::DeleteModule(name),
         Action::ToggleAutostart(_) => Action::ToggleAutostart(name),
+        Action::DuplicateModule(_) => Action::DuplicateModule(name),
         Action::EditCredentials(_) => Action::EditCredentials(name),
         Action::EditConfig(_) => Action::EditConfig(name),
         Action::ClearModuleConfig(_) => Action::ClearModuleConfig(name),
@@ -2029,7 +2031,7 @@ async fn dispatch_action(
     state: &mut AppState,
     action: Action,
     supervisor: &mut supervisor::ProcessTable,
-    plugins: &[crate::plugins::Plugin],
+    plugins: &mut Vec<crate::plugins::Plugin>,
     port: u16,
     pin: u32,
     ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
@@ -2098,6 +2100,42 @@ async fn dispatch_action(
                 .lock()
                 .unwrap()
                 .insert(name, "stopped".to_string());
+        }
+        Action::DuplicateModule(name) => {
+            // Copy the selected module under a NEW name: the engine assigns a
+            // fresh instance UUID on connect and it runs as its own process.
+            // It shares the original's binary + config (same directory).
+            let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name).cloned() else {
+                supervisor_log(state, format!("[supervisor] cannot copy '{}' — not a discovered module", name));
+                return Ok(false);
+            };
+            let new_name = {
+                let mut n = 1u32;
+                loop {
+                    let candidate = format!("{}-{}", name, n);
+                    let taken = plugins.iter().any(|p| p.manifest.name == candidate)
+                        || state.stats.module_entries.iter().any(|m| m.name == candidate);
+                    if !taken {
+                        break candidate;
+                    }
+                    n += 1;
+                }
+            };
+            // Register it (auto-approved — it's a copy of a trusted module) and
+            // add it to the pipeline ordering so the engine routes to it.
+            supervisor::register_module_approved(&new_name, &plugin.manifest.capabilities, 100);
+            supervisor::add_to_ordering(&new_name, &plugin.manifest.capabilities, 100);
+            let mut manifest = plugin.manifest.clone();
+            manifest.name = new_name.clone();
+            plugins.push(crate::plugins::Plugin {
+                manifest,
+                directory: plugin.directory.clone(),
+            });
+            supervisor_log(
+                state,
+                format!("[supervisor] copied {} → {} (new instance UUID + own process)", name, new_name),
+            );
+            request_launch(state, &new_name, supervisor, &*plugins, port, pin, supervisor::LaunchMode::Prebuilt);
         }
         Action::DeleteModule(name) => {
             // Confirm before destroying the module's registration.

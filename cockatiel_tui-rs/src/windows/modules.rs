@@ -892,7 +892,7 @@ impl Window for ModulesWindow {
         let mut hotkey_text = "nav:[j|k|arrows]  ".to_string();
         hotkey_text.push_str(&hotkeys.format_window(
             "modules",
-            &["start", "stop", "del", "auto", "creds", "edit", "clear", "test", "select", "popout"],
+            &["start", "stop", "del", "auto", "copy", "creds", "edit", "clear", "test", "select", "popout"],
         ));
         let hotkeys_line = Line::from(vec![
             Span::styled(hotkey_text, Style::default().fg(Color::DarkGray)),
