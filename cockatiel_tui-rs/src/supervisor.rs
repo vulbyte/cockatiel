@@ -898,6 +898,36 @@ pub fn register_module(name: &str, position: &str, priority: i32) {
     }
 }
 
+/// Register a module that is already trusted (e.g. a duplicate copy of an
+/// approved module) with `auto_auth: true`, so its first connection is approved
+/// without a fresh operator prompt.
+pub fn register_module_approved(name: &str, position: &str, priority: i32) {
+    let path = modules_registry_path();
+    let mut registry: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default();
+
+    if let Some(existing) = registry.iter_mut().find(|e| e.get("name").and_then(|v| v.as_str()) == Some(name)) {
+        existing["position"] = serde_json::json!(position);
+        existing["priority"] = serde_json::json!(priority);
+        existing["auto_auth"] = serde_json::json!(true);
+    } else {
+        registry.push(serde_json::json!({
+            "name": name,
+            "instance_uuid7": uuid::Uuid::now_v7().to_string(),
+            "position": position,
+            "priority": priority,
+            "auto_auth": true,
+            "auth_token": ""
+        }));
+    }
+
+    if let Ok(pretty) = serde_json::to_string_pretty(&registry) {
+        let _ = write_atomic(&path, &pretty);
+    }
+}
+
 /// Map a plugin's `capabilities` string to a config.json ordering list key.
 fn config_list_key(capabilities: &str) -> &'static str {
     match capabilities {
