@@ -29,9 +29,13 @@ cd cockatiel_tui-rs
 
 The TUI is the supervisor: it launches the engine and the user-database service, discovers every module that ships a `cockatiel_module_info.json` (recursively from the `modules/` folder), and registers them in the pipeline. Modules start **disabled** by default — start them from the modules window (`s`). The engine itself is a passive router: it owns no processes, it only orders the pipeline and routes messages between connected modules.
 
+The engine is **WSS-only**: on first boot it generates a self-signed cert under `cockatiel_engine-rs/tls/` and rejects plain `ws://`. The supervisor sets `COCKATIEL_TLS_CERT` (pointing at that cert) on every module it launches, so modules pin it automatically — nothing extra to configure for the quickstart.
+
 ## One-file client imports
 
-Any program can be a module — adapters, chatbots, TTS, in-game communication. The one-file clients live in the [`cockatiel_lib`](https://github.com/vulbyte/cockatiel_lib) submodule; each implements the same contract (single-connection PIN→JWT auth, full 23-field `Container` codec, auto `AuthVerify` liveness answer):
+**Any program can be a module** — the only requirement is that it can connect to the engine over **WSS** (WebSocket over TLS). The engine accepts *only* `wss://` connections (a plain `ws://` handshake is dropped), so a client must speak TLS and trust the engine's self-signed certificate. The one-file clients below do this automatically: when `COCKATIEL_TLS_CERT` points at the engine's cert (`cockatiel_engine-rs/tls/cockatiel-cert.pem`, generated on first boot) they connect via `wss://` and pin that cert; with the variable unset they fall back to plain `ws://` (useful only against a non-TLS engine).
+
+The one-file clients live in the [`cockatiel_lib`](https://github.com/vulbyte/cockatiel_lib) submodule; each implements the same contract (single-connection PIN→JWT auth, full 23-field `Container` codec, auto `AuthVerify` liveness answer, WSS + cert pinning):
 
 | Language | One-line import | Client file |
 |---|---|---|
@@ -161,6 +165,7 @@ Example (strict JSON):
 **Security model.**
 
 - **PIN + JWT name-trust.** A first connection proves the PIN; thereafter every message carries a JWT whose `name` claim must match the container's `module_name` — a valid token can't be replayed under a trusted name (like the TUI) to reach gated capabilities. The PIN remains the master key for first connections. Blank/`unnamed_module` identities are rejected outright, and the supervisor forces each module's identity via `--name`.
+- **WSS-only transport + cert pinning.** The engine generates a self-signed certificate on first boot (`tls/cockatiel-cert.pem`) and accepts **only** `wss://` — a plain `ws://` connection fails the TLS handshake and is dropped before any frame. Clients pin that exact cert (via `COCKATIEL_TLS_CERT`, which the supervisor sets on every module it launches); it is never trusted implicitly, so a man-in-the-middle with a different cert is rejected.
 - **Module approval via prompts.** Connecting modules are not silently trusted: the engine raises a `Prompt`, the TUI (or term-chat) shows an approve/deny dialog, and the decision persists. Modules can also raise prompts (e.g. "enter the YouTube video ID"), answered in the TUI's prompts window.
 - **Secrets vs settings.** Secrets (engine PIN/JWT secret, module tokens, OAuth keys) live in owner-only `.env` files; non-secret settings live in `config.json`. Sensitive credential fields are masked on screen. The PIN is delivered to modules via `COCKATIEL_PIN` env — never on the command line.
 - **Credential isolation.** `module_list` redacts other modules' secrets (only the TUI and term-chat's OAuth-login may read them); `set_credentials` and `engine_info` (PIN) are control-surface-only — one module can't read or rewrite another's credentials.

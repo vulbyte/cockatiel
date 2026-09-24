@@ -88,9 +88,22 @@ impl WsClient {
     }
 
     async fn connect_and_run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let url = format!("ws://{}:{}", self.ip, self.port);
+        // WSS when the supervisor set COCKATIEL_TLS_CERT (engine only accepts WSS).
+        let (scheme, connector): (&str, Option<tokio_tungstenite::Connector>) =
+            match std::env::var("COCKATIEL_TLS_CERT") {
+                Ok(path) if !path.trim().is_empty() => {
+                    let cfg = pinned_tls_config(&path)?;
+                    ("wss", Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(cfg))))
+                }
+                _ => ("ws", None),
+            };
+        let url = format!("{}://{}:{}", scheme, self.ip, self.port);
 
-        let (ws_stream, _) = connect_async(&url).await?;
+        let result = match &connector {
+            Some(c) => tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(c.clone())).await,
+            None => connect_async(&url).await,
+        };
+        let (ws_stream, _) = result?;
         let (mut write, mut read) = ws_stream.split();
 
         // Single handshake: send ConnectionRequest with PIN (or auth_token for reconnection)
@@ -403,4 +416,26 @@ impl WsClient {
         let _ = self.event_tx.send(WsEvent::Disconnected);
         Ok(())
     }
+}
+
+/// Build a rustls client config that trusts exactly the engine's self-signed
+/// certificate (cert pinning), so the TUI can connect to the WSS-only engine.
+fn pinned_tls_config(cert_pem_path: &str) -> Result<rustls::ClientConfig, String> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let cert_bytes =
+        std::fs::read(cert_pem_path).map_err(|e| format!("read TLS cert {}: {}", cert_pem_path, e))?;
+    let mut reader = std::io::BufReader::new(cert_bytes.as_slice());
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("parse TLS cert: {}", e))?;
+    if certs.is_empty() {
+        return Err(format!("no certificate found in {}", cert_pem_path));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for c in certs {
+        roots.add(c).map_err(|e| format!("pinning TLS cert failed: {}", e))?;
+    }
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth())
 }

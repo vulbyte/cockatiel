@@ -6,7 +6,7 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "ca14783689eb0364ff987c0eb171e8e9dd0e7bd3" }
+cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "d037f497119129ed5ca8e202da527a72e1d2d04a" }
 ratatui = "0.29"
 crossterm = "0.28"
 tokio-tungstenite = "0.24"
@@ -17,3 +17,5 @@ serde_json = "1"
 uuid = { version = "1", features = ["v7"] }
 tokio = { version = "1", features = ["full"] }
 open = "5"
+rustls = "0.23"
+rustls-pemfile = "2"

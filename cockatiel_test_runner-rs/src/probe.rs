@@ -15,7 +15,7 @@ use crate::{
 /// (`binary.<os>.<arch>`), falling back to `launch_command` (cargo run) when no
 /// built binary is declared — avoids cargo-overhead stalls when launching many
 /// modules at once.
-fn resolve_binary(dir: &std::path::Path, manifest: &serde_json::Value) -> Option<(String, Vec<String>)> {
+pub(crate) fn resolve_binary(dir: &std::path::Path, manifest: &serde_json::Value) -> Option<(String, Vec<String>)> {
     let os = if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "windows") { "windows" } else { "linux" };
     let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else if cfg!(target_arch = "x86_64") { "x86_64" } else { "arm" };
     if let Some(bin) = manifest
@@ -46,24 +46,97 @@ fn resolve_binary(dir: &std::path::Path, manifest: &serde_json::Value) -> Option
 
 /// Launch a module binary against the real engine (CLI overrides win over any
 /// on-disk connection config). Returns the spawned child or None.
-fn launch_module(dir: &std::path::Path, manifest: &serde_json::Value, name: &str, cli: &Cli) -> Option<std::process::Child> {
+pub(crate) fn launch_module(dir: &std::path::Path, manifest: &serde_json::Value, name: &str, cli: &Cli) -> Option<std::process::Child> {
+    launch_module_impl(dir, manifest, name, cli, false)
+}
+
+/// Launch a TERMINAL/UI module inside a pseudo-TTY so it can run headless
+/// against the engine (TUI modules need a real TTY for crossterm). macOS:
+/// `script -q /dev/null <cmd...>`; Linux: `script -q -c "<cmd>" /dev/null`;
+/// Windows has no `script` — returns None. Shared by the probe + soak harnesses.
+pub(crate) fn launch_module_pty(dir: &std::path::Path, manifest: &serde_json::Value, name: &str, cli: &Cli) -> Option<std::process::Child> {
+    launch_module_impl(dir, manifest, name, cli, true)
+}
+
+fn launch_module_impl(
+    dir: &std::path::Path,
+    manifest: &serde_json::Value,
+    name: &str,
+    cli: &Cli,
+    pty: bool,
+) -> Option<std::process::Child> {
     let (program, mut args) = resolve_binary(dir, manifest)?;
-    let mut cmd = std::process::Command::new(&program);
-    cmd.args(&args)
-        .arg("--ip")
-        .arg(&cli.ip)
-        .arg("--port")
-        .arg(cli.port.to_string())
-        .arg("--pin")
-        .arg(cli.pin.to_string())
+    args.extend([
+        "--ip".into(),
+        cli.ip.clone(),
+        "--port".into(),
+        cli.port.to_string(),
+        "--pin".into(),
+        cli.pin.to_string(),
         // Pin the module's identity so it connects as itself even without a
         // local connection file (which may be absent or stale in CI).
-        .arg("--name")
-        .arg(name)
-        .current_dir(dir)
+        "--name".into(),
+        name.into(),
+    ]);
+    let mut cmd = if pty {
+        #[cfg(target_os = "macos")]
+        {
+            let mut c = std::process::Command::new("script");
+            c.arg("-q").arg("/dev/null").arg(&program);
+            c
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // util-linux `script`: `-c` takes the whole command as one string.
+            let mut full = String::new();
+            for (i, part) in std::iter::once(&program).chain(args.iter()).enumerate() {
+                if i > 0 {
+                    full.push(' ');
+                }
+                full.push_str(&shell_quote_single(part));
+            }
+            let mut c = std::process::Command::new("script");
+            c.arg("-q").arg("-c").arg(full).arg("/dev/null");
+            c
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            return None;
+        }
+    } else {
+        let mut c = std::process::Command::new(&program);
+        c.args(&args);
+        c
+    };
+    if pty {
+        #[cfg(not(target_os = "linux"))]
+        cmd.args(&args);
+        #[cfg(target_os = "linux")]
+        let _ = &args; // folded into the `-c` string above
+    }
+    // The engine only accepts WSS — point launched modules at its self-signed
+    // cert so they connect over TLS (same as the TUI supervisor does).
+    let cert = std::env::current_dir()
+        .unwrap_or_default()
+        .join("..")
+        .join("cockatiel_engine-rs")
+        .join("tls")
+        .join("cockatiel-cert.pem");
+    if cert.exists() {
+        cmd.env("COCKATIEL_TLS_CERT", &cert);
+    }
+    cmd.current_dir(dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     cmd.spawn().ok()
+}
+
+/// Minimal single-quote shell escaping for embedding a path/arg in a shell
+/// command string (util-linux `script -c`). The args we build are safe, but a
+/// module directory or binary path containing spaces must not break the line.
+#[cfg(target_os = "linux")]
+fn shell_quote_single(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 pub async fn run_probe_suite(cli: &Cli) -> Vec<Metrics> {
@@ -176,7 +249,7 @@ pub async fn run_probe_suite(cli: &Cli) -> Vec<Metrics> {
     vec![m]
 }
 
-fn cleanup(children: &mut [std::process::Child]) {
+pub(crate) fn cleanup(children: &mut [std::process::Child]) {
     for child in children.iter_mut() {
         let _ = child.kill();
         let _ = child.wait();

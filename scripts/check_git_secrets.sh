@@ -21,6 +21,8 @@ PATTERNS=(
   '(^|/)(config|modules|login|chat_config)\.json$'          # secret-bearing configs
   '(^|/)term-chat-rs\.json$'                                 # term-chat runtime config
   '(^|/)user_data_backup\.db$'                              # user-db snapshot
+  '(^|/)tls/'                                                 # engine TLS identity dir
+  '[^/]*\.(pem|key)$'                                        # TLS certs / private keys
 )
 
 main() {

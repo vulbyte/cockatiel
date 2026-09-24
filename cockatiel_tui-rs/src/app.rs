@@ -157,6 +157,10 @@ pub struct AppState {
     /// Sender for runtime-crash events: a module that died AFTER connecting is
     /// recovered by the crash ladder (restart, then rebuild, then rollback).
     pub restart_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Sender for crash-ladder relaunches after the exponential backoff delay
+    /// has elapsed. The backoff sleep runs on a background task (never the main
+    /// loop), which reports back here with (module, launch mode) when it fires.
+    pub retry_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, crate::supervisor::LaunchMode)>>,
     /// Sender for launch results: a background task resolves a module's launch
     /// (possibly building it) and reports back (name, Result<(cmd, args)>).
     /// The main loop spawns the child once it receives the result, so a cold
@@ -209,8 +213,17 @@ impl ModuleCrashState {
 pub const CRASH_WINDOW_MS: i64 = 30 * 60 * 1000;
 /// Consecutive crashes before the "disable autostart?" prompt appears.
 pub const CONSECUTIVE_CRASH_PROMPT: u32 = 3;
-/// Delay before relaunching a crashed module (avoids a tight crash loop).
-pub const RESTART_BACKOFF: Duration = Duration::from_secs(2);
+/// Cap for the exponential crash-restart backoff (10 minutes).
+pub const CRASH_BACKOFF_MAX_SECS: u64 = 600;
+
+/// Exponential crash-restart backoff: 1s, 2s, 4s, 8s ... capped at
+/// `CRASH_BACKOFF_MAX_SECS` (10 min). `consecutive` is the module's crash
+/// count within the current window (from `ModuleCrashState::record_crash`).
+pub fn crash_backoff(consecutive: u32) -> Duration {
+    let shift = (consecutive.saturating_sub(1)).min(10);
+    let secs = (1u64 << shift).min(CRASH_BACKOFF_MAX_SECS);
+    Duration::from_secs(secs)
+}
 
 impl AppState {
     pub fn new(colors: ColorConfig, hotkeys: HotkeyConfig) -> Self {
@@ -230,6 +243,7 @@ impl AppState {
             rebuild_tx: None,
             rebuild_attempts: Arc::new(Mutex::new(HashMap::new())),
             restart_tx: None,
+            retry_tx: None,
             crash_state: Arc::new(Mutex::new(HashMap::new())),
             launch_tx: None,
             pending_prompt: VecDeque::new(),
@@ -326,5 +340,18 @@ mod tests {
         let (rebuild, consecutive) = st.record_crash(t0 + 33 * 60 * 1000);
         assert!(!rebuild);
         assert_eq!(consecutive, 1);
+    }
+
+    #[test]
+    fn crash_backoff_is_exponential_and_capped() {
+        assert_eq!(crash_backoff(0), Duration::from_secs(1));
+        assert_eq!(crash_backoff(1), Duration::from_secs(1));
+        assert_eq!(crash_backoff(2), Duration::from_secs(2));
+        assert_eq!(crash_backoff(3), Duration::from_secs(4));
+        assert_eq!(crash_backoff(4), Duration::from_secs(8));
+        assert_eq!(crash_backoff(10), Duration::from_secs(512));
+        // Capped at 10 minutes, never grows further.
+        assert_eq!(crash_backoff(11), Duration::from_secs(CRASH_BACKOFF_MAX_SECS));
+        assert_eq!(crash_backoff(20), Duration::from_secs(CRASH_BACKOFF_MAX_SECS));
     }
 }

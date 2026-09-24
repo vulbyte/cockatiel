@@ -205,3 +205,7 @@ cockatiel_tui-rs/config.json
 *.sqlite
 *.sqlite3
 cockatiel_tui-rs/cockatiel_data.db*
+
+# TLS material (self-signed engine cert / private key) — never commit.
+*.pem
+*.key

@@ -81,6 +81,18 @@ pub fn engine_config_path() -> PathBuf {
     engine_dir().join("config.json")
 }
 
+/// Path to the engine's self-signed TLS cert, if it exists. The engine writes
+/// this on startup; modules are launched with `COCKATIEL_TLS_CERT` set to it so
+/// they connect over WSS (the engine rejects plain ws://).
+pub fn engine_tls_cert_path() -> Option<PathBuf> {
+    let p = engine_dir().join("tls").join("cockatiel-cert.pem");
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
 pub fn engine_env_path() -> PathBuf {
     engine_dir().join(".env")
 }
@@ -528,6 +540,9 @@ pub fn spawn_from_parts(p: &Plugin, cmd: &str, args: &[String]) -> Result<Child,
     if let Some(pin) = pin {
         command.env("COCKATIEL_PIN", pin);
     }
+    if let Some(cert) = engine_tls_cert_path() {
+        command.env("COCKATIEL_TLS_CERT", cert);
+    }
     command
         .spawn()
         .map_err(|e| format!("Failed to launch '{}': {}", p.manifest.name, e))
@@ -558,16 +573,20 @@ pub fn pid_alive(pid: i32) -> bool {
     }
 }
 
-/// Spawn a `terminal: true` module inside a NEW terminal window so it gets a
-/// real TTY (stdin/stdout). Cross-platform: macOS (Terminal.app), Linux (first
+/// Spawn a `terminal: true` module inside a terminal window so it gets a real
+/// TTY (stdin/stdout). Cross-platform: macOS (Terminal.app), Linux (first
 /// available terminal emulator), Windows (new console window).
 ///
-/// Returns the child, a UNIQUE window marker ("cockatiel:<name>:<uuid>") and a
-/// pidfile path so the supervisor can close that exact window and kill the real
-/// process later. On macOS the command is dispatched to Terminal.app; the
-/// module is `exec`'d over the window's shell, so the pid written to the
-/// pidfile IS the module's process id. Any stale window/process for the same
-/// module is cleaned up first, so a module never ends up with two instances.
+/// Returns the child, a window marker ("cockatiel:<name>") and a pidfile path
+/// so the supervisor can close that exact window and kill the real process
+/// later. On macOS the command is dispatched to Terminal.app; the module is
+/// `exec`'d over the window's shell, so the pid written to the pidfile IS the
+/// module's process id. The marker is STABLE (no per-launch UUID) so a
+/// relaunch REUSES the module's existing window instead of opening a fresh one
+/// every time — Terminal.app is unreliable about programmatic window close, so
+/// a close-then-reopen launch can stack windows (e.g. during a crash-loop).
+/// Any stale process for the same module is killed first, so a module never
+/// ends up with two instances.
 pub fn spawn_terminal_from_parts(
     p: &Plugin,
     cmd: &str,
@@ -580,12 +599,27 @@ pub fn spawn_terminal_from_parts(
         Some(pin) => format!("export COCKATIEL_PIN={}; ", shell_quote(&pin)),
         None => String::new(),
     };
+    // Point the module at the engine's TLS cert so it connects over WSS.
+    let tls_export = match engine_tls_cert_path() {
+        Some(cert) => format!("export COCKATIEL_TLS_CERT={}; ", shell_quote(&cert.to_string_lossy())),
+        None => String::new(),
+    };
     let cmd_line = format!("{} {}", shell_quote(cmd), clean_args.join(" "));
     let dir = p.directory.to_string_lossy().to_string();
-    // Unique per launch so a close can't target a freshly relaunched window.
-    let marker = format!("cockatiel:{}:{}", p.manifest.name, uuid::Uuid::now_v7());
-    let dedupe_prefix = format!("cockatiel:{}:", p.manifest.name);
-    let pidfile = std::env::temp_dir().join(format!("cockatiel-{}.pid", p.manifest.name));
+    // Stable marker: the module's window is found and REUSED by this name on
+    // every launch, and closed by it on kill. A per-launch UUID would leave
+    // relaunched modules unable to find (or close) their own window.
+    let marker = format!("cockatiel:{}", p.manifest.name);
+    // PER-LAUNCH pidfile: a relaunch must never read the previous instance's
+    // stale pid. A single shared `cockatiel-<name>.pid` meant the freshly
+    // spawned monitor could read the OLD dead pid before the new shell wrote
+    // its own → a false "starting" crash → spurious rebuild loop (and the
+    // rebuild's kill could even hit a still-starting instance).
+    let pidfile = std::env::temp_dir().join(format!(
+        "cockatiel-{}-{}.pid",
+        p.manifest.name,
+        uuid::Uuid::now_v7()
+    ));
     // Title the tab with the marker, then run the module in the FOREGROUND so a
     // full-screen TUI module owns the terminal (backgrounding a TUI module
     // breaks it: the shell gives the bg job /dev/null stdin, so ratatui fails
@@ -595,7 +629,8 @@ pub fn spawn_terminal_from_parts(
     // for the window to close later: Terminal.app refuses to close a window
     // whose shell has exited).
     let run = format!(
-        "{}printf '\\033]0;{}\\007'; cd \"{}\" && sh -c 'echo $$ > \"{}\"; exec {}'",
+        "{}{}printf '\\033]0;{}\\007'; cd \"{}\" && sh -c 'echo $$ > \"{}\"; exec {}'",
+        tls_export,
         pin_export,
         shell_quote(&marker),
         shell_quote(&dir),
@@ -605,13 +640,19 @@ pub fn spawn_terminal_from_parts(
 
     match std::env::consts::OS {
         "macos" => {
-            // Dedupe: kill a stale process from a previous launch of this
-            // module (its pidfile survives) and close stale windows, so a
-            // relaunch can't stack two running instances or windows.
-            kill_terminal_process(&pidfile);
+            // Dedupe: kill any lingering process from a previous launch of this
+            // module (scanning its per-launch pidfiles), then REUSE the module's
+            // existing Terminal window (if any) for the relaunch instead of
+            // opening a new one. Opening a fresh window per launch is what
+            // stacked windows: Terminal.app's programmatic close is slow/
+            // unreliable, so a crash-loop relaunch outpaced the cleanup and
+            // left stale windows behind. Reusing one window keeps exactly one
+            // per module.
+            kill_stale_terminal_processes(&p.manifest.name);
             let script = format!(
-                "tell application \"Terminal\"\nactivate\ntry\nclose (every window whose name contains \"{}\") saving no\nend try\ndo script \"{}\"\nend tell",
-                shell_quote(&dedupe_prefix),
+                "tell application \"Terminal\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\nrepeat with i from (count of wins) to 2 by -1\nclose (item i of wins) saving no\nend repeat\ndo script \"{}\" in w\nend if\nend tell",
+                shell_quote(&marker),
+                shell_quote(&run),
                 shell_quote(&run),
             );
             Command::new("osascript")
@@ -676,6 +717,11 @@ fn kill_terminal_process(pidfile: &Path) {
         Some(pid) => pid,
         None => return,
     };
+    kill_pid(pid);
+}
+
+/// TERM then (if still alive) KILL a pid, waiting briefly between signals.
+fn kill_pid(pid: i32) {
     for (signal, wait) in [("TERM", 800u64), ("KILL", 400u64)] {
         let _ = Command::new("kill")
             .arg(format!("-{}", signal))
@@ -701,6 +747,43 @@ fn kill_terminal_process(pidfile: &Path) {
         }
         if gone {
             break;
+        }
+    }
+}
+
+/// Kill any still-alive module process left behind by a PREVIOUS launch of the
+/// same terminal module, by scanning its per-launch pidfiles
+/// (`cockatiel-<name>-*.pid`). This is the launch-time dedupe now that pidfiles
+/// are unique per launch (a single shared pidfile caused the stale-pid race).
+fn kill_stale_terminal_processes(name: &str) {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let prefix = format!("cockatiel-{}-", name);
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        if !fname.starts_with(&prefix) || !fname.ends_with(".pid") {
+            continue;
+        }
+        let pid: i32 = match std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            Some(pid) => pid,
+            None => continue,
+        };
+        let alive = Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if alive {
+            eprintln!("[supervisor] killing stale {} process (pid {})", name, pid);
+            kill_pid(pid);
         }
     }
 }
@@ -1142,6 +1225,88 @@ mod tests {
                 "still open (process is dead; user may close it)"
             }
         );
+    }
+
+    /// Live (manual): a crash + relaunch must REUSE the module's existing
+    /// window — never stack a second one. This is the regression guard for the
+    /// "term-chat opens 4 windows" bug. Run with:
+    /// cargo test --release live_terminal_relaunch -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "macos")]
+    fn live_terminal_relaunch_reuses_window() {
+        let manifest = crate::plugins::ModuleManifest {
+            name: "liveterm".into(),
+            description: String::new(),
+            version: String::new(),
+            capabilities: String::new(),
+            root_file: String::new(),
+            launch_command: String::new(),
+            command_flags: vec![],
+            terminal: true,
+            credentials: vec![],
+            binary: Default::default(),
+            build_command: None,
+            build_flags: vec![],
+        };
+        let plugin = Plugin {
+            manifest,
+            directory: std::path::PathBuf::from("/tmp"),
+        };
+
+        let count_windows = || {
+            std::process::Command::new("osascript")
+                .arg("-e")
+                .arg("tell application \"Terminal\" to get name of (every window whose name contains \"cockatiel:liveterm\")")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+
+        // First launch: one window.
+        let (_child1, marker1, pidfile1) =
+            spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()]).expect("spawn 1");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert_eq!(count_windows().lines().count(), 1, "first launch must open exactly one window");
+        let pid1 = std::fs::read_to_string(pidfile1.as_ref().unwrap())
+            .expect("pidfile 1 written")
+            .trim()
+            .parse::<i32>()
+            .expect("pid parses");
+
+        // Simulate a crash: kill the module's real process.
+        kill_terminal_process(pidfile1.as_ref().unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert!(!libc_kill_alive(pid1), "module should be dead after simulated crash");
+
+        // Relaunch (the supervisor's crash ladder path): must reuse the SAME
+        // window, not stack a second one.
+        let (_child2, marker2, pidfile2) =
+            spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()]).expect("spawn 2");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let windows = count_windows();
+        eprintln!("windows after relaunch: {:?}", windows);
+        assert_eq!(windows.lines().count(), 1, "relaunch must reuse the existing window — found {} windows", windows.lines().count());
+        let pid2 = std::fs::read_to_string(pidfile2.as_ref().unwrap())
+            .expect("pidfile 2 written")
+            .trim()
+            .parse::<i32>()
+            .expect("pid parses");
+        assert!(libc_kill_alive(pid2), "relaunched module should be running");
+
+        // Cleanup: kill the relaunched process, best-effort close windows.
+        let mut proc = ManagedProcess {
+            child: _child2,
+            terminal_window: marker2,
+            terminal_pidfile: pidfile2,
+        };
+        proc.kill();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(!libc_kill_alive(pid2), "relaunched module should be dead after cleanup");
+        let _ = marker1;
     }
 
     #[cfg(target_os = "macos")]

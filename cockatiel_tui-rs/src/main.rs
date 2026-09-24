@@ -215,9 +215,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })),
                     );
                     eprintln!("[supervisor] Launched engine (pid {})", pid);
-                    // Wait for the engine to write its config (port/pin) so
-                    // plugins launch with the right credentials. Explicit CLI
-                    // overrides still win over the freshly-written config.
+                    // Wait for the engine to write its config (port/pin) AND its
+                    // TLS cert, so plugins + the TUI itself can connect over WSS.
+                    // Explicit CLI overrides still win over the fresh config.
                     for _ in 0..20 {
                         std::thread::sleep(std::time::Duration::from_millis(300));
                         if let Some((ep, epin)) = supervisor::read_engine_addr() {
@@ -233,6 +233,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => eprintln!("[supervisor] Engine launch failed: {}", e),
             }
+        }
+
+        // Point the TUI's own engine connection (and any module it launches)
+        // at the engine's TLS cert so everything speaks WSS. Set for this
+        // process — the supervisor also sets it on each module's Command.
+        if let Some(cert) = supervisor::engine_tls_cert_path() {
+            std::env::set_var("COCKATIEL_TLS_CERT", cert);
         }
 
         // Discover plugins recursively from the current directory and the repo's
@@ -281,6 +288,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // through the crash ladder (restart → rebuild → rollback, unlimited retries).
     let (restart_tx, restart_rx) = mpsc::unbounded_channel::<String>();
     state.restart_tx = Some(restart_tx);
+
+    // Crash-ladder relaunch channel: `handle_crash` schedules the relaunch on a
+    // background task (exponential backoff), which reports back here with the
+    // module + launch mode when the backoff elapses — so the main loop never
+    // blocks for the backoff.
+    let (retry_tx, retry_rx) =
+        mpsc::unbounded_channel::<(String, supervisor::LaunchMode)>();
+    state.retry_tx = Some(retry_tx);
 
     // Launch channel: background tasks resolve module launches (building if
     // needed) and report back, so a cold build never blocks the UI loop.
@@ -343,6 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pin,
         rebuild_rx,
         restart_rx,
+        retry_rx,
         launch_rx,
     ).await;
 
@@ -379,6 +395,7 @@ async fn run_app(
     pin: u32,
     mut rebuild_rx: mpsc::UnboundedReceiver<String>,
     mut restart_rx: mpsc::UnboundedReceiver<String>,
+    mut retry_rx: mpsc::UnboundedReceiver<(String, supervisor::LaunchMode)>,
     mut launch_rx: mpsc::UnboundedReceiver<(String, Result<(String, Vec<String>), String>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Input events arrive instantly from a background crossterm reader thread.
@@ -392,6 +409,11 @@ async fn run_app(
 
     // Unresponsive watchdog cadence (only runs when no input is pending).
     let mut watchdog_last = Instant::now();
+    // Modules observed looking-dead once; they must look dead on TWO consecutive
+    // cycles (1s apart) before the watchdog restarts them, so a transient
+    // liveness blip can't kill a healthy module.
+    let mut watchdog_suspects: std::collections::HashMap<String, ()> =
+        std::collections::HashMap::new();
 
     loop {
         tokio::select! {
@@ -454,7 +476,13 @@ async fn run_app(
                     };
                     if attempts < 3 {
                         supervisor_log(state, format!("[supervisor] {} crashed — rebuilding and relaunching (attempt {})", name, attempts + 1));
-                        supervisor.remove(&name);
+                        // Kill the crashed process before removing it from the
+                        // table — `remove` alone would orphan it (untracked,
+                        // never killed on teardown).
+                        if let Some(proc) = supervisor.remove(&name) {
+                            let mut proc = proc.lock().unwrap();
+                            proc.kill();
+                        }
                         request_launch(
                             state,
                             &name,
@@ -475,11 +503,24 @@ async fn run_app(
                         state,
                         &name,
                         supervisor,
-                        &plugins,
-                        port,
-                        pin,
                     )
                     .await;
+                }
+            }
+            maybe_retry = retry_rx.recv() => {
+                // A crash-ladder backoff elapsed: relaunch the module. Skip if
+                // the operator changed its state meanwhile (stopped it, or
+                // manually started it — the manual start transitioned the
+                // status to "building"/"starting", so this fires and no-ops).
+                if let Some((name, mode)) = maybe_retry {
+                    let still_pending = {
+                        let runs = state.module_runs.lock().unwrap();
+                        runs.get(&name).map(|s| s.as_str()) == Some("restarting")
+                    };
+                    if still_pending {
+                        supervisor_log(state, format!("[supervisor] relaunching {} after crash backoff", name));
+                        request_launch(state, &name, supervisor, &plugins, port, pin, mode);
+                    }
                 }
             }
             maybe_launch = launch_rx.recv() => {
@@ -498,32 +539,53 @@ async fn run_app(
             _ = redraw.tick() => {
                 // Watchdog: recover locally-launched modules that the engine
                 // flagged unresponsive (hung, but the process may still be
-                // alive) or that dropped off the live-session list.
+                // alive) or that dropped off the live-session list. Two-strike rule + engine
+                // connectivity gate: a transient liveness blip or a stale
+                // module_list snapshot (engine disconnected / poll hiccup) must
+                // never kill a healthy module.
                 if watchdog_last.elapsed() >= Duration::from_secs(1) {
                     watchdog_last = Instant::now();
-                    let dead: Vec<String> = state
-                        .module_runs
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|(name, status)| {
-                            status.as_str() == "connected" && supervisor.contains_key(*name)
-                        })
-                        .filter_map(|(name, _)| {
+                    if !state.connected {
+                        watchdog_suspects.clear();
+                        continue;
+                    }
+                    let mut looks_dead: Vec<String> = Vec::new();
+                    {
+                        let runs = state.module_runs.lock().unwrap();
+                        for (name, status) in runs.iter() {
+                            if status.as_str() != "connected" || !supervisor.contains_key(name) {
+                                continue;
+                            }
                             let entry = state
                                 .stats
                                 .module_entries
                                 .iter()
                                 .find(|e| &e.name == name);
                             match entry {
-                                Some(e) if !e.alive || e.status != "connected" => Some(name.clone()),
-                                _ => None,
+                                Some(e) if !e.alive || e.status != "connected" => {
+                                    looks_dead.push(name.clone());
+                                }
+                                _ => {
+                                    watchdog_suspects.remove(name);
+                                }
+                            }
+                        }
+                    }
+                    let dead: Vec<String> = looks_dead
+                        .into_iter()
+                        .filter(|name| {
+                            if watchdog_suspects.insert(name.clone(), ()).is_some() {
+                                supervisor_log(state, format!("[supervisor] {} looks dead — confirming next cycle", name));
+                                false
+                            } else {
+                                true
                             }
                         })
                         .collect();
                     for name in dead {
+                        watchdog_suspects.remove(&name);
                         supervisor_log(state, format!("[supervisor] {} unresponsive — restarting", name));
-                        handle_crash(state, &name, supervisor, &plugins, port, pin).await;
+                        handle_crash(state, &name, supervisor).await;
                     }
                 }
             }
@@ -1463,11 +1525,14 @@ fn request_launch(
     if supervisor.contains_key(name) {
         return false;
     }
-    // Don't stack a launch while one is already resolving.
+    // Don't stack a launch while one is already resolving. "restarting" is NOT
+    // excluded: it means a crash-ladder backoff is pending, and an explicit
+    // operator start (or the backoff firing) should be allowed to launch now —
+    // the pending retry handler skips if the status has moved past "restarting".
     {
         let runs = state.module_runs.lock().unwrap();
         match runs.get(name).map(|s| s.as_str()) {
-            Some("building") | Some("starting") | Some("restarting") => return false,
+            Some("building") | Some("starting") => return false,
             _ => {}
         }
     }
@@ -1635,9 +1700,6 @@ async fn handle_crash(
     state: &mut AppState,
     name: &str,
     supervisor: &mut supervisor::ProcessTable,
-    plugins: &[crate::plugins::Plugin],
-    port: u16,
-    pin: u32,
 ) {
     // Respect an explicit stop, and don't stack two recoveries for one module.
     {
@@ -1672,26 +1734,38 @@ async fn handle_crash(
         proc.kill();
     }
 
-    // Backoff so a crash loop doesn't thrash the machine.
-    tokio::time::sleep(crate::app::RESTART_BACKOFF).await;
-
-    // Ladder (mode decided above; the rebuild→rollback fallback happens inside
+    // Ladder mode (decided above; the rebuild→rollback fallback happens inside
     // resolve_launch). The launch itself runs in the background so a cold
     // rebuild doesn't freeze the UI.
     let mode = if rebuild_mode {
         supervisor_log(state, format!("[supervisor] {} crashed again — rebuilding from source", name));
         supervisor::LaunchMode::Rebuild
     } else {
-        // Prebuilt first; the stale-binary check in module_run_parts will
-        // rebuild anyway if the source is newer than the binary.
         supervisor::LaunchMode::Prebuilt
     };
-    request_launch(state, name, supervisor, plugins, port, pin, mode);
 
     // Crash-loop prompt (no retry cap — just ask about autostart).
     if consecutive >= crate::app::CONSECUTIVE_CRASH_PROMPT {
         push_crash_prompt(state, name);
     }
+
+    // Exponential backoff (1s, 2s, 4s ... capped at 10 min) so a crash loop
+    // doesn't thrash the machine. The sleep runs on a background task — never
+    // the main loop — and the retry channel's handler relaunches when it fires.
+    let backoff = crate::app::crash_backoff(consecutive);
+    supervisor_log(
+        state,
+        format!("[supervisor] {} crashed — relaunching in {}s (backoff)", name, backoff.as_secs()),
+    );
+    let Some(retry_tx) = state.retry_tx.clone() else {
+        supervisor_log(state, format!("[supervisor] {} crashed — no retry channel; left stopped", name));
+        return;
+    };
+    let name = name.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(backoff).await;
+        let _ = retry_tx.send((name, mode));
+    });
 }
 
 /// Set a module's autostart flag in its manifest file on disk.

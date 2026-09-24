@@ -565,10 +565,14 @@ pub(crate) async fn connected_modules(
                             if let Some(arr) = v.as_array() {
                                 for e in arr {
                                     let name = e.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                    // Only CONNECTED sessions have connected_at set.
+                                    // Only CONNECTED AND ALIVE sessions count: a
+                                    // module the engine flagged unresponsive (or
+                                    // that just disconnected) must not be probed.
                                     let connected = e.get("connected_at").and_then(|c| c.as_i64()).map(|c| c > 0).unwrap_or(false);
+                                    let alive = e.get("alive").and_then(|a| a.as_bool()).unwrap_or(false);
+                                    let shutdown = e.get("shutdown_at").and_then(|s| s.as_i64()).map(|s| s > 0).unwrap_or(false);
                                     let skip = matches!(name, "cockatiel-test-runner" | "cockatiel-tui" | "cockatiel-tui-child");
-                                    if connected && !name.is_empty() && !skip {
+                                    if connected && alive && !shutdown && !name.is_empty() && !skip {
                                         modules.push(name.to_string());
                                     }
                                 }

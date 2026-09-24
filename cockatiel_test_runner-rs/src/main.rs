@@ -10,6 +10,7 @@ mod fake_engine;
 mod hardening;
 mod probe;
 mod screening;
+mod soak;
 mod metrics;
 
 use metrics::Metrics;
@@ -19,9 +20,10 @@ use metrics::Metrics;
 
 #[derive(Clone)]
 struct Cli {
-    suite: String, // "chain" | "modules" | "screening" | "hardening" | "probe" | "all"
+    suite: String, // "chain" | "modules" | "screening" | "hardening" | "probe" | "soak" | "all"
     module: Option<String>,
     iterations: u64,
+    duration_secs: u64,
     json: bool,
     ip: String,
     port: u16,
@@ -36,9 +38,10 @@ USAGE:
   cockatiel-test-runner [OPTIONS]
 
 OPTIONS:
-  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "probe" | "all"   (default: all)
+  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "probe" | "soak" | "all"   (default: all)
   --module <name>      run only this module (runtime probe)
   --iterations <n>     messages per test burst        (default: 100)
+  --duration-secs <n>  soak window: seconds each module must stay connected (default: 30)
   --json               output machine-readable JSON summary
   --help               show this help
 "#
@@ -50,6 +53,7 @@ fn parse_args(args: &[String]) -> Cli {
         suite: "all".to_string(),
         module: None,
         iterations: 100,
+        duration_secs: soak::DEFAULT_SOAK_SECS,
         json: false,
         ip: "127.0.0.1".to_string(),
         port: 9734,
@@ -81,6 +85,14 @@ fn parse_args(args: &[String]) -> Cli {
             "--iterations" => {
                 if let Some(v) = args.get(i + 1) {
                     cli.iterations = v.parse().unwrap_or(100);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--duration-secs" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.duration_secs = v.parse().unwrap_or(soak::DEFAULT_SOAK_SECS);
                     i += 2;
                 } else {
                     i += 1;
@@ -125,11 +137,48 @@ fn parse_args(args: &[String]) -> Cli {
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub(crate) async fn connect_engine(cli: &Cli) -> Result<WsStream, String> {
-    let url = format!("ws://{}:{}", cli.ip, cli.port);
-    let (ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|e| format!("connect: {}", e))?;
+    connect_ws_tls(&cli.ip, cli.port).await
+}
+
+/// Connect over WSS (pinning the engine's self-signed cert) when
+/// `COCKATIEL_TLS_CERT` is set, else plain ws://. The engine only accepts WSS.
+pub(crate) async fn connect_ws_tls(ip: &str, port: u16) -> Result<WsStream, String> {
+    let (scheme, connector): (&str, Option<tokio_tungstenite::Connector>) =
+        match std::env::var("COCKATIEL_TLS_CERT") {
+            Ok(path) if !path.trim().is_empty() => {
+                let cfg = pinned_tls_config(&path)?;
+                ("wss", Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(cfg))))
+            }
+            _ => ("ws", None),
+        };
+    let url = format!("{}://{}:{}", scheme, ip, port);
+    let result = match &connector {
+        Some(c) => tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(c.clone())).await,
+        None => tokio_tungstenite::connect_async(&url).await,
+    };
+    let (ws, _) = result.map_err(|e| format!("connect: {}", e))?;
     Ok(ws)
+}
+
+/// Build a rustls client config that trusts exactly the engine's self-signed
+/// certificate (cert pinning).
+fn pinned_tls_config(cert_pem_path: &str) -> Result<rustls::ClientConfig, String> {
+    let cert_bytes =
+        std::fs::read(cert_pem_path).map_err(|e| format!("read TLS cert {}: {}", cert_pem_path, e))?;
+    let mut reader = std::io::BufReader::new(cert_bytes.as_slice());
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("parse TLS cert: {}", e))?;
+    if certs.is_empty() {
+        return Err(format!("no certificate found in {}", cert_pem_path));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for c in certs {
+        roots.add(c).map_err(|e| format!("pinning TLS cert failed: {}", e))?;
+    }
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth())
 }
 
 pub(crate) async fn send_container(ws: &mut WsStream, c: &Container) -> Result<(), String> {
@@ -510,8 +559,7 @@ async fn benchmark_one_module(
 // ── Timeline archival via engine test_archive (dedicated virtual query) ─
 
 async fn archive_to_timeline(batch_uuid: &str, results: &[Metrics], ip: &str, port: u16, pin: i32) {
-    let url = format!("ws://{}:{}", ip, port);
-    let Ok((mut ws, _)) = tokio_tungstenite::connect_async(url).await else { return };
+    let Ok(mut ws) = connect_ws_tls(ip, port).await else { return };
     let uuid = uuid::Uuid::now_v7().to_string();
     let req = make_container(
         "cockatiel-test-runner",
@@ -580,6 +628,9 @@ async fn main() {
     }
     if cli.suite == "probe" || cli.suite == "all" {
         all.extend(probe::run_probe_suite(&cli).await);
+    }
+    if cli.suite == "soak" || cli.suite == "all" {
+        all.extend(soak::run_soak_suite(&cli).await);
     }
 
     // Summary

@@ -117,25 +117,40 @@ impl UserDatabase {
     }
 
 /// Create a consistent snapshot of the DB at `path` by checkpointing the WAL
-    /// and copying the main file while the DB lock is held (no concurrent
-    /// writes), then atomically renaming into place.
+    /// and copying the main file while the connection lock is held (new queries
+    /// are briefly serialized behind the copy, but the snapshot can never be a
+    /// torn/stale mix), then atomically renaming into place. If the checkpoint
+    /// fails the main file may be stale — abort rather than clobber the last
+    /// good backup.
     pub async fn backup_to(&self, path: &std::path::Path) -> Result<(), String> {
-        let conn = self.conn().await.map_err(|e| e.to_string())?;
-        let src = self.path.lock().await.clone().ok_or("User database has no path")?;
+        let src = self
+            .path
+            .lock()
+            .await
+            .clone()
+            .ok_or("User database has no path")?;
+        let tmp = format!("{}.tmp", path.to_string_lossy());
+        // Hold the connection lock across checkpoint + copy: without it a
+        // concurrent writer (or the driver's own checkpoint) can modify the
+        // main file mid-copy and produce a torn backup that then replaces the
+        // last good one.
+        let guard = self.local.lock().await;
+        let conn = guard
+            .as_ref()
+            .cloned()
+            .ok_or("User database not initialized")?;
         // Merge the WAL so the main file is authoritative before the copy.
         // (PRAGMA returns a result row — drain it so the driver doesn't error.)
-        if let Ok(mut stmt) = conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
-            while let Ok(Some(_)) = stmt.next().await {}
+        match conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ()).await {
+            Ok(mut stmt) => {
+                while let Ok(Some(_)) = stmt.next().await {}
+            }
+            Err(e) => return Err(format!("backup checkpoint failed: {}", e)),
         }
-
-        let tmp = format!("{}.tmp", path.to_string_lossy());
         let _ = std::fs::remove_file(&tmp);
-        std::fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
-        drop(conn);
-        drop(src);
-
+        tokio::fs::copy(&src, &tmp).await.map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        tokio::fs::rename(&tmp, path).await.map_err(|e| e.to_string())?;
         Ok(())
     }
 

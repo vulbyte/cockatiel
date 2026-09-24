@@ -11,6 +11,10 @@ jobs:
       CI_PIN: "738291"
       USER_DB_TOKEN: "ci-userdb-token-4b7f2a"
       CARGO_TERM_COLOR: never
+      # The engine is WSS-only; the test-runner (and every module it launches)
+      # pins the engine's self-signed cert via this env var. The engine writes
+      # it to <repo>/cockatiel_engine-rs/tls/ during the boot step.
+      COCKATIEL_TLS_CERT: ${{ github.workspace }}/cockatiel_engine-rs/tls/cockatiel-cert.pem
     steps:
       - name: Checkout with submodules
         uses: actions/checkout@v4
@@ -37,7 +41,10 @@ jobs:
             {"name": "reprimand", "auto_auth": true, "position": "preprocess", "priority": 100},
             {"name": "stress-test", "auto_auth": true, "position": "preprocess", "priority": 100},
             {"name": "score-messages", "auto_auth": true, "position": "preprocess", "priority": 100},
-            {"name": "language-constrainer", "auto_auth": true, "position": "preprocess", "priority": 100}
+            {"name": "language-constrainer", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "term-chat", "auto_auth": true, "position": "postprocess", "priority": 100},
+            {"name": "cockatiel-audit-viewer", "auto_auth": true, "position": "preprocess", "priority": 100},
+            {"name": "tts-service", "auto_auth": true, "position": "postprocess", "priority": 100}
           ]
           EOF
 
@@ -48,10 +55,10 @@ jobs:
           cargo build --manifest-path cockatiel_user_database-rs/Cargo.toml
           cargo test --manifest-path cockatiel_user_database-rs/Cargo.toml
 
-      - name: Build test-runner + eligible modules (for the probe suite)
+      - name: Build test-runner + eligible modules (for the probe/soak suites)
         run: |
           cargo build --manifest-path cockatiel_test_runner-rs/Cargo.toml
-          for m in banned_words commend reprimand stress_test score_messages language_constrainer; do
+          for m in banned_words commend reprimand stress_test score_messages language_constrainer term_chat audit_viewer; do
             cargo build --release --manifest-path modules/cockatiel_module-$m-rs/Cargo.toml || true
           done
 
@@ -108,6 +115,18 @@ jobs:
           # The probe suite fails if a launched module fails its auth_verify probe.
           if ! rg -q "0 failed" /tmp/probe.log; then
             echo "PROBE NOT GREEN"
+            exit 1
+          fi
+
+      - name: Run soak suite (every module must stay connected 30s)
+        run: |
+          cd cockatiel_test_runner-rs
+          cargo run -- --suite soak --duration-secs 30 --pin "$CI_PIN" 2>&1 | tee /tmp/soak.log
+          # The soak fails if any launched module drops off the live list or
+          # stops answering AuthVerify within the full 30s window.
+          if ! rg -q "0 failed" /tmp/soak.log; then
+            echo "SOAK NOT GREEN"
+            tail -60 /tmp/soak.log
             exit 1
           fi
 
