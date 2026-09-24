@@ -258,6 +258,13 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                 Err(e) => fail("Score remove failed", &e.to_string()),
             }
         }
+        user_db_request::Op::AdjustScoreOnly(s) => {
+            match db.adjust_score_only(&s.uuid7, s.delta).await {
+                Ok(Some(user)) => ok(Some(user), "Score adjusted".to_string()),
+                Ok(None) => fail("Score adjust failed", "User not found"),
+                Err(e) => fail("Score adjust failed", &e.to_string()),
+            }
+        }
         user_db_request::Op::RateUser(r) => {
             match db
                 .rate_user(&r.giver_uuid7, &r.recipient_uuid7, r.is_commendation, &r.platform, &r.handle, &r.reason)

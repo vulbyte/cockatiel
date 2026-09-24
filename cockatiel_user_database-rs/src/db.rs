@@ -329,6 +329,26 @@ impl UserDatabase {
         self.get_user_by_uuid(uuid7).await
     }
 
+    /// Score-only adjustment: changes `score` by `delta` WITHOUT incrementing the
+    /// `commendations`/`reprimands` counters (which track human ratings) and
+    /// WITHOUT the 24h rating cooldown. Used by the automated scorer so real
+    /// configured deltas apply without corrupting the rating counters.
+    pub async fn adjust_score_only(
+        &self,
+        uuid7: &str,
+        delta: i64,
+    ) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let now = Self::now_ms();
+
+        conn.execute(
+            "UPDATE users SET score = score + ?1, updated_at = ?2 WHERE uuid7 = ?3",
+            turso::params![delta, now, uuid7],
+        ).await?;
+
+        self.get_user_by_uuid(uuid7).await
+    }
+
     /// Commend or reprimand a user. For a REPRIMAND the 24h cooldown is
     /// enforced atomically: the history row is inserted only when no
     /// reprimand from the same giver to this recipient exists within the

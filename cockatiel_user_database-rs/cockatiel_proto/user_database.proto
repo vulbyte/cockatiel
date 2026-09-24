@@ -155,6 +155,11 @@ message UserDbRequest {
     UserValueDeleteRequest delete_user_value = 14;
     UserValueListRequest list_user_values = 15;
     RatingRequest rate_user = 16;
+    // Score-only adjustment: changes `score` by delta WITHOUT touching the
+    // commendations/reprimands counters and WITHOUT the 24h rating cooldown.
+    // Used by the automated scorer (score-messages) so configured deltas apply
+    // for real while human commend/reprimand counters stay meaningful.
+    ScoreRequest adjust_score_only = 17;
   }
 }
 
