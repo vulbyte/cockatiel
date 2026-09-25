@@ -73,6 +73,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the workdir) supplies them; real environment variables win.
     load_env_file(".env");
 
+    // Config convention: settings are created with their default when missing
+    // so every value is present and editable in place (real env vars win).
+    write_env_file(
+        ".env",
+        &[
+            ("USER_DB_PORT", "9736"),
+            ("USER_DB_PATH", "user_data.db"),
+            ("USER_DB_BIND", "127.0.0.1"),
+        ],
+    );
+
     let port: u16 = env::var("USER_DB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(9736);
     let token = match env::var("USER_DB_TOKEN") {
         Ok(t) if !t.trim().is_empty() => t,
