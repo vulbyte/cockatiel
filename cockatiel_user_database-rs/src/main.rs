@@ -147,6 +147,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(format!("{}:{}", bind, port)).await?;
     println!("[UserDB] Listening on {}:{} (engine-only access)", bind, port);
 
+    // Rating-history retention: prune rows older than 7 days (the table is
+    // append-only and only the last 24h is ever read for the cooldown).
+    {
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            let retention_ms: i64 = 7 * 24 * 3600 * 1000;
+            let now_ms = || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0)
+            };
+            // Once at startup…
+            match db.prune_old_ratings(now_ms() - retention_ms).await {
+                Ok(()) => println!("[UserDB] pruned ratings older than 7 days"),
+                Err(e) => eprintln!("[UserDB] rating prune failed: {}", e),
+            }
+            // …and hourly.
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                if let Err(e) = db.prune_old_ratings(now_ms() - retention_ms).await {
+                    eprintln!("[UserDB] rating prune failed: {}", e);
+                }
+            }
+        });
+    }
+
     loop {
         let (stream, addr) = listener.accept().await?;
         let db = Arc::clone(&db);

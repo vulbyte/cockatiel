@@ -85,7 +85,8 @@ impl WsClient {
                 Ok(_) => {
                     let _ = self.event_tx.send(WsEvent::Disconnected);
                 }
-                Err(_e) => {
+                Err(e) => {
+                    eprintln!("[ws_client] connect_and_run ended with error: {}", e);
                     let _ = self.event_tx.send(WsEvent::Disconnected);
                 }
             }
@@ -131,34 +132,82 @@ impl WsClient {
         request.encode(&mut buf)?;
         write.send(WsMessage::Binary(buf.into())).await?;
 
-        let response_msg = read.next().await;
-        let response_msg = response_msg.ok_or("No response from engine")??;
-        let WsMessage::Binary(data) = response_msg else {
-            return Err("Expected binary response".into());
-        };
-
-        let response = Container::decode(data.as_ref())?;
-        match response.payload {
-            Some(Payload::ConnectionRequestReturn(ret)) => {
-                if ret.module_instance_uuid7.is_empty() {
-                    // Engine rejected the connection. Downgrade the identity so
-                    // the run() retry loop tries the next fallback instead of
-                    // retrying the same doomed identity forever:
-                    //   token + registered uuid → PIN + registered uuid → PIN + fresh (bootstrap).
-                    if !self.auth_token.is_empty() {
-                        self.auth_token.clear();
-                    } else if !self.instance_uuid7.is_empty() {
-                        self.instance_uuid7.clear();
+        // Drain frames until the ConnectionRequestReturn arrives. The engine
+        // floods connected UIs with Log broadcasts / prompts the moment a
+        // module connects, so under load the FIRST frame is often NOT the
+        // handshake response — treating it as such dropped the TUI into a
+        // reconnect loop. Handle those frames and keep reading.
+        let mut auth_token = String::new();
+        let mut assigned_uuid = String::new();
+        let mut got_return = false;
+        for _ in 0..64 {
+            let response_msg = match tokio::time::timeout(
+                Duration::from_secs(15),
+                read.next(),
+            )
+            .await
+            {
+                Ok(Some(msg)) => msg.map_err(|e| format!("engine read error: {}", e))?,
+                Ok(None) => return Err("engine closed during handshake".into()),
+                Err(_) => return Err("engine handshake timed out".into()),
+            };
+            let WsMessage::Binary(data) = response_msg else {
+                continue;
+            };
+            let response = Container::decode(data.as_ref())?;
+            match response.payload {
+                Some(Payload::ConnectionRequestReturn(ret)) => {
+                    if ret.module_instance_uuid7.is_empty() {
+                        // Engine rejected the connection. Downgrade the identity so
+                        // the run() retry loop tries the next fallback instead of
+                        // retrying the same doomed identity forever:
+                        //   token + registered uuid → PIN + registered uuid → PIN + fresh (bootstrap).
+                        if !self.auth_token.is_empty() {
+                            self.auth_token.clear();
+                        } else if !self.instance_uuid7.is_empty() {
+                            self.instance_uuid7.clear();
+                        }
+                        return Err("Engine rejected connection (empty UUID)".into());
                     }
-                    return Err("Engine rejected connection (empty UUID)".into());
+                    auth_token = response.auth_token;
+                    assigned_uuid = ret.module_instance_uuid7.clone();
+                    got_return = true;
+                    break;
                 }
-                self.auth_token = response.auth_token;
-                self.instance_uuid7 = ret.module_instance_uuid7.clone();
-            }
-            _ => {
-                return Err("Unexpected response from engine".into());
+                Some(Payload::Log(log)) => {
+                    let _ = self.event_tx.send(WsEvent::Log {
+                        source: response.module_name,
+                        message: log.log,
+                        event_type: 1,
+                    });
+                }
+                Some(Payload::Prompt(prompt)) => {
+                    let _ = self.event_tx.send(WsEvent::Prompt(prompt));
+                }
+                Some(Payload::AuthVerify(_)) => {
+                    // Answer the liveness probe like any module.
+                    let reply = Container {
+                        version: 1,
+                        auth_token: if self.auth_token.is_empty() { String::new() } else { self.auth_token.clone() },
+                        module_name: if self.parent_mode { "cockatiel-tui-child" } else { "cockatiel-tui" }.into(),
+                        module_instance_uuid7: if self.instance_uuid7.is_empty() { String::new() } else { self.instance_uuid7.clone() },
+                        payload: Some(Payload::AuthVerify(AuthVerify {
+                            cur_auth: self.auth_token.clone(),
+                        })),
+                    };
+                    let mut rb = Vec::new();
+                    if reply.encode(&mut rb).is_ok() {
+                        let _ = write.send(WsMessage::Binary(rb.into())).await;
+                    }
+                }
+                _ => {}
             }
         }
+        if !got_return {
+            return Err("Engine never returned a ConnectionRequestReturn".into());
+        }
+        self.auth_token = auth_token;
+        self.instance_uuid7 = assigned_uuid;
 
         let _ = self.event_tx.send(WsEvent::Connected);
         let _ = self.event_tx.send(WsEvent::ConnectionInfo {
@@ -339,11 +388,36 @@ impl WsClient {
                                     Some(Payload::Prompt(prompt)) => {
                                         let _ = self.event_tx.send(WsEvent::Prompt(prompt));
                                     }
+                                    Some(Payload::AuthVerify(_)) => {
+                                        // Answer the liveness probe like any
+                                        // module, so a quiet TUI is never
+                                        // flagged unresponsive and killed.
+                                        let reply = Container {
+                                            version: 1,
+                                            auth_token: auth_token.clone(),
+                                            module_name: "cockatiel-tui".into(),
+                                            module_instance_uuid7: instance_uuid7.clone(),
+                                            payload: Some(Payload::AuthVerify(AuthVerify {
+                                                cur_auth: auth_token.clone(),
+                                            })),
+                                        };
+                                        let mut rb = Vec::new();
+                                        if reply.encode(&mut rb).is_ok() {
+                                            let _ = write.send(WsMessage::Binary(rb.into())).await;
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
                             Some(Ok(_)) => {}
-                            Some(Err(_)) | None => break,
+                            Some(Err(e)) => {
+                                eprintln!("[ws_client] engine read error: {:?}", e);
+                                break;
+                            }
+                            None => {
+                                eprintln!("[ws_client] engine closed the connection");
+                                break;
+                            }
                         }
                     }
                     cmd = self.command_rx.recv() => {

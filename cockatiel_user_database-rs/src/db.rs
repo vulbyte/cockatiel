@@ -414,6 +414,20 @@ impl UserDatabase {
         })
     }
 
+    /// Retention cleanup: rating_history is append-only and only the last 24h
+    /// is ever consulted (the reprimand cooldown), so prune rows older than
+    /// `cutoff_ms` to stop unbounded growth. (turso's execute returns a scan
+    /// counter rather than rows deleted, so no count is returned.)
+    pub async fn prune_old_ratings(&self, cutoff_ms: i64) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "DELETE FROM rating_history WHERE created_at < ?1",
+            turso::params![cutoff_ms],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn add_channel(
         &self,
         uuid7: &str,
