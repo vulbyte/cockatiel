@@ -244,15 +244,22 @@ pub fn launch_engine() -> Result<Child, String> {
         .append(true)
         .open(&log_path)
         .map_err(|e| e.to_string())?;
-    Command::new(&binary)
-        .current_dir(&dir)
+    let mut cmd = Command::new(&binary);
+    cmd.current_dir(&dir)
         .env("USER_DB_HOST", "127.0.0.1")
         .env("USER_DB_PORT", USER_DB_DEFAULT_PORT.to_string())
         .env("USER_DB_TOKEN", user_db_token())
         .env("USER_DB_BACKUP_PATH", user_db_backup_path().to_string_lossy().to_string())
         .stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?))
-        .stderr(Stdio::from(log_file))
-        .spawn()
+        .stderr(Stdio::from(log_file));
+    // Own process group (PGID = child PID) so a group TERM/KILL later reaches
+    // the child AND everything it spawns — no orphaned grandchildren.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
         .map_err(|e| format!("Failed to launch engine: {}", e))
 }
 
@@ -335,15 +342,22 @@ pub fn launch_user_db() -> Result<Child, String> {
 
     let log_path = dir.join("userdb.log");
     let log_file = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
-    Command::new(&binary)
-        .current_dir(&dir)
+    let mut cmd = Command::new(&binary);
+    cmd.current_dir(&dir)
         .env("USER_DB_PORT", USER_DB_DEFAULT_PORT.to_string())
         .env("USER_DB_TOKEN", user_db_token())
         .env("USER_DB_PATH", dir.join("user_data.db").to_string_lossy().to_string())
         .env("USER_DB_BACKUP_PATH", user_db_backup_path().to_string_lossy().to_string())
         .stdout(Stdio::from(log_file.try_clone().map_err(|e| e.to_string())?))
-        .stderr(Stdio::from(log_file))
-        .spawn()
+        .stderr(Stdio::from(log_file));
+    // Own process group (PGID = child PID) so a group TERM/KILL later reaches
+    // the child AND everything it spawns — no orphaned grandchildren.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
         .map_err(|e| format!("Failed to launch user database: {}", e))
 }
 
@@ -669,6 +683,13 @@ pub fn spawn_from_parts(p: &Plugin, cmd: &str, args: &[String]) -> Result<Child,
     if let Some(cert) = engine_tls_cert_path() {
         command.env("COCKATIEL_TLS_CERT", cert);
     }
+    // Own process group (PGID = child PID) so a group TERM/KILL later reaches
+    // the module AND anything it spawns — no orphaned grandchildren.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command
         .spawn()
         .map_err(|e| format!("Failed to launch '{}': {}", p.manifest.name, e))
@@ -839,12 +860,16 @@ pub fn spawn_terminal_from_parts(
                 apple_quote(&run),
                 apple_quote(&run),
             );
-            Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
+            let mut cmd = Command::new("osascript");
+            cmd.arg("-e").arg(&script).stdout(Stdio::null()).stderr(Stdio::null());
+            // Own process group (PGID = child PID) so a group TERM/KILL later
+            // reaches the launcher and anything it spawned.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
+            cmd.spawn()
                 .map(|child| (child, Some(marker), Some(pidfile)))
                 .map_err(|e| format!("Failed to launch '{}' in Terminal.app: {}", p.manifest.name, e))
         }
@@ -867,12 +892,18 @@ pub fn spawn_terminal_from_parts(
                 ("xterm", &["-e", "sh", "-c"]),
             ];
             for (emu, args) in candidates {
-                let result = Command::new(emu)
-                    .args(*args)
-                    .arg(&run)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
+                let result = {
+                    let mut cmd = Command::new(emu);
+                    cmd.args(*args).arg(&run).stdout(Stdio::null()).stderr(Stdio::null());
+                    // Own process group (PGID = child PID) so a group TERM/KILL
+                    // later reaches the emulator AND the module it spawns.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    cmd.spawn()
+                };
                 match result {
                     Ok(child) => return Ok((child, None, None)),
                     Err(_) => continue,
@@ -932,6 +963,43 @@ fn kill_pid(pid: i32) {
         if gone {
             break;
         }
+    }
+}
+
+/// The `kill(1)` argv for signaling a whole process GROUP: `kill -<signal> -<pgid>`.
+/// The leading `-` on the pgid is what makes kill address the group (a negative
+/// pid), so the child AND its descendants all receive the signal together.
+fn group_signal_args(signal: &str, pgid: i32) -> Vec<String> {
+    vec![format!("-{}", signal), format!("-{}", pgid)]
+}
+
+/// Signal an entire process group. `pgid` is the group leader's pid — the
+/// child's own pid, since every supervisor child is spawned with
+/// `process_group(0)`. Best-effort; failures are ignored.
+fn kill_process_group(pgid: i32, signal: &str) {
+    let _ = Command::new("kill")
+        .args(group_signal_args(signal, pgid))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Wait up to `timeout` for `child` to exit, polling `try_wait` in 100 ms
+/// steps. Returns true once the child is reaped (or can no longer be
+/// inspected); false if it is still running when the deadline passes.
+fn wait_for_child(child: &mut Child, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            // Already reaped / can't be inspected — treat as gone.
+            Err(_) => return true,
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
@@ -1199,9 +1267,27 @@ impl ManagedProcess {
                     close_terminal_windows(&marker);
                 });
             }
+            #[cfg(unix)]
+            {
+                // Group TERM→KILL covers the launcher and anything it spawned.
+                kill_process_group(self.pid() as i32, "TERM");
+                wait_for_child(&mut self.child, std::time::Duration::from_secs(3));
+                kill_process_group(self.pid() as i32, "KILL");
+            }
             let _ = self.child.kill();
             let _ = self.child.wait();
             return;
+        }
+        #[cfg(unix)]
+        {
+            // Graceful shutdown: TERM the whole process group first so the
+            // child (engine/user-db/module) and its descendants can flush
+            // state (e.g. SQLite WAL), wait up to ~3s, then KILL anything
+            // still alive. The group's PGID equals the child's pid because
+            // every supervisor child is spawned with `process_group(0)`.
+            kill_process_group(self.pid() as i32, "TERM");
+            wait_for_child(&mut self.child, std::time::Duration::from_secs(3));
+            kill_process_group(self.pid() as i32, "KILL");
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -1536,6 +1622,14 @@ mod tests {
     fn libc_kill_alive(pid: i32) -> bool {
         let _ = pid;
         true
+    }
+
+    #[test]
+    fn group_signal_args_targets_the_process_group() {
+        // `kill -TERM -123` signals the whole group whose leader is pid 123 —
+        // the leading `-` on the pgid is what selects the group.
+        assert_eq!(group_signal_args("TERM", 123), vec!["-TERM", "-123"]);
+        assert_eq!(group_signal_args("KILL", 456), vec!["-KILL", "-456"]);
     }
 
     #[test]

@@ -11,10 +11,11 @@ mod ws_client;
 mod ws_server;
 
 use std::collections::{HashMap, VecDeque};
-use std::io;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crossterm::cursor::Show;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -271,6 +272,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // A panic must never leave the operator's terminal stuck in raw mode /
+    // alternate screen: restore it best-effort from a panic hook so even a
+    // stack-unwinding crash (which skips the normal teardown below) gets a
+    // usable terminal back. The restore calls are process-global and safe to
+    // run even if raw mode was never entered (disable_raw_mode on a normal
+    // terminal is a no-op).
+    std::panic::set_hook(Box::new(|info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
+        let _ = std::io::stdout().flush();
+        let _ = execute!(std::io::stdout(), Show);
+        let payload = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic payload>");
+        eprintln!("\n[Cockatiel] TUI panicked: {}", payload);
+        if let Some(loc) = info.location() {
+            eprintln!("[Cockatiel] at {}:{}:{}", loc.file(), loc.line(), loc.column());
+        }
+        eprintln!("[Cockatiel] run with RUST_BACKTRACE=1 for a backtrace");
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     // EnableBracketedPaste makes the terminal deliver pasted text as a single
@@ -405,6 +435,15 @@ async fn run_app(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn_event_reader(event_tx);
 
+    // External SIGTERM/SIGINT (e.g. `kill`): quit through the normal path so
+    // main() runs the full supervisor + terminal teardown (graceful group
+    // TERM→KILL of the engine/user-db → WAL flush, disable_raw_mode,
+    // LeaveAlternateScreen). Ctrl+C never reaches this handler while raw mode
+    // is on (ISIG is off — crossterm delivers it as an ignored key event), so
+    // copy/paste behavior is unchanged.
+    let (signal_quit_tx, mut signal_quit_rx) = mpsc::unbounded_channel::<()>();
+    spawn_signal_quit_task(signal_quit_tx);
+
     // Periodic redraw so time-driven UI (prompt countdown, module-error
     // expiry, streaming logs) updates even without input.
     let mut redraw = tokio::time::interval(Duration::from_millis(100));
@@ -420,6 +459,11 @@ async fn run_app(
 
     loop {
         tokio::select! {
+            _ = signal_quit_rx.recv() => {
+                // SIGTERM/SIGINT received — return so main() runs the normal
+                // teardown (supervisor group-kill + terminal restore).
+                return Ok(());
+            }
             maybe = event_rx.recv() => {
                 if let Some(ev) = maybe {
                     if handle_input_event(
@@ -776,6 +820,35 @@ async fn run_app(
 
             })?;
     }
+}
+
+/// On SIGTERM/SIGINT (an external `kill`), nudge the event loop to quit so
+/// main() runs the full supervisor + terminal teardown — the same restore the
+/// double-Esc quit path uses. The terminal is NOT restored here: restoring
+/// first and then letting the loop draw once more would scribble ratatui
+/// escape codes onto the restored terminal; the teardown in main() does the
+/// restore immediately after run_app returns.
+fn spawn_signal_quit_task(signal_quit_tx: mpsc::UnboundedSender<()>) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+            let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+            let _ = signal_quit_tx.send(());
+        }
+        #[cfg(not(unix))]
+        {
+            // No POSIX signals here — hold the sender so the loop's recv()
+            // never sees a closed channel.
+            let _ = signal_quit_tx;
+            std::future::pending::<()>().await;
+        }
+    });
 }
 
 /// Handle an engine (WebSocket) event. Broadcasts to sub-windows, updates the
