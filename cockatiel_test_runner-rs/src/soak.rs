@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use crate::{
     Cli, Metrics, make_container, module_missing_required_credentials, send_container,
     probe::{cleanup, launch_module, launch_module_pty},
-    screening::{auth_as_test_runner, connected_modules, WsStream},
+    screening::{auth_as_test_runner, connected_module_state, WsStream},
 };
 use cockatiel_client::proto::{container::Payload, *};
 
@@ -149,10 +149,10 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
     let connect_deadline = Instant::now() + Duration::from_secs(20);
     let mut known: Vec<String> = Vec::new();
     while Instant::now() < connect_deadline {
-        let live = connected_modules(&mut ws, &auth, &uuid).await;
+        let live = connected_module_state(&mut ws, &auth, &uuid).await;
         known = launched
             .iter()
-            .filter(|n| live.contains(n))
+            .filter(|n| live.contains_key(*n))
             .cloned()
             .collect();
         if known.len() == launched.len() {
@@ -172,6 +172,7 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
     //    AND responsive for the FULL window. Any drop at any poll = FAIL.
     let window_start = Instant::now();
     let mut failures: HashMap<String, String> = HashMap::new();
+    let mut stuck: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, name) in launched.iter().enumerate() {
         if known.contains(name) {
             continue;
@@ -193,19 +194,27 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
         failures.insert(name.clone(), "never connected (within 20s; process still alive)".to_string());
     }
     while Instant::now().duration_since(window_start) < window {
-        let live = connected_modules(&mut ws, &auth, &uuid).await;
+        let live = connected_module_state(&mut ws, &auth, &uuid).await;
         // A module that connected late (after the wait deadline) is still
         // monitored once it shows up — don't let a slow start hide it.
         for name in &launched {
-            if live.contains(name) && !known.contains(name) {
+            if live.contains_key(name) && !known.contains(name) {
                 known.push(name.clone());
+            }
+        }
+        // A module with an unanswered prompt is connected but waiting on the
+        // operator (e.g. a credential question) — record it so the report can
+        // separate "healthy idle" from "stuck in setup".
+        for (name, pending) in &live {
+            if *pending && launched.contains(name) {
+                stuck.insert(name.clone());
             }
         }
         for name in &launched {
             if failures.contains_key(name) {
                 continue;
             }
-            let connected_now = live.contains(name);
+            let connected_now = live.contains_key(name);
             let responsive = if connected_now {
                 auth_verify_ok(&mut ws, &auth, &uuid, name).await
             } else {
@@ -232,12 +241,12 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
     //     overshoot the window, so a module that dropped in the last stretch
     //     could otherwise slip past the loop. One last check catches it.
     {
-        let live = connected_modules(&mut ws, &auth, &uuid).await;
+        let live = connected_module_state(&mut ws, &auth, &uuid).await;
         for name in &launched {
             if failures.contains_key(name) {
                 continue;
             }
-            let connected_now = live.contains(name);
+            let connected_now = live.contains_key(name);
             let responsive = if connected_now {
                 auth_verify_ok(&mut ws, &auth, &uuid, name).await
             } else {
@@ -275,6 +284,12 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
         }
     }
     m.notes.push(format!("launched={} window={}s", launched.len(), window_secs));
+    for name in &stuck {
+        m.notes.push(format!(
+            "soak: '{}' was connected but had an unanswered prompt — stuck in setup (e.g. missing credentials), not idle",
+            name
+        ));
+    }
 
     // 5. Cleanup: kill every module we spawned, always.
     cleanup(&mut children);

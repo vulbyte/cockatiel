@@ -572,14 +572,26 @@ pub(crate) async fn connected_modules(
     auth: &str,
     uuid: &str,
 ) -> Vec<String> {
+    connected_module_state(ws, auth, uuid).await.into_keys().collect()
+}
+
+/// Like `connected_modules` but also reports each live module's `pending_prompt`
+/// flag (an unanswered operator prompt → the module is waiting in setup, e.g. a
+/// credential question). Lets a harness tell a connected-but-stuck module apart
+/// from an idle healthy one.
+pub(crate) async fn connected_module_state(
+    ws: &mut WsStream,
+    auth: &str,
+    uuid: &str,
+) -> std::collections::HashMap<String, bool> {
     let q = make_container(
         "cockatiel-test-runner", uuid, auth,
         Payload::DatabaseQuery(DatabaseQuery { query_id: "module_list".into(), sql: "".into(), params: vec![] }),
     );
+    let mut out = std::collections::HashMap::new();
     if send_container(ws, &q).await.is_err() {
-        return Vec::new();
+        return out;
     }
-    let mut modules: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if let Ok(Some(Ok(WsMessage::Binary(data)))) = tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
@@ -598,7 +610,8 @@ pub(crate) async fn connected_modules(
                                     let shutdown = e.get("shutdown_at").and_then(|s| s.as_i64()).map(|s| s > 0).unwrap_or(false);
                                     let skip = matches!(name, "cockatiel-test-runner" | "cockatiel-tui" | "cockatiel-tui-child");
                                     if connected && alive && !shutdown && !name.is_empty() && !skip {
-                                        modules.push(name.to_string());
+                                        let pending = e.get("pending_prompt").and_then(|p| p.as_bool()).unwrap_or(false);
+                                        out.insert(name.to_string(), pending);
                                     }
                                 }
                             }
@@ -609,7 +622,7 @@ pub(crate) async fn connected_modules(
             }
         }
     }
-    modules
+    out
 }
 
 /// E/F — per-module probes: for each connected module, send a probe payload
