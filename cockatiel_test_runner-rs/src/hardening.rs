@@ -77,8 +77,9 @@ async fn recv_frame(sess: &mut Session, timeout_ms: u64) -> Result<Container, St
 /// The instance uuid the engine pinned for a registered module name, read from
 /// the engine's modules.json. Control-surface auto-approve now requires the
 /// pinned uuid (not name alone), so sessions must present it on a warm engine.
-fn registered_instance_uuid(name: &str) -> Option<String> {
-    let path = std::env::current_dir().ok()?.parent()?.join("cockatiel_engine-rs").join("modules.json");
+pub(crate) fn registered_instance_uuid(name: &str) -> Option<String> {
+    let cwd = std::env::current_dir().ok();
+    let path = cwd.clone()?.parent()?.join("cockatiel_engine-rs").join("modules.json");
     registered_instance_uuid_at(&path, name)
 }
 

@@ -216,7 +216,15 @@ pub(crate) fn make_container(module: &str, uuid: &str, auth: &str, payload: Payl
 async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
     println!("[chain] verifying pre→in→post through the real engine...");
     let mut m = Metrics::new("chain");
-    let uuid = uuid::Uuid::now_v7().to_string();
+
+    // Authenticate as the test runner. The engine's control-surface
+    // auto-approve requires the PINNED instance uuid (modules.json), so present
+    // it first; fall back to a fresh uuid for a fresh engine's bootstrap.
+    let mut uuids = Vec::new();
+    if let Some(u) = crate::hardening::registered_instance_uuid("cockatiel-test-runner") {
+        uuids.push(u);
+    }
+    uuids.push(uuid::Uuid::now_v7().to_string());
 
     let mut ws = match connect_engine(cli).await {
         Ok(w) => w,
@@ -226,32 +234,45 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
             return vec![m];
         }
     };
-
-    // Authenticate as the test runner (auto-approved via modules.json).
-    let req = make_container(
-        "cockatiel-test-runner",
-        &uuid,
-        "",
-        Payload::ConnectionRequest(ConnectionRequest {
-            pin: cli.pin,
-            process_position: ProcessPosition::Connection as i32,
-            priority: 1,
-            module_instance_uuid7: uuid.clone(),
-        }),
-    );
-    if send_container(&mut ws, &req).await.is_err() {
-        m.failed += 1;
-        m.notes.push("failed to send ConnectionRequest".into());
-        return vec![m];
-    }
-    let auth = match receive_container(&mut ws, 5000).await {
-        Ok(c) => c.auth_token,
-        Err(e) => {
+    let mut auth = String::new();
+    let mut accepted_uuid = String::new();
+    for uuid in uuids {
+        let req = make_container(
+            "cockatiel-test-runner",
+            &uuid,
+            "",
+            Payload::ConnectionRequest(ConnectionRequest {
+                pin: cli.pin,
+                process_position: ProcessPosition::Connection as i32,
+                priority: 1,
+                module_instance_uuid7: uuid.clone(),
+            }),
+        );
+        if send_container(&mut ws, &req).await.is_err() {
             m.failed += 1;
-            m.notes.push(format!("auth failed: {}", e));
+            m.notes.push("failed to send ConnectionRequest".into());
             return vec![m];
         }
-    };
+        match receive_container(&mut ws, 5000).await {
+            Ok(c) if !c.auth_token.is_empty() => {
+                auth = c.auth_token;
+                accepted_uuid = uuid;
+                break;
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                m.failed += 1;
+                m.notes.push(format!("auth failed: {}", e));
+                return vec![m];
+            }
+        }
+    }
+    if auth.is_empty() {
+        m.failed += 1;
+        m.notes.push("auth failed: engine rejected all presented identities".into());
+        return vec![m];
+    }
+    let uuid = accepted_uuid;
 
     // Send N fake messages, then verify each was ingested by querying the
     // timeline for its row. The engine does not echo a response per message;

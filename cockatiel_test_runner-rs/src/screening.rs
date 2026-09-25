@@ -17,32 +17,57 @@ use cockatiel_client::proto::{container::Payload, *};
 pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Authenticate as the test-runner (always trusted). Returns the write half +
-/// auth token + a fresh module uuid.
+/// auth token + the module uuid that was actually accepted.
+///
+/// The engine's control-surface auto-approve requires the PINNED instance uuid
+/// (registered in modules.json), so present it first and fall back to a fresh
+/// uuid only when the engine has no registration for the name yet (fresh install).
 pub(crate) async fn auth_as_test_runner(
     cli: &Cli,
 ) -> Result<(WsStream, String, String), String> {
-    let mut ws = connect_engine(cli).await?;
-    let uuid = uuid::Uuid::now_v7().to_string();
-    let req = make_container(
-        "cockatiel-test-runner",
-        &uuid,
-        "",
-        Payload::ConnectionRequest(ConnectionRequest {
-            pin: cli.pin,
-            process_position: ProcessPosition::Connection as i32,
-            priority: 1,
-            module_instance_uuid7: uuid.clone(),
-        }),
-    );
-    send_container(&mut ws, &req).await?;
-    let auth = receive_container(&mut ws, 5000).await?.auth_token;
-    if auth.is_empty() {
-        return Err("auth failed (empty token)".into());
+    // Resolve the registered instance uuid for the test-runner (same lookup
+    // hardening::connect_session uses) before defaulting to a fresh one.
+    let registered = crate::hardening::registered_instance_uuid("cockatiel-test-runner");
+    let mut uuids = Vec::new();
+    if let Some(u) = registered {
+        uuids.push(u);
     }
-    // Settle past the engine's post-auth drain window so the first follow-up
-    // frame (query/ingest) isn't discarded as "sent before authorization".
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    Ok((ws, auth, uuid))
+    uuids.push(uuid::Uuid::now_v7().to_string());
+
+    let mut last_err = String::from("no uuid attempted");
+    for uuid in uuids {
+        let mut ws = connect_engine(cli).await?;
+        let req = make_container(
+            "cockatiel-test-runner",
+            &uuid,
+            "",
+            Payload::ConnectionRequest(ConnectionRequest {
+                pin: cli.pin,
+                process_position: ProcessPosition::Connection as i32,
+                priority: 1,
+                module_instance_uuid7: uuid.clone(),
+            }),
+        );
+        send_container(&mut ws, &req).await?;
+        match receive_container(&mut ws, 5000).await {
+            Ok(c) if !c.auth_token.is_empty() => {
+                // Settle past the engine's post-auth drain window so the first
+                // follow-up frame (query/ingest) isn't discarded as "sent before
+                // authorization".
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                return Ok((ws, c.auth_token, uuid));
+            }
+            Ok(_) => {
+                last_err = format!("uuid {} rejected (empty token)", uuid);
+                continue;
+            }
+            Err(e) => {
+                last_err = format!("uuid {} failed: {}", uuid, e);
+                continue;
+            }
+        }
+    }
+    Err(format!("auth failed: {}", last_err))
 }
 
 /// Wait for the pipeline to drain a burst: poll the timeline until `want` rows
