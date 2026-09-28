@@ -37,7 +37,7 @@ use cockatiel_client::proto::{Prompt, PromptType};
 use cockatiel_client::PromptKind;
 use colors::load_colors;
 use event::AppEvent;
-use hotkeys::{load_hotkeys, Action};
+use hotkeys::{action_label, load_hotkeys, Action};
 use windows::{LogoWindow, LogWindow, ModulesWindow, ChartWindow, PromptsWindow, UsersWindow};
 use ws_client::{WsClient, WsCommand, WsEvent};
 use ws_server::WsServer;
@@ -47,6 +47,18 @@ fn find_engine_addr() -> (String, u16, u32) {
     for path in &["../config.json", "config.json"] {
         if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                // A `config.json` that names NONE of these is not this file. The
+                // TUI keeps its own `config.json` in the same directory (for
+                // `launch_engine`), and answering from it would return the
+                // built-in defaults — the port the engine actually bound would
+                // never be discovered, and the failure is silent because the
+                // defaults look plausible.
+                let has_addr_key = ["engine_ip", "engine_port", "engine_pin"]
+                    .iter()
+                    .any(|k| config.get(*k).is_some());
+                if !has_addr_key {
+                    continue;
+                }
                 let ip = config.get("engine_ip").and_then(|v| v.as_str()).unwrap_or("127.0.0.1").to_string();
                 let port = config.get("engine_port").and_then(|v| v.as_u64()).unwrap_or(1111) as u16;
                 let pin = config.get("engine_pin").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -91,65 +103,124 @@ fn find_engine_addr() -> (String, u16, u32) {
     ("127.0.0.1".into(), 1111, 0)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    let mut detached_window = None;
-    let mut ws_parent_addr = None;
-    let mut ws_parent_token = None;
-    let mut override_ip = None;
-    let mut override_port = None;
-    let mut override_pin = None;
-    let mut i = 1;
+/// The command line, parsed.
+///
+/// Hand-rolled on purpose (no arg crate) and kept in the same shape the loop
+/// always had: a flag that takes a value consumes the NEXT argument, a flag that
+/// does not consumes only itself, and an unrecognised argument is stepped over
+/// rather than treated as an error. `None` is meaningful throughout — it is how
+/// "not given on the command line" is spelled, which is what lets a config
+/// default decide. In particular there is no short flag for either engine
+/// switch: `-p` is `--pin` and `-i` is `--ip`, and the long names are the ones
+/// an operator reads in `--help`-less help.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CliArgs {
+    pub detached_window: Option<String>,
+    pub ws_parent_addr: Option<String>,
+    pub ws_parent_token: Option<String>,
+    pub override_ip: Option<String>,
+    pub override_port: Option<u16>,
+    pub override_pin: Option<u32>,
+    /// `--with-engine` → `Some(true)`, `--no-engine` → `Some(false)`, neither →
+    /// `None` (the config decides). The LAST one given wins, so
+    /// `--no-engine --with-engine` means what it reads as.
+    pub engine_launch: Option<bool>,
+}
+
+fn parse_cli(args: &[String]) -> CliArgs {
+    let mut out = CliArgs::default();
+    let mut i = 0;
     while i < args.len() {
+        // A flag with a value: the value is the next argument, if there is one.
+        // A trailing `--port` with nothing after it is stepped over rather than
+        // panicking, exactly as before.
+        let take = |i: &mut usize| -> Option<String> {
+            match args.get(*i + 1) {
+                Some(v) => {
+                    *i += 2;
+                    Some(v.clone())
+                }
+                None => {
+                    *i += 1;
+                    None
+                }
+            }
+        };
         if args[i] == "--detached" {
-            if let Some(name) = args.get(i + 1) {
-                detached_window = Some(name.clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
+            out.detached_window = take(&mut i);
         } else if args[i] == "--ws-addr" {
-            if let Some(addr) = args.get(i + 1) {
-                ws_parent_addr = Some(addr.clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
+            out.ws_parent_addr = take(&mut i);
         } else if args[i] == "--ws-token" {
-            if let Some(token) = args.get(i + 1) {
-                ws_parent_token = Some(token.clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
+            out.ws_parent_token = take(&mut i);
         } else if args[i] == "--ip" || args[i] == "-i" {
-            if let Some(val) = args.get(i + 1) {
-                override_ip = Some(val.clone());
-                i += 2;
-            } else {
-                i += 1;
-            }
+            out.override_ip = take(&mut i);
         } else if args[i] == "--port" || args[i] == "-p" {
-            if let Some(val) = args.get(i + 1) {
-                override_port = val.parse().ok();
-                i += 2;
-            } else {
-                i += 1;
-            }
+            out.override_port = take(&mut i).and_then(|v| v.parse().ok());
         } else if args[i] == "--pin" {
-            if let Some(val) = args.get(i + 1) {
-                override_pin = val.parse().ok();
-                i += 2;
-            } else {
-                i += 1;
-            }
+            out.override_pin = take(&mut i).and_then(|v| v.parse().ok());
+        } else if args[i] == "--with-engine" {
+            // No value: these two SWITCH, they are not `--flag value`.
+            out.engine_launch = Some(true);
+            i += 1;
+        } else if args[i] == "--no-engine" {
+            out.engine_launch = Some(false);
+            i += 1;
         } else {
             i += 1;
         }
     }
+    out
+}
+
+/// Whether the TUI should LAUNCH the engine at startup.
+///
+/// The precedence is the whole contract: the flag wins (an operator who typed it
+/// meant it), then the TUI's own `config.json`, then the built-in default.
+/// The default is `true` and it is not negotiable by omission — starting
+/// without the engine is the special case, and it is what the flag and the
+/// config key are for.
+///
+/// Pure so the precedence is pinned by tests instead of only being observable by
+/// starting the app and looking for a process.
+pub fn should_launch_engine(flag: Option<bool>, config_default: Option<bool>) -> bool {
+    flag.unwrap_or(config_default.unwrap_or(true))
+}
+
+/// The startup launch decision: launch only when we intend to AND the port is
+/// not already answering.
+///
+/// Both inputs are needed. `already_up` alone would launch over an engine
+/// somebody else is running (two engines, one port, the second crash-looping);
+/// `should_launch` alone would fight a `--no-engine` operator by starting the
+/// very process they said not to start.
+pub fn engine_start_decision(already_up: bool, should_launch: bool) -> bool {
+    should_launch && !already_up
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let cli = parse_cli(&args[1..]);
+    let detached_window = cli.detached_window;
+    let ws_parent_addr = cli.ws_parent_addr;
+    let ws_parent_token = cli.ws_parent_token;
+    let override_ip = cli.override_ip;
+    let override_port = cli.override_port;
+    let override_pin = cli.override_pin;
 
     let config_dir = std::env::current_dir().unwrap_or_default();
+    // The TUI's own config, next to hotkey_config.json / color_config.json. The
+    // writer runs first so a fresh install (an empty directory, or one whose
+    // config.json predates a key) gets the default rather than silently
+    // falling back to it.
+    let tui_config_path = config_dir.join("config.json");
+    supervisor::ensure_tui_config(&tui_config_path);
+    let config_launch_engine = supervisor::read_launch_engine_default(&tui_config_path);
+    // The flag beats the config, which beats the built-in default (launch the
+    // engine). Resolved ONCE, here, so the flag's effect is a value the launch
+    // site reads rather than a second launch site.
+    let should_launch = should_launch_engine(cli.engine_launch, config_launch_engine);
+
     let hotkeys = load_hotkeys(&config_dir.join("hotkey_config.json"));
     let colors = load_colors(&config_dir.join("color_config.json"));
 
@@ -202,11 +273,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Ensure the engine is running (launch if not already reachable).
+        //
+        // TWO independent questions, deliberately not collapsed: the probe is
+        // about the PORT (is somebody's engine already listening?) and
+        // `should_launch` is about INTENT (`--with-engine` / `--no-engine` /
+        // the config default). So `--no-engine` does not stop the TUI from
+        // CONNECTING to an engine someone else is running — it only stops this
+        // process from starting one — and `--with-engine` still does not launch
+        // a second engine over a live one.
         let engine_up = std::net::TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             std::time::Duration::from_millis(300),
         ).is_ok();
-        if !engine_up {
+        // The gate is on THIS `if` and nothing else: the user database above and
+        // the module registration below are unaffected by it. A TUI pointed at
+        // somebody else's engine still needs its user database, and the engine
+        // itself still needs the database and the modules.
+        if engine_start_decision(engine_up, should_launch) {
             match supervisor::launch_engine() {
                 Ok(child) => {
                     let pid = child.id();
@@ -373,6 +456,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         WsClient::new(ip, port, pin, ws_event_tx, ws_command_rx)
     };
+    // ONE switch, two ends: the app raises it when the operator removes the
+    // engine, the client task reads it between connection attempts. Both
+    // constructors make their own `Arc`, so handing the app's over here is what
+    // makes them the same flag — without this the removal would clear the TUI's
+    // state and the client would keep dialling, which is the orphan the whole
+    // mechanism exists to prevent.
+    ws_client.stopped = state.engine_detached.clone();
     tokio::spawn(async move {
         ws_client.run().await;
     });
@@ -400,6 +490,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut proc = proc.lock().unwrap();
         eprintln!("[supervisor] Killing {} (pid {})", name, proc.pid());
         proc.kill();
+    }
+
+    // Close any pop-out windows BEFORE releasing the terminal: each detached
+    // window is its own process talking to this one, so leaving them open means
+    // they immediately start failing to reconnect (and the ws client now exits
+    // on its own, but the window should not linger regardless).
+    {
+        let popouts: Vec<String> = state.popped_out.iter().cloned().collect();
+        if !popouts.is_empty() {
+            crate::supervisor::close_popout_windows(&popouts);
+        }
     }
 
     disable_raw_mode()?;
@@ -435,6 +536,10 @@ async fn run_app(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
     event::spawn_event_reader(event_tx);
 
+    // Fingerprint of the last drawn frame's shape; a change forces a full
+    // repaint instead of a diff. `None` until the first frame is drawn.
+    let mut last_shape: Option<crate::app::ScreenShape> = None;
+
     // External SIGTERM/SIGINT (e.g. `kill`): quit through the normal path so
     // main() runs the full supervisor + terminal teardown (graceful group
     // TERM→KILL of the engine/user-db → WAL flush, disable_raw_mode,
@@ -445,9 +550,20 @@ async fn run_app(
     spawn_signal_quit_task(signal_quit_tx);
 
     // Periodic redraw so time-driven UI (prompt countdown, module-error
-    // expiry, streaming logs) updates even without input.
+    // expiry, streaming logs, the PAUSED indicator's flash) updates even
+    // without input.
     let mut redraw = tokio::time::interval(Duration::from_millis(100));
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // Blink phase counter for the PAUSED indicator. Advanced here — on the
+    // DRAW ticker, not the 2s engine poll — because a phase that only moved
+    // when db_status arrived would be a 2s stutter, not a flash. It rides the
+    // repaint tick: every tick ends in a `terminal.draw`, and ratatui's diff
+    // emits exactly the cells whose glyphs changed, so the phase flip needs
+    // neither a full repaint nor a ScreenShape change (see `AppState::
+    // pause_flash_on`). Held locally so an inbound StatsUpdate (which replaces
+    // the whole stats struct) cannot rewind the phase mid-blink.
+    let mut pause_flash_tick: u64 = 0;
 
     // Unresponsive watchdog cadence (only runs when no input is pending).
     let mut watchdog_last = Instant::now();
@@ -504,9 +620,9 @@ async fn run_app(
             }
             maybe_ws = ws_event_rx.recv() => {
                 if let Some(ev) = maybe_ws {
-                    handle_ws_event(ev, state, &ws_broadcast_tx);
+                    handle_ws_event(ev, state, &ws_command_tx, &ws_broadcast_tx);
                     while let Ok(ev) = ws_event_rx.try_recv() {
-                        handle_ws_event(ev, state, &ws_broadcast_tx);
+                        handle_ws_event(ev, state, &ws_command_tx, &ws_broadcast_tx);
                     }
                 }
             }
@@ -584,6 +700,28 @@ async fn run_app(
                 }
             }
             _ = redraw.tick() => {
+                // Blink phase: advance before anything below can `continue`
+                // past the draw, so the flash keeps its cadence even while the
+                // watchdog is skipping disconnected frames.
+                state.stats.pause_flash_tick = pause_flash_tick;
+                pause_flash_tick = pause_flash_tick.wrapping_add(1);
+                // A shutdown request the engine never answered must not leave
+                // the removal half-done (asked, never resolved, and the engine
+                // still there). A broken socket usually shows up as a
+                // `Disconnected` instead, which finishes the removal itself —
+                // this is the belt to that braces, and it is checked BEFORE the
+                // watchdog's `connected` gate because that gate `continue`s
+                // exactly when the engine is gone.
+                if removal_deadline_passed(state.pending_engine_removal, Instant::now()) {
+                    finish_engine_removal(
+                        state,
+                        &ws_command_tx,
+                        EngineRemovalOutcome::Denied(format!(
+                            "no answer within {}s",
+                            ENGINE_SHUTDOWN_TIMEOUT.as_secs()
+                        )),
+                    );
+                }
                 // Watchdog: recover locally-launched modules that the engine
                 // flagged unresponsive (hung, but the process may still be
                 // alive) or that dropped off the live-session list. Two-strike rule + engine
@@ -749,6 +887,21 @@ async fn run_app(
             }
         }
 
+        // A window that moved or resized can leave stale cells behind, because
+        // ratatui only repaints what differs from the previous frame. When the
+        // screen's SHAPE changes -- a layout drag, entering/leaving the config
+        // editor, a focus change, a resize -- clear the terminal first so the
+        // frame is a full repaint. `force_full_redraw` is the manual Ctrl+L
+        // escape hatch for any glitch this does not anticipate.
+        let terminal_size = terminal.size()?;
+        let (term_w, term_h) = (terminal_size.width, terminal_size.height);
+        let shape = state.screen_shape(term_w, term_h);
+        if state.needs_full_repaint(shape, last_shape) {
+            let _ = terminal.clear();
+            state.force_full_redraw = false;
+        }
+        last_shape = Some(shape);
+
         terminal.draw(|frame| {
             let size = frame.area();
             let areas = state.layout.compute(size);
@@ -856,8 +1009,18 @@ fn spawn_signal_quit_task(signal_quit_tx: mpsc::UnboundedSender<()>) {
 fn handle_ws_event(
     event: WsEvent,
     state: &mut AppState,
+    ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
     ws_broadcast_tx: &broadcast::Sender<WsEvent>,
 ) {
+    // Once the TUI has forgotten its engine, NOTHING from the old connection
+    // may change anything — not the log (it would keep growing from a dead
+    // engine), not a stats update (a whole `GlobalStats` arrives and would
+    // replace the cleared one wholesale), and not a late `Disconnected` (which
+    // would put a connection back on the engine row). The switch is raised
+    // AFTER the shutdown answer is read, so the answer itself still gets here.
+    if state.engine_forgotten() {
+        return;
+    }
     let _ = ws_broadcast_tx.send(event.clone());
     match event {
         WsEvent::Connected => {
@@ -865,6 +1028,19 @@ fn handle_ws_event(
             state.stats.engine_status = "connected".to_string();
         }
         WsEvent::Disconnected => {
+            // A shutdown request the engine never answered: its socket went
+            // first. Finish the removal rather than leaving it half-done with
+            // nothing left to finish it.
+            if state.pending_engine_removal.take().is_some() {
+                finish_engine_removal(
+                    state,
+                    ws_command_tx,
+                    EngineRemovalOutcome::Denied(
+                        "the connection closed before the engine answered".to_string(),
+                    ),
+                );
+                return;
+            }
             state.connected = false;
             state.stats.engine_status = "disconnected".to_string();
         }
@@ -920,6 +1096,21 @@ fn handle_ws_event(
                     supervisor_log(state, msg);
                 }
             }
+            if query_id == "pipeline_set_paused" {
+                // The gate's own answer, in the log window: how many messages
+                // are being HELD / RELEASED, and whether this press actually
+                // moved the gate or was a no-op repeat.
+                if let Some(note) = db::pipeline_pause_note(&result) {
+                    supervisor_log(state, note);
+                }
+            }
+            // The engine's answer to "shut down" — the second step of removing
+            // it, and the only step that can finish the removal. The request is
+            // cleared first so a duplicate/late answer cannot run it twice.
+            if query_id == ENGINE_SHUTDOWN_QUERY && state.pending_engine_removal.take().is_some() {
+                let outcome = classify_engine_shutdown(&result);
+                finish_engine_removal(state, ws_command_tx, outcome);
+            }
         }
     }
 }
@@ -946,7 +1137,14 @@ async fn handle_input_event(
             if let Some(window) = state.get_window_mut(state.active_window) {
                 if window.in_editor() {
                     if window.editor_key(key, &hotkeys) {
-                        if let Some(saved) = window.take_saved_module() {
+                        // Both post-save answers are read INSIDE the window
+                        // borrow and logged outside it: the log needs
+                        // `&AppState` while the window holds `&mut`, and the
+                        // module warning's "is it running" check needs
+                        // `&AppState.module_runs`.
+                        let saved_module = window.take_saved_module();
+                        let saved_engine = window.take_saved_engine();
+                        if let Some(saved) = saved_module {
                             let running = state
                                 .module_runs
                                 .lock()
@@ -958,9 +1156,40 @@ async fn handle_input_event(
                                 supervisor_log(state, format!("[supervisor] {} config saved — restart the module (x) to apply", saved));
                             }
                         }
+                        // The engine mirror of the module warning. It is a
+                        // LIST rather than a flag because most of what the
+                        // editor can change is re-read by the running engine
+                        // anyway: only the boot-bound settings need a restart,
+                        // and naming them (with the reason) is the point.
+                        // The key is named too: pointing at a restart that does
+                        // not exist is how a warning becomes wallpaper, and
+                        // there is now an action to point at.
+                        if let Some(notes) = saved_engine {
+                            if notes.is_empty() {
+                                supervisor_log(state, "[supervisor] engine config saved — the running engine re-reads every change");
+                            } else {
+                                let list = notes
+                                    .iter()
+                                    .map(|n| format!("{} ({})", n.key, n.why))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                supervisor_log(state, format!(
+                                    "[supervisor] engine config saved — restart the engine (R on the engine row) to apply: {}",
+                                    list
+                                ));
+                            }
+                        }
                         return Ok(false);
                     }
                 }
+            }
+
+            // Ctrl+L: force a full repaint on the next frame. The automatic
+            // shape-change repaint covers layout/editor/focus transitions, so
+            // this is the manual escape hatch for anything it misses.
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+                state.force_full_redraw = true;
+                return Ok(false);
             }
 
             // Prompts are answered in the dedicated prompts window (Tab to
@@ -989,8 +1218,32 @@ async fn handle_input_event(
                 }
             }
 
-            if let Some(Action::Quit) = state.handle_global_key(key) {
-                return Ok(true);
+            // A global (nav) binding: `q` quits, focus moves are handled in
+            // place, and anything else dispatchable (the pipeline pause
+            // toggle) goes through the same path a window action takes — a
+            // global binding has to work from every focused window.
+            if let Some(action) = state.handle_global_key(key) {
+                if let Action::Quit = action {
+                    return Ok(true);
+                }
+                if is_dispatchable(&action) {
+                    if dispatch_action(
+                        state,
+                        action,
+                        supervisor,
+                        plugins,
+                        port,
+                        pin,
+                        ws_command_tx,
+                        ws_addr,
+                        ws_auth_token,
+                    )
+                    .await?
+                    {
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
             }
 
             let active_id = state.active_window;
@@ -1007,7 +1260,9 @@ async fn handle_input_event(
                     .and_then(|m| m.get(&base))
                     .map(|a| matches!(a, Action::StartModule(_)))
                     .unwrap_or(false);
-                if is_start {
+                // Same rule as the plain start key: with the engine row
+                // selected there is no module to rebuild and launch.
+                if is_start && focused_selection_is_module(state) {
                     let name = selected_module_name(state);
                     if !name.is_empty() {
                         request_launch(
@@ -1033,6 +1288,22 @@ async fn handle_input_event(
                 .cloned()
             {
                 if is_dispatchable(&action) {
+                    // A per-module action on a non-module row is refused
+                    // loudly. `start`/`stop`/`del`/`auto`/`copy`/`clear`/
+                    // `creds`/`test` all resolve to a module name, and the
+                    // fallback for "no name here" is the FIRST module, not
+                    // nothing — which is how an operator ends up killing a
+                    // module they were not looking at.
+                    if is_module_scoped(&action) && !focused_selection_is_module(state) {
+                        supervisor_log(
+                            state,
+                            format!(
+                                "[supervisor] {} does not apply to the engine — select a module row first",
+                                action_label(&action)
+                            ),
+                        );
+                        return Ok(false);
+                    }
                     let action = fill_window_action(state, &window_name, action);
                     if dispatch_action(
                         state,
@@ -1504,7 +1775,72 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::ClearModuleConfig(_)
             | Action::RunTests
             | Action::UserQuery(_, _)
+            | Action::TogglePipelinePause
+            | Action::RemoveEngine
+            | Action::RestartEngine
     )
+}
+
+/// Actions that only make sense against a MODULE row, and so are refused on the
+/// engine row.
+///
+/// `StartModule` and `StopModule` are deliberately NOT in this list: the engine
+/// row reuses the standard `s`/`x` start/stop keys to launch/kill the ENGINE
+/// process (the dispatcher redirects them when the engine row is selected). The
+/// rest resolve to a module name with no engine meaning, so they are refused
+/// there rather than falling through — because the app's name resolution ends
+/// at "the first known module" when no window claims a selection, and an
+/// unguarded `x` with the engine row selected would otherwise kill a module the
+/// operator never selected.
+///
+/// `EditConfig` is deliberately NOT in this list either: it is the one
+/// per-module key that also means something on the engine row, where it opens
+/// the ENGINE's `.env` + `config.json` instead. `TogglePipelinePause` is
+/// engine-scoped rather than module-scoped and is global anyway, so it is never
+/// gated.
+fn is_module_scoped(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::DeleteModule(_)
+            | Action::ToggleAutostart(_)
+            | Action::DuplicateModule(_)
+            | Action::ClearModuleConfig(_)
+            | Action::EditCredentials(_)
+            | Action::RunTests
+    )
+}
+
+/// Whether the focused window's selection is a module, i.e. whether a
+/// per-module action is meaningful right now.
+///
+/// Windows that do not track a module selection (the log, the chart, ...) keep
+/// the historical behaviour of acting on the first known module: the default
+/// is `true`, and only a window whose selection is deliberately something else
+/// opts out.
+fn focused_selection_is_module(state: &AppState) -> bool {
+    match state.windows.iter().find(|w| w.id() == state.active_window) {
+        Some(w) => w.selection_is_module(&state.stats),
+        None => true,
+    }
+}
+
+/// Actions that only make sense on the ENGINE row of the modules window — the
+/// mirror of [`is_module_scoped`], and the reason the engine row is a row at
+/// all: it is the one place the engine itself can be acted on.
+///
+/// The default is `false` (not a module → not the engine), which is what stops
+/// either of these firing from a window that has no row concept at all, where
+/// the app's fallback would be "the first known module".
+fn is_engine_scoped(action: &Action) -> bool {
+    matches!(action, Action::RemoveEngine | Action::RestartEngine)
+}
+
+/// Whether the focused window's selection is the engine row.
+fn focused_selection_is_engine(state: &AppState) -> bool {
+    match state.windows.iter().find(|w| w.id() == state.active_window) {
+        Some(w) => w.selection_is_engine(&state.stats),
+        None => false,
+    }
 }
 
 /// The module currently selected in the active window.
@@ -2119,18 +2455,62 @@ async fn dispatch_action(
         Action::PopOut(window_name) => {
             state.popped_out.insert(window_name.clone());
             let exe = std::env::current_exe().unwrap_or_default();
-            let _ = std::process::Command::new(&exe)
-                .args([
-                    "--detached",
-                    &window_name,
-                    "--ws-addr",
-                    &ws_addr.to_string(),
-                    "--ws-token",
-                    ws_auth_token,
-                ])
-                .spawn();
+            // A detached window is a full-screen TUI of its own, so it must get
+            // its OWN terminal. Spawning it with inherited stdio gave it the
+            // parent's tty, putting two ratatui renderers on one screen.
+            let argv: Vec<String> = vec![
+                exe.to_string_lossy().to_string(),
+                "--detached".to_string(),
+                window_name.clone(),
+                "--ws-addr".to_string(),
+                ws_addr.to_string(),
+                "--ws-token".to_string(),
+                ws_auth_token.to_string(),
+            ];
+            let title = format!("popout:{}", window_name);
+            if let Err(e) = crate::supervisor::spawn_in_new_terminal(&argv, &title) {
+                // Fall back to nothing rather than corrupting the parent: an
+                // inherited-tty spawn would scribble over the live UI.
+                crate::app::supervisor_log_global(format!(
+                    "[supervisor] could not open a window for '{}': {}",
+                    window_name, e
+                ));
+            }
         }
         Action::StartModule(name) => {
+            // The standard start key (`s`) means something different on the
+            // engine row: it launches the ENGINE process rather than a module.
+            // The redirect is checked here, not in `is_module_scoped`, so the
+            // "first known module" fallback never eats the engine case.
+            if focused_selection_is_engine(state) {
+                let outcome = start_engine(
+                    state,
+                    supervisor,
+                    supervisor::launch_engine,
+                    || {
+                        std::net::TcpStream::connect_timeout(
+                            &format!("127.0.0.1:{}", port).parse().unwrap(),
+                            std::time::Duration::from_millis(300),
+                        )
+                        .is_ok()
+                    },
+                );
+                // "Start" means "make it run". A running-but-paused engine is
+                // exactly the trap of seeing "already listening" while nothing
+                // moves, so a successful start re-opens the pipeline. The
+                // resume is idempotent: if it was never paused this is a
+                // `changed: false` no-op, so sending it unconditionally on a
+                // resumed outcome is safe even when the local belief is stale.
+                if outcome.resume_pipeline() {
+                    send_engine_query(
+                        ws_command_tx,
+                        "pipeline_set_paused".to_string(),
+                        serde_json::json!({ "paused": false }).to_string(),
+                    );
+                }
+                supervisor_log(state, engine_start_note(&outcome));
+                return Ok(false);
+            }
             if plugins.iter().any(|p| p.manifest.name == name) && !supervisor.contains_key(&name) {
                 // If the module declares credentials it doesn't have yet,
                 // ask for them via the prompt subwindow instead of launching a
@@ -2166,6 +2546,13 @@ async fn dispatch_action(
             }
         }
         Action::StopModule(name) => {
+            // The standard stop key (`x`), on the engine row, kills the ENGINE
+            // process. Same redirect rationale as `StartModule` above.
+            if focused_selection_is_engine(state) {
+                let outcome = stop_engine(state, supervisor);
+                supervisor_log(state, engine_stop_note(&outcome));
+                return Ok(false);
+            }
             if let Some(proc) = supervisor.remove(&name) {
                 let mut proc = proc.lock().unwrap();
                 supervisor_log(state, format!("[supervisor] Killing {} (pid {})", name, proc.pid()));
@@ -2270,13 +2657,34 @@ async fn dispatch_action(
             }
         }
         Action::EditConfig(name) => {
-            // Open the inline config editor (edits `.env` + `config.json`).
-            if let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name) {
-                if let Some(window) = state.get_window_mut(WindowId::Modules) {
-                    window.start_config_editor(&name, plugin.directory.clone());
-                    state.active_window = WindowId::Modules;
-                    supervisor_log(state, format!("[supervisor] editing config for {} (j/k move, type to edit, Esc save+exit)", name));
+            // The EDIT key against the SELECTED row, and the two rows are
+            // different things: a module row opens that module's `.env` +
+            // `config.json`, the engine row opens the ENGINE's. Same editor
+            // both times — it already masks `.env`, which is where the engine
+            // keeps its PIN, and already writes both files back. The modules
+            // window answers for the engine because the engine is not a plugin,
+            // so nothing else can; a module row defers to the plugin manifest,
+            // which is where a module's directory lives.
+            let stats = std::mem::take(&mut state.stats);
+            let target = state
+                .get_window_mut(WindowId::Modules)
+                .and_then(|w| w.config_editor_target(&stats));
+            state.stats = stats;
+            let target = target.or_else(|| {
+                plugins
+                    .iter()
+                    .find(|p| p.manifest.name == name)
+                    .map(|p| (crate::app::ConfigTarget::Module, name.clone(), p.directory.clone()))
+            });
+            match target {
+                Some((kind, label, dir)) => {
+                    if let Some(window) = state.get_window_mut(WindowId::Modules) {
+                        window.start_config_editor(kind, &label, dir);
+                        state.active_window = WindowId::Modules;
+                        supervisor_log(state, format!("[supervisor] editing config for {} (j/k move, type to edit, Esc save+exit)", label));
+                    }
                 }
+                None => supervisor_log(state, format!("[supervisor] cannot edit config for '{}' — not a discovered module", name)),
             }
         }
         Action::ClearModuleConfig(name) => {
@@ -2330,14 +2738,479 @@ async fn dispatch_action(
             // One-shot user-database query from the detached users window.
             send_engine_query(ws_command_tx, query_id, sql);
         }
+        Action::TogglePipelinePause => {
+            // The gate lives in the engine, so an unreachable engine is the one
+            // case where the toggle cannot be honoured — say so instead of
+            // firing a query into a dead socket.
+            if !state.connected {
+                supervisor_log(state, "[supervisor] cannot toggle the pipeline pause — engine disconnected");
+                return Ok(false);
+            }
+            send_engine_query(
+                ws_command_tx,
+                "pipeline_set_paused".to_string(),
+                pipeline_pause_toggle_sql(state.stats.pipeline_paused),
+            );
+        }
+        // The two engine-only actions, guarded HERE rather than at the key
+        // site, so no path into dispatch can skip the check. `is_engine_scoped`
+        // keeps the list and the guard in one place; the arm before them turns
+        // a press on the wrong row into a sentence instead of an action on
+        // something the operator never selected.
+        a if is_engine_scoped(&a) && !focused_selection_is_engine(state) => {
+            supervisor_log(
+                state,
+                format!(
+                    "[supervisor] {} only applies to the engine row — select it first",
+                    action_label(&a)
+                ),
+            );
+        }
+        Action::RemoveEngine => {
+            begin_engine_removal(state, ws_command_tx);
+        }
+        Action::RestartEngine => {
+            // The launcher is the same function the startup launch site uses;
+            // `restart_engine` takes it as an argument only so the sequence is
+            // testable without an engine binary.
+            let outcome = restart_engine(state, supervisor, supervisor::launch_engine);
+            supervisor_log(state, restart_note(&outcome));
+        }
         _ => {}
     }
     Ok(false)
 }
 
+/// The `sql` payload for a pause toggle. `paused` is the state we currently
+/// believe the engine is in, so the toggle asks for its negation — the engine
+/// treats a repeat as idempotent (`changed: false`) rather than an error, which
+/// is what makes a stale view safe here instead of harmful.
+fn pipeline_pause_toggle_sql(paused: bool) -> String {
+    serde_json::json!({ "paused": !paused }).to_string()
+}
+
 /// Send a one-shot query to the engine (via the WebSocket command channel).
 fn send_engine_query(ws_command_tx: &mpsc::UnboundedSender<WsCommand>, query_id: String, sql: String) {
     let _ = ws_command_tx.send(WsCommand::SendQuery { query_id, sql });
+}
+
+// ── removing the engine from the TUI ───────────────────────────────────
+
+/// The key the TUI's own supervisor files the engine process under. The
+/// original launch site uses this name, and so must a restart: `drain()` at
+/// teardown reaps by that key, so a restart that registers under any other name
+/// leaks an orphan.
+const ENGINE_PROCESS: &str = "engine";
+
+/// The engine's control-surface shutdown query.
+///
+/// The engine gates it twice: the caller must be the TUI (`engine_shutdown
+/// denied: not the TUI` otherwise) AND its own `config.json` must carry
+/// `"shutdown_on_request": true`. That flag DEFAULTS TO FALSE, so a stock
+/// engine refuses and keeps running — the refusal is the answer, not a failure.
+const ENGINE_SHUTDOWN_QUERY: &str = "engine_shutdown";
+
+/// How long to wait for the shutdown answer before giving up on it.
+///
+/// The engine answers BEFORE it exits, over a socket that is already open, so a
+/// real answer is milliseconds. The window only exists so a silent engine
+/// cannot leave the removal half-done (asked, never resolved, engine still
+/// there) — the same job the `Disconnected` handler does for the usual way a
+/// socket dies, and this covers the ways it does not.
+const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The `sql` payload for the shutdown request.
+///
+/// Deliberately NOT a `paused`-style flag: the engine decides from its own
+/// `shutdown_on_request` and ignores everything else, and a payload shaped like
+/// the pause toggle's would read in a log as "and also toggle something". One
+/// key saying who asked is the whole payload.
+fn engine_shutdown_sql() -> String {
+    serde_json::json!({ "source": "tui-remove-engine" }).to_string()
+}
+
+/// What the engine's answer to `engine_shutdown` means for the removal.
+///
+/// All three are NORMAL outcomes, not errors: the engine is a separate process
+/// with a policy of its own, and a refusal is that policy being applied, not a
+/// failure of the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineRemovalOutcome {
+    /// Accepted: the engine answers and then exits, so its socket is about to
+    /// close on its own.
+    Accepted,
+    /// Refused by the engine's OWN `shutdown_on_request` flag. The engine is
+    /// STILL RUNNING and will not stop until the operator says it may.
+    Disabled(String),
+    /// Refused by the engine's caller gate (`not the TUI`), or the answer never
+    /// arrived. Nothing was told to exit, so the engine may still be running.
+    Denied(String),
+}
+
+/// Read one shutdown answer.
+///
+/// Pure, so all three outcomes are pinned by tests instead of only being
+/// reachable by standing up an engine. The refusal is classified on the CONFIG
+/// KEY it names rather than on the whole sentence, so a reworded message still
+/// lands in the right bucket — and the engine's own wording is what the
+/// operator is shown, because the engine is the authority on why it is still
+/// running.
+pub fn classify_engine_shutdown(result: &cockatiel_client::proto::DatabaseQueryResult) -> EngineRemovalOutcome {
+    if result.success {
+        return EngineRemovalOutcome::Accepted;
+    }
+    let reason = if result.error.is_empty() {
+        "(no detail)".to_string()
+    } else {
+        result.error.clone()
+    };
+    if result.error.contains("shutdown_on_request") {
+        EngineRemovalOutcome::Disabled(reason)
+    } else {
+        EngineRemovalOutcome::Denied(reason)
+    }
+}
+
+/// The one line the operator gets for a shutdown answer.
+///
+/// Two rules, both of which come from what an operator can do next. The refusal
+/// repeats the ENGINE's own reason and then names the key that would change it,
+/// because "it refused" on its own leaves nothing to act on. And every variant
+/// says the TUI is forgetting the engine ANYWAY, so nobody is left believing a
+/// still-running engine is still supervised (it is not — the client was told to
+/// stop dialling) or that a refusal undid the removal (it did not).
+fn engine_removal_note(outcome: &EngineRemovalOutcome) -> String {
+    match outcome {
+        EngineRemovalOutcome::Accepted => "[supervisor] remove engine: the engine accepted — it is answering and then exiting. The TUI is forgetting it either way; start it again by hand, or run the TUI again, to bring it back.".to_string(),
+        EngineRemovalOutcome::Disabled(reason) => format!(
+            "[supervisor] remove engine: the engine REFUSED ({reason}) — it is STILL RUNNING, because its own config.json does not allow it to be stopped over the wire. Set \"shutdown_on_request\": true there (E on the engine row opens it) to allow this next time. The TUI is forgetting the engine; the process is not."
+        ),
+        EngineRemovalOutcome::Denied(reason) => format!(
+            "[supervisor] remove engine: the engine did not accept the request ({reason}) — nothing was told to exit, so it may still be running. The TUI is forgetting it either way."
+        ),
+    }
+}
+
+/// Whether a shutdown request has been outstanding long enough to give up on.
+pub fn removal_deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_some_and(|d| now >= d)
+}
+
+/// Step one of removing the engine: ask, then WAIT for the answer.
+///
+/// The wait is the whole point. Firing the query and immediately dropping the
+/// connection would be indistinguishable from an engine that ignored it, and
+/// the three answers (accepted / refused by config / denied by the gate) are
+/// three different things the operator has to be told.
+fn begin_engine_removal(state: &mut AppState, ws_command_tx: &mpsc::UnboundedSender<WsCommand>) {
+    if state.stats.engine_removed {
+        supervisor_log(state, "[supervisor] remove engine: this TUI has already forgotten its engine");
+        return;
+    }
+    if state.pending_engine_removal.is_some() {
+        supervisor_log(state, "[supervisor] remove engine: still waiting for the engine's answer to the last request");
+        return;
+    }
+    if !state.connected {
+        // Nothing to ask, so nothing to wait for. The engine is unreachable
+        // (it was never there, or it is already down) and the removal is just
+        // the forgetting — reported as a refusal so the operator still learns
+        // that nothing was asked of a running process.
+        finish_engine_removal(
+            state,
+            ws_command_tx,
+            EngineRemovalOutcome::Denied("not connected to an engine, so there was nothing to ask".to_string()),
+        );
+        return;
+    }
+    send_engine_query(
+        ws_command_tx,
+        ENGINE_SHUTDOWN_QUERY.to_string(),
+        engine_shutdown_sql(),
+    );
+    state.pending_engine_removal = Some(Instant::now() + ENGINE_SHUTDOWN_TIMEOUT);
+    supervisor_log(state, "[supervisor] remove engine: asked the engine to shut down — waiting for its answer");
+}
+
+/// Step two: report what the engine said, stop the client, forget the engine.
+///
+/// In exactly that order, because the operator's log line is the only record
+/// of a refusal and it has to be written before the connection that carried it
+/// goes away.
+///
+/// NOTHING here touches the engine's `config.json` or `.env`. "Remove the
+/// engine" means THIS TUI stops pretending it has one — it is not the
+/// destructive `DeleteModule` sitting one key away, whose whole job is to
+/// destroy a module's registration. The operator's settings are still there, the
+/// config editor still points at that directory (it is how they read
+/// `shutdown_on_request` and change it), and the supervised child stays in the
+/// process table so TUI teardown reaps it instead of leaking an orphan. The
+/// `X` key is the one that invites the wrong reading, which is exactly why this
+/// comment is here.
+fn finish_engine_removal(
+    state: &mut AppState,
+    ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
+    outcome: EngineRemovalOutcome,
+) {
+    supervisor_log(state, engine_removal_note(&outcome));
+    // The stop switch, for the client task's next check...
+    state.detach_engine();
+    // ...and the command that closes the socket now instead of leaving it open
+    // for the rest of the reconnect backoff.
+    let _ = ws_command_tx.send(WsCommand::Disconnect);
+    state.connected = false;
+    state.stats.forget_engine();
+}
+
+// ── restarting the engine ──────────────────────────────────────────────
+
+/// Outcomes of an engine `start` (`s`) from the engine row. Like
+/// [`RestartOutcome`], the refusals are distinct: `Removed` is "the TUI has no
+/// engine", `AlreadySupervised` is "the TUI already owns one", and
+/// `AlreadyRunning` is "somebody's engine is on the port".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineStartOutcome {
+    /// The engine was removed from this TUI. Relaunching under it would recreate
+    /// the orphan the removal exists to prevent.
+    Removed,
+    /// A supervised child is already registered under [`ENGINE_PROCESS`].
+    /// `resumed` is whether the pipeline was paused and start should re-open it.
+    AlreadySupervised { resumed: bool },
+    /// No child, but something already answers on the configured port — connect
+    /// to it rather than starting a second engine. `resumed` as above.
+    AlreadyRunning { resumed: bool },
+    /// Launched and registered under [`ENGINE_PROCESS`]. A fresh engine boots
+    /// paused (`start_paused` defaults true), and the operator pressed "start",
+    /// so the pipeline is always resumed.
+    Launched { pid: u32 },
+    /// The launch failed; nothing is registered.
+    Failed { error: String },
+}
+
+impl EngineStartOutcome {
+    /// Whether the caller must send the resume query (`pipeline_set_paused`
+    /// with `{"paused": false}`) after this outcome.
+    ///
+    /// "Start the engine" from the operator's seat means "make it run", and a
+    /// running-but-paused engine is precisely the trap of pressing `s` and
+    /// getting "already listening" while nothing moves. So every way this
+    /// outcome ends with the engine available re-opens the pipeline; only a
+    /// refusal or a failed launch does not.
+    fn resume_pipeline(&self) -> bool {
+        match self {
+            EngineStartOutcome::Removed | EngineStartOutcome::Failed { .. } => false,
+            EngineStartOutcome::AlreadySupervised { resumed }
+            | EngineStartOutcome::AlreadyRunning { resumed } => *resumed,
+            EngineStartOutcome::Launched { .. } => true,
+        }
+    }
+}
+
+/// Outcomes of an engine `stop` (`x`) from the engine row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineStopOutcome {
+    /// Already removed from this TUI; nothing to stop.
+    Removed,
+    /// No supervised child. The TUI does not own this engine, so it must not
+    /// kill it — the same boundary `RestartOutcome::NotSupervised` draws.
+    NotSupervised,
+    /// The supervised child was killed.
+    Stopped { pid: u32 },
+}
+
+/// Launch and supervise the engine, if it is not already running. This is the
+/// `s` (start) key on the engine row, mirroring the startup launch site.
+///
+/// `spawn` and `probe` are injected (`FnOnce`/`Fn`, because a `Child` is not
+/// `Copy` and the port probe is a real socket call) so the decision sequence is
+/// testable without an engine binary or a real port, exactly like
+/// [`restart_engine`]. Production passes `supervisor::launch_engine` and the
+/// startup's own TCP probe.
+fn start_engine(
+    state: &AppState,
+    supervisor: &mut supervisor::ProcessTable,
+    spawn: impl FnOnce() -> Result<std::process::Child, String>,
+    already_up: impl Fn() -> bool,
+) -> EngineStartOutcome {
+    if state.stats.engine_removed {
+        return EngineStartOutcome::Removed;
+    }
+    if supervisor.contains_key(ENGINE_PROCESS) {
+        return EngineStartOutcome::AlreadySupervised { resumed: state.stats.pipeline_paused };
+    }
+    // Same probe the startup launch site uses: is somebody's engine already
+    // listening on the configured port? If so we do not start a second one —
+    // we just connect to the one that is there (the client reconnects on its
+    // own backoff).
+    if already_up() {
+        return EngineStartOutcome::AlreadyRunning { resumed: state.stats.pipeline_paused };
+    }
+    match spawn() {
+        Ok(child) => {
+            let pid = child.id();
+            supervisor.insert(
+                ENGINE_PROCESS.to_string(),
+                Arc::new(Mutex::new(supervisor::ManagedProcess {
+                    child,
+                    terminal_window: None,
+                    terminal_pidfile: None,
+                })),
+            );
+            EngineStartOutcome::Launched { pid }
+        }
+        Err(error) => EngineStartOutcome::Failed { error },
+    }
+}
+
+/// The operator-facing line for a start attempt.
+fn engine_start_note(outcome: &EngineStartOutcome) -> String {
+    match outcome {
+        EngineStartOutcome::Removed => "[supervisor] start engine: the engine was removed from this TUI, so it will not be relaunched under it — E opens its config, and running the TUI again brings it back".to_string(),
+        EngineStartOutcome::AlreadySupervised { resumed } => {
+            if *resumed {
+                "[supervisor] start engine: already running under this TUI — the pipeline was paused, resuming it".to_string()
+            } else {
+                "[supervisor] start engine: already running under this TUI — the pipeline is open".to_string()
+            }
+        }
+        EngineStartOutcome::AlreadyRunning { resumed } => {
+            if *resumed {
+                "[supervisor] start engine: an engine is already listening on the configured port — the pipeline was paused, resuming it".to_string()
+            } else {
+                "[supervisor] start engine: an engine is already listening on the configured port — the pipeline is open, connecting".to_string()
+            }
+        }
+        EngineStartOutcome::Launched { pid } => format!("[supervisor] start engine: launched (pid {pid}) — resuming the pipeline"),
+        EngineStartOutcome::Failed { error } => format!("[supervisor] start engine: failed to launch ({error}) — its config is untouched, so fix the engine and try again"),
+    }
+}
+
+/// Stop the supervised engine process. This is the `x` (stop) key on the engine
+/// row — the same kill path modules use, on the engine's process.
+fn stop_engine(
+    state: &AppState,
+    supervisor: &mut supervisor::ProcessTable,
+) -> EngineStopOutcome {
+    if state.stats.engine_removed {
+        return EngineStopOutcome::Removed;
+    }
+    let Some(proc) = supervisor.remove(ENGINE_PROCESS) else {
+        return EngineStopOutcome::NotSupervised;
+    };
+    let mut proc = proc.lock().unwrap();
+    let pid = proc.pid();
+    proc.kill();
+    EngineStopOutcome::Stopped { pid }
+}
+
+/// The operator-facing line for a stop attempt. Says whether anything was
+/// actually killed, so "stopped" is never a lie about a process the TUI does
+/// not own.
+fn engine_stop_note(outcome: &EngineStopOutcome) -> String {
+    match outcome {
+        EngineStopOutcome::Removed => "[supervisor] stop engine: the engine was already removed from this TUI — nothing to stop".to_string(),
+        EngineStopOutcome::NotSupervised => "[supervisor] stop engine: the TUI did not launch this engine, so it will not kill it — stop it where you started it".to_string(),
+        EngineStopOutcome::Stopped { pid } => format!("[supervisor] stop engine: killed the engine process (pid {pid})"),
+    }
+}
+
+/// What a restart attempt actually did.
+///
+/// Data rather than a log line so every branch is reachable from a test, and so
+/// the two refusals cannot be confused with each other: `Removed` is "the TUI
+/// has no engine" and `NotSupervised` is "the TUI has an engine it does not own".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartOutcome {
+    /// The engine was removed from this TUI. Nothing to restart, and launching
+    /// one here would create precisely the orphan the removal exists to prevent
+    /// — the client was told never to reconnect, so a fresh engine would have
+    /// nobody to talk to and nothing would reap it until the TUI exited.
+    Removed,
+    /// No supervised child. The TUI did not launch this engine (it was already
+    /// running, or the TUI was started `--no-engine`), so it has no business
+    /// killing a process it does not own.
+    NotSupervised,
+    /// The old child was killed and a new one is registered under
+    /// [`ENGINE_PROCESS`].
+    Relaunched { old_pid: u32, pid: u32 },
+    /// The old child is gone and the new one would not start.
+    Failed { old_pid: u32, error: String },
+}
+
+/// Restart the supervised engine: kill the tracked child, launch a new one,
+/// re-register it, and let the websocket client reconnect by itself.
+///
+/// `spawn` is the relaunch, injected (`FnOnce`, because a `Child` cannot be
+/// cloned or handed out twice) so the sequence can be tested without starting a
+/// real engine — the part that is NOT unit-testable is `Command::spawn` itself,
+/// and the part that carries the risk is the order and the re-registration,
+/// which is exactly what this tests.
+///
+/// The reconnect is deliberately NOT here: the client task is still running (a
+/// restart never detaches it) and retries on its own backoff, which is the same
+/// path an engine crash already takes. Reimplementing it would be a second
+/// mechanism for one job.
+fn restart_engine(
+    state: &AppState,
+    supervisor: &mut supervisor::ProcessTable,
+    // Taken by value, not by reference: a `Child` is not `Copy`, so a launcher
+    // can only be run once, and `FnOnce` is what says so.
+    spawn: impl FnOnce() -> Result<std::process::Child, String>,
+) -> RestartOutcome {
+    if state.stats.engine_removed {
+        return RestartOutcome::Removed;
+    }
+    let Some(old) = supervisor.remove(ENGINE_PROCESS) else {
+        return RestartOutcome::NotSupervised;
+    };
+    // Kill BEFORE launching: the new engine has to bind the same port, and a
+    // TERM→KILL group kill is exactly what the original launch's teardown uses.
+    let old_pid = {
+        let mut proc = old.lock().unwrap();
+        let pid = proc.pid();
+        proc.kill();
+        pid
+    };
+    match spawn() {
+        Ok(child) => {
+            let pid = child.id();
+            // Same key the original launch registers under, so `drain()` at
+            // teardown still finds it. A restart that forgets this is how a
+            // restart becomes an orphan.
+            supervisor.insert(
+                ENGINE_PROCESS.to_string(),
+                Arc::new(Mutex::new(supervisor::ManagedProcess {
+                    child,
+                    terminal_window: None,
+                    terminal_pidfile: None,
+                })),
+            );
+            RestartOutcome::Relaunched { old_pid, pid }
+        }
+        Err(error) => {
+            // The old engine is already dead and the new one never started, so
+            // the table is now empty: the TUI supervises nothing, which is the
+            // truth, and a later restart press will report `NotSupervised`
+            // rather than pretend it is supervising a dead child.
+            RestartOutcome::Failed { old_pid, error }
+        }
+    }
+}
+
+/// The operator-facing line for a restart attempt. Says what happened to the
+/// OLD process too — a restart that silently leaves the old one running (or
+/// silently fails to stop it) is the failure mode the operator cannot see.
+fn restart_note(outcome: &RestartOutcome) -> String {
+    match outcome {
+        RestartOutcome::Removed => "[supervisor] restart engine: the engine was removed from this TUI, so there is nothing to restart — E opens its config, and running the TUI again brings it back".to_string(),
+        RestartOutcome::NotSupervised => "[supervisor] restart engine: the TUI did not launch this engine, so it will not kill it — stop it where you started it, or start the TUI without --no-engine to have it supervise one".to_string(),
+        RestartOutcome::Relaunched { old_pid, pid } => format!(
+            "[supervisor] restart engine: killed the old engine (pid {old_pid}) and launched a new one (pid {pid}) — reconnecting"
+        ),
+        RestartOutcome::Failed { old_pid, error } => format!(
+            "[supervisor] restart engine: killed the old engine (pid {old_pid}) and the new one would not start ({error}) — its config is untouched, so fix the engine and start it by hand"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2390,5 +3263,1310 @@ mod tests {
         // An empty payload still pops out the current window (per-window `w`).
         let b = fill_window_action(&state, "modules", Action::PopOut(String::new()));
         assert_eq!(b, Action::PopOut("modules".to_string()));
+    }
+
+    /// The engine is a real, selectable row in the modules window, and it is not
+    /// a module. The per-module keys must therefore do NOTHING there rather
+    /// than fall through to the app's "first known module" fallback — an
+    /// unguarded `x` there would kill a module nobody selected. `EditConfig` is
+    /// the deliberate exception: the engine has its own config to open.
+    #[test]
+    fn per_module_actions_are_refused_on_the_engine_row() {
+        use crate::app::WindowId;
+        use crate::windows::ModulesWindow;
+
+        let state_with = |selected: usize| {
+            let mut s = AppState::new(
+                crate::colors::load_colors(&std::path::PathBuf::from("")),
+                crate::hotkeys::default_hotkeys(),
+            );
+            let mut win = ModulesWindow::new();
+            win.selected = selected;
+            s.windows = vec![Box::new(win)];
+            s.active_window = WindowId::Modules;
+            s.stats.module_entries = (0..2)
+                .map(|i| crate::db::ModuleStatus {
+                    name: format!("m{}", i),
+                    description: String::new(),
+                    status: "connected".into(),
+                    position: "preprocess".into(),
+                    credentials: Vec::new(),
+                    directory: String::new(),
+                    credential_values: Default::default(),
+                    config_complete: true,
+                    alive: true,
+                    last_seen: 0,
+                })
+                .collect();
+            s
+        };
+
+        // Row 0 is the engine.
+        let engine = state_with(0);
+        assert!(!focused_selection_is_module(&engine));
+        // The module-only actions are refused on the engine row.
+        for a in [
+            Action::DeleteModule(String::new()),
+            Action::ToggleAutostart(String::new()),
+            Action::DuplicateModule(String::new()),
+            Action::ClearModuleConfig(String::new()),
+            Action::EditCredentials(String::new()),
+            Action::RunTests,
+        ] {
+            assert!(is_module_scoped(&a), "{:?} should be module-scoped", a);
+            assert!(
+                is_module_scoped(&a) && !focused_selection_is_module(&engine),
+                "{:?} must be refused with the engine row selected",
+                a
+            );
+        }
+        // Start and stop are NOT module-scoped: the engine row reuses the
+        // standard `s`/`x` keys to launch/kill the ENGINE process, so the
+        // module-scope refusal must not block them. The dispatcher redirects
+        // them when the engine row is selected (covered elsewhere).
+        assert!(!is_module_scoped(&Action::StartModule(String::new())));
+        assert!(!is_module_scoped(&Action::StopModule(String::new())));
+        // The two that are NOT refused: the edit key (the engine has a config)
+        // and the global pause toggle (it is engine-scoped, not module-scoped).
+        assert!(!is_module_scoped(&Action::EditConfig(String::new())));
+        assert!(!is_module_scoped(&Action::TogglePipelinePause));
+        assert!(is_dispatchable(&Action::EditConfig(String::new())));
+        assert!(is_dispatchable(&Action::TogglePipelinePause));
+
+        // A module row is a module again, so every one of them is allowed.
+        let module = state_with(1);
+        assert!(focused_selection_is_module(&module));
+        assert!(!is_module_scoped(&Action::StopModule(String::new()))
+            || focused_selection_is_module(&module));
+        assert_eq!(selected_module_name(&module), "m0");
+
+        // A window with no module selection of its own (the log, the chart)
+        // keeps the historical behaviour of acting on the first known module.
+        let mut other = state_with(0);
+        other.windows = vec![Box::new(crate::windows::LogWindow::new())];
+        other.active_window = WindowId::Log;
+        assert!(focused_selection_is_module(&other));
+    }
+
+    /// End-to-end through the real dispatch: `E` with the engine row selected
+    /// opens the ENGINE's config, not a module's. The engine is not a plugin,
+    /// so `plugins` is empty here — which is exactly the case that used to
+    /// open nothing at all.
+    #[test]
+    fn the_edit_key_opens_the_engine_config_end_to_end() {
+        use crate::app::WindowId;
+        use crate::windows::ModulesWindow;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut s = AppState::new(
+                crate::colors::load_colors(&std::path::PathBuf::from("")),
+                crate::hotkeys::default_hotkeys(),
+            );
+            s.windows = vec![Box::new(ModulesWindow::new())];
+            s.active_window = WindowId::Modules;
+            s.stats.module_entries = vec![crate::db::ModuleStatus {
+                name: "m0".into(),
+                description: String::new(),
+                status: "connected".into(),
+                position: "preprocess".into(),
+                credentials: Vec::new(),
+                directory: String::new(),
+                credential_values: Default::default(),
+                config_complete: true,
+                alive: true,
+                last_seen: 0,
+            }];
+
+            // Filled in by `fill_window_action` for a real keypress. With the
+            // engine row selected it resolves to the fallback name, which this
+            // path must ignore in favour of the window's own answer.
+            let action = fill_window_action(&s, "modules", Action::EditConfig(String::new()));
+            let mut supervisor: supervisor::ProcessTable = Default::default();
+            let mut plugins: Vec<crate::plugins::Plugin> = Vec::new();
+            let (tx, _rx) = mpsc::unbounded_channel::<WsCommand>();
+
+            dispatch_action(
+                &mut s,
+                action,
+                &mut supervisor,
+                &mut plugins,
+                0,
+                0,
+                &tx,
+                "127.0.0.1:1".parse().unwrap(),
+                "",
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(s.active_window, WindowId::Modules);
+            let window = s.get_window_mut(WindowId::Modules).expect("modules window");
+            assert!(window.in_editor(), "the edit key must open the config editor");
+        });
+    }
+
+    #[test]
+    fn the_pause_toggle_sends_the_negation_of_the_current_state() {        // Believed running → ask for a pause. Believed paused → ask for a
+        // resume. The toggle is the operator's intent, so the payload must be
+        // the inverse of what we last knew, never a hardcoded direction.
+        for (known_paused, expected) in [(false, "true"), (true, "false")] {
+            let sql = pipeline_pause_toggle_sql(known_paused);
+            let parsed: serde_json::Value = serde_json::from_str(&sql).expect("valid json payload");
+            assert_eq!(parsed["paused"], serde_json::json!(expected == "true"), "sql: {}", sql);
+            assert_eq!(
+                parsed.as_object().unwrap().len(),
+                1,
+                "the payload carries only the flag: {}",
+                sql
+            );
+        }
+        // Exactly the two wire forms the engine parses.
+        assert_eq!(pipeline_pause_toggle_sql(false), r#"{"paused":true}"#);
+        assert_eq!(pipeline_pause_toggle_sql(true), r#"{"paused":false}"#);
+    }
+
+    #[test]
+    fn the_pause_toggle_travels_as_a_pipeline_set_paused_query() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+        send_engine_query(&tx, "pipeline_set_paused".to_string(), pipeline_pause_toggle_sql(true));
+        match rx.try_recv() {
+            Ok(WsCommand::SendQuery { query_id, sql }) => {
+                assert_eq!(query_id, "pipeline_set_paused");
+                let parsed: serde_json::Value = serde_json::from_str(&sql).unwrap();
+                assert_eq!(parsed["paused"], false);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+        assert!(is_dispatchable(&Action::TogglePipelinePause));
+    }
+}
+
+#[cfg(test)]
+mod full_repaint_wiring_tests {
+    /// The clear decision is unit-tested on AppState, but the DRAW LOOP living
+    /// inside `run_app` is not reachable from a test. Deleting the call site
+    /// would silently disable the whole feature while every behavioural test
+    /// still passed, so assert the wiring structurally.
+    #[test]
+    fn the_draw_loop_actually_clears_on_a_shape_change() {
+        let src = include_str!("main.rs");
+        let start = src.find("async fn run_app(").expect("run_app not found");
+        let end = start + src[start..].find("\nasync fn ").expect("end of run_app");
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("needs_full_repaint("),
+            "run_app must ask AppState whether this frame needs a full repaint"
+        );
+        assert!(
+            body.contains("terminal.clear()"),
+            "run_app must clear the terminal before a full repaint, otherwise ratatui still diffs"
+        );
+        // The clear has to happen BEFORE the draw, or it is pointless.
+        let clear_at = body.find("terminal.clear()").expect("clear missing");
+        let draw_at = body.find("terminal.draw(").expect("draw missing");
+        assert!(clear_at < draw_at, "the clear must precede the draw");
+    }
+
+    #[test]
+    fn ctrl_l_is_bound_as_the_manual_repaint_escape_hatch() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("force_full_redraw = true"),
+            "Ctrl+L must raise the manual full-repaint flag"
+        );
+        assert!(
+            src.contains("KeyModifiers::CONTROL") && src.contains("KeyCode::Char('l')"),
+            "the escape hatch must be bound to Ctrl+L"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pause_blink_wiring_tests {
+    /// `AppState::pause_flash_on` is unit-tested, but its clock lives in the
+    /// DRAW LOOP inside `run_app`, which no behavioural test can reach: dropping
+    /// the increment would freeze the indicator on one phase (or pin it hidden)
+    /// while every other test still passed. Assert the wiring structurally.
+    #[test]
+    fn the_blink_phase_is_advanced_by_the_draw_ticker() {
+        let src = include_str!("main.rs");
+        let start = src.find("async fn run_app(").expect("run_app not found");
+        let end = start + src[start..].find("\nasync fn ").expect("end of run_app");
+        let body = &src[start..end];
+
+        let tick_at = body.find("_ = redraw.tick()").expect("redraw tick arm missing");
+        let bump_at = body
+            .find("state.stats.pause_flash_tick = pause_flash_tick")
+            .expect("the blink phase must be published to stats on every redraw tick");
+        let advance_at = body
+            .find("pause_flash_tick = pause_flash_tick.wrapping_add(1)")
+            .expect("the blink phase must advance");
+        assert!(tick_at < bump_at, "the phase must be published from the redraw tick");
+        assert!(bump_at < advance_at, "publish this tick's phase, then advance");
+
+        // The watchdog `continue`s out of the tick arm while disconnected, so
+        // the advance has to come first or the cadence would drift.
+        assert!(
+            advance_at < body[tick_at..].find("watchdog_last.elapsed()").expect("watchdog") + tick_at,
+            "advance the phase before anything can skip the rest of the arm"
+        );
+        // Drawn on every pass of the loop, so a phase flip is painted without a
+        // full repaint (see AppState::pause_flash_on).
+        assert!(body.contains("terminal.draw("), "the loop must draw each frame");
+    }
+
+    #[test]
+    fn the_blink_is_not_part_of_the_shape_fingerprint() {
+        // If the phase ever moved into ScreenShape, every flip would clear and
+        // repaint the whole terminal to change a few glyphs. Pin the decision.
+        let app = include_str!("app.rs");
+        let shape_at = app.find("pub struct ScreenShape").expect("ScreenShape");
+        let shape_end = app[shape_at..].find('}').expect("end of ScreenShape") + shape_at;
+        assert!(
+            !app[shape_at..shape_end].contains("flash") && !app[shape_at..shape_end].contains("blink"),
+            "a blink changes no geometry — it must stay out of the shape fingerprint"
+        );
+        // ...while the phase still reaches the renderer through stats.
+        let db = include_str!("db.rs");
+        assert!(db.contains("pub pause_flash_tick: u64"), "the tick must be part of stats");
+    }
+
+    #[test]
+    fn a_global_binding_is_dispatched_not_swallowed() {
+        // handle_global_key now returns dispatchable global actions. The caller
+        // has to run them, not just match `Quit` — otherwise the pause key is
+        // consumed and silently dropped. (Asserted positively: this file is
+        // its own source here, so naming the old form would match the test.)
+        let src = include_str!("main.rs");
+        let start = src.find("async fn handle_input_event(").expect("handle_input_event");
+        let end = start + src[start..].find("\n/// Handle a keypress").expect("end of the key arm");
+        let body = &src[start..end];
+        let global_at = body
+            .find("if let Some(action) = state.handle_global_key(key)")
+            .expect("the global binding result must be bound, not pattern-matched away");
+        let dispatch_at = body.find("is_dispatchable(&action)").expect("global actions must be dispatched");
+        assert!(global_at < dispatch_at, "the dispatch must follow the global lookup");
+        assert!(
+            body[global_at..].contains("dispatch_action("),
+            "a dispatchable global action must reach dispatch_action"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_hygiene_tests {
+    /// Anything printed to stdout/stderr while the alternate screen + raw mode
+    /// are active lands in the middle of the ratatui UI: in raw mode ONLCR is
+    /// off, so a bare `\n` never returns the cursor to column 0 and the text
+    /// staircases down the screen, scrolling it and pushing the layout up. It
+    /// shows up at the cursor, inside a window, or at the bottom depending on
+    /// where the cursor happened to be.
+    ///
+    /// These call sites are allowed because they run BEFORE the UI exists
+    /// (engine/user-db launch) or AFTER it is torn down (panic hook, teardown),
+    /// or are test-only. Everything else must go through
+    /// `app::supervisor_log_global` so it lands in the log window.
+    #[test]
+    fn no_live_code_prints_directly_to_the_terminal() {
+        let src = include_str!("main.rs");
+        let allowed = [
+            // Panic hook + teardown: run after LeaveAlternateScreen, and a
+            // panic message must be visible on the real terminal.
+            "TUI panicked",
+            "at {}:{}:{}",
+            "run with RUST_BACKTRACE",
+            "Error: {}",
+            // Engine / user-db launch. These run BEFORE enable_raw_mode() and
+            // EnterAlternateScreen, so there is no UI to corrupt yet and a
+            // failed launch genuinely needs to be visible on the terminal.
+            "Launched user database",
+            "User DB launch failed",
+            "Launched engine",
+            "Engine launch failed",
+            // Teardown of a module process we are killing as we exit.
+            "Killing {} (pid {})",
+        ];
+        for (i, line) in src.lines().enumerate() {
+            let t = line.trim();
+            if !t.starts_with("eprintln!") && !t.starts_with("println!") && !t.starts_with("print!") {
+                continue;
+            }
+            assert!(
+                allowed.iter().any(|a| line.contains(a)),
+                "main.rs:{} prints to the terminal while the UI may be live: {}",
+                i + 1,
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn background_tasks_route_diagnostics_to_the_log_window() {
+        // The websocket client reconnects every 3s and the pop-out server logs
+        // every handshake, so both used to print constantly, from tokio tasks,
+        // with the UI live.
+        for (path, body) in [
+            ("ws_client.rs", include_str!("ws_client.rs")),
+            ("ws_server.rs", include_str!("ws_server.rs")),
+            ("supervisor.rs", include_str!("supervisor.rs")),
+            ("windows/modules.rs", include_str!("windows/modules.rs")),
+        ] {
+            assert!(
+                !body.contains("eprintln!(\"[ws_client]"),
+                "{} still prints websocket-client errors to the terminal",
+                path
+            );
+            assert!(
+                !body.contains("eprintln!(\"WS server"),
+                "{} still prints websocket-server errors to the terminal",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn the_popout_gets_its_own_terminal_instead_of_the_parents_tty() {
+        let src = include_str!("main.rs");
+        let start = src.find("Action::PopOut(window_name) =>").expect("PopOut arm missing");
+        let arm = &src[start..start + 1400];
+        assert!(
+            arm.contains("spawn_in_new_terminal("),
+            "the pop-out must be launched into a terminal of its own"
+        );
+        assert!(
+            !arm.contains("std::process::Command::new(&exe)"),
+            "the pop-out must not be spawned with inherited stdio onto the parent's tty"
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_lifecycle_tests {
+    //! Removing and restarting the ENGINE, and the `--with-engine` /
+    //! `--no-engine` launch switch.
+    //!
+    //! The removal is the load-bearing part. It is a SEQUENCE — ask, wait for
+    //! the answer, report it, stop the client, forget the engine — and every
+    //! step of it is asserted here at the moment it happens, because the failure
+    //! mode is silent in both directions: fire-and-forget is indistinguishable
+    //! from an engine that ignored the request, and a client left reconnecting
+    //! is an orphan nobody notices until the next boot.
+    use super::*;
+
+    /// A modules window with the engine row selected and a live engine: the
+    /// state every test here starts from.
+    fn engine_state() -> AppState {
+        use crate::app::WindowId;
+        use crate::windows::ModulesWindow;
+        let mut s = AppState::new(
+            crate::colors::load_colors(&std::path::PathBuf::from("")),
+            crate::hotkeys::default_hotkeys(),
+        );
+        s.windows = vec![Box::new(ModulesWindow::new())];
+        s.active_window = WindowId::Modules;
+        s.connected = true;
+        s.stats.engine_status = "connected".to_string();
+        s.stats.module_entries = vec![crate::db::ModuleStatus {
+            name: "m0".into(),
+            description: String::new(),
+            status: "connected".into(),
+            position: "preprocess".into(),
+            credentials: Vec::new(),
+            directory: String::new(),
+            credential_values: Default::default(),
+            config_complete: true,
+            alive: true,
+            last_seen: 0,
+        }];
+        s.stats.connection = db::ConnectionInfo { ip: "127.0.0.1".into(), port: 9734, pin: 4242 };
+        s
+    }
+
+    /// The engine's own refusal strings, quoted here so a rename on the engine
+    /// side that the TUI's wording no longer matches is a test failure rather
+    /// than a silently different message.
+    const DISABLED_REFUSAL: &str = "engine_shutdown denied: engine shutdown is disabled (shutdown_on_request is false in config.json)";
+    const GATE_REFUSAL: &str = "engine_shutdown denied: not the TUI";
+
+    fn shutdown_result(success: bool, error: &str) -> cockatiel_client::proto::DatabaseQueryResult {
+        cockatiel_client::proto::DatabaseQueryResult {
+            query_id: ENGINE_SHUTDOWN_QUERY.to_string(),
+            success,
+            error: error.to_string(),
+            result_blob: Vec::new(),
+        }
+    }
+
+    /// A broadcast sender with no subscribers. The removal never reaches it
+    /// (events after the removal are dropped), and a panicking `send` on an
+    /// empty channel would be a false failure.
+    fn no_broadcast() -> broadcast::Sender<WsEvent> {
+        broadcast::channel::<WsEvent>(4).0
+    }
+
+    // ── the remove sequence ───────────────────────────────────────────────
+
+    /// The whole sequence, walked in order through the real functions: ask →
+    /// wait → report → stop the client → forget the engine.
+    #[test]
+    fn the_remove_sequence_asks_waits_then_stops_and_forgets() {
+        let mut s = engine_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+
+        // ── 1. ask ──
+        begin_engine_removal(&mut s, &tx);
+        match rx.try_recv().expect("the request must be sent") {
+            WsCommand::SendQuery { query_id, sql } => {
+                assert_eq!(query_id, "engine_shutdown", "the engine's own query id");
+                // The payload says who asked and nothing else. A `paused`-style
+                // field would read as "and toggle something", which is the
+                // wrong impression to leave in a log next to a shutdown.
+                let parsed: serde_json::Value = serde_json::from_str(&sql).expect("valid json");
+                assert!(parsed.get("paused").is_none(), "no pause flag: {}", sql);
+                assert!(
+                    parsed.get("shutdown_on_request").is_none(),
+                    "that flag belongs to the engine's own config, not to a request: {}",
+                    sql
+                );
+                assert_eq!(parsed.as_object().unwrap().len(), 1, "payload: {}", sql);
+            }
+            other => panic!("expected the shutdown query, got {:?}", other),
+        }
+
+        // ── 2. WAIT. Nothing is stopped and nothing is forgotten yet: the
+        //    operator is owed an answer, and a refusal is a real answer. ──
+        assert!(s.pending_engine_removal.is_some(), "the request must be pending");
+        assert!(rx.try_recv().is_err(), "nothing else may be sent while waiting");
+        assert!(!s.engine_forgotten(), "the client must still be connected while waiting");
+        assert!(!s.stats.engine_removed);
+        assert_eq!(s.stats.engine_status, "connected", "the row still shows a live engine");
+        assert_eq!(s.stats.connection.port, 9734);
+
+        // The answer arrives through the real event handler (the wire path, not
+        // a direct call), as the engine's own "flag is off" refusal.
+        handle_ws_event(
+            WsEvent::QueryResult {
+                query_id: ENGINE_SHUTDOWN_QUERY.to_string(),
+                result: shutdown_result(false, DISABLED_REFUSAL),
+            },
+            &mut s,
+            &tx,
+            &no_broadcast(),
+        );
+        assert!(s.pending_engine_removal.is_none(), "the request is answered");
+
+        // ── 3. disconnected, and stopped reconnecting ──
+        assert!(s.engine_forgotten(), "the client must be stopped for good");
+        assert!(!s.connected);
+        assert!(
+            matches!(rx.try_recv(), Ok(WsCommand::Disconnect)),
+            "the socket must be closed now, not left to the reconnect backoff"
+        );
+
+        // ── 4. the TUI's copy of the engine is gone ──
+        assert!(s.stats.engine_removed);
+        assert!(s.stats.connection.ip.is_empty() && s.stats.connection.port == 0);
+        assert!(s.stats.connection.pin == 0);
+        assert!(s.stats.module_entries.is_empty());
+        assert!(s.stats.pipeline_paused, "no belief about a gate that is gone");
+        assert_ne!(s.stats.engine_status, "connected");
+        // The supervisor's own module bookkeeping is NOT cleared: those
+        // processes are still running under the TUI.
+        assert_eq!(s.module_runs.lock().unwrap().len(), 0);
+    }
+
+    /// All three answers are NORMAL outcomes and each has to produce its own
+    /// line. A refusal that says only "refused" leaves the operator with nothing
+    /// to do; an acceptance indistinguishable from a refusal leaves them unsure
+    /// whether their engine is gone.
+    #[test]
+    fn each_shutdown_answer_gets_its_own_operator_facing_line() {
+        // 1. Accepted: it is answering and then exiting.
+        assert_eq!(
+            classify_engine_shutdown(&shutdown_result(true, "")),
+            EngineRemovalOutcome::Accepted
+        );
+        let accepted = engine_removal_note(&EngineRemovalOutcome::Accepted);
+        assert!(accepted.contains("accepted"), "{}", accepted);
+        assert!(accepted.contains("exiting"), "the engine is on its way out: {}", accepted);
+
+        // 2. Refused by the engine's own flag: STILL RUNNING, and here is both
+        //    the reason (the engine's own words) and the key that would change
+        //    it.
+        assert_eq!(
+            classify_engine_shutdown(&shutdown_result(false, DISABLED_REFUSAL)),
+            EngineRemovalOutcome::Disabled(DISABLED_REFUSAL.to_string())
+        );
+        let disabled = engine_removal_note(&EngineRemovalOutcome::Disabled(DISABLED_REFUSAL.to_string()));
+        assert!(disabled.contains("STILL RUNNING"), "the operator must learn the process survived: {}", disabled);
+        assert!(disabled.contains(DISABLED_REFUSAL), "the engine's own reason is quoted: {}", disabled);
+        assert!(disabled.contains("shutdown_on_request"), "and the key that would change it: {}", disabled);
+        assert!(disabled.contains("config.json"), "and where that key lives: {}", disabled);
+
+        // 3. Denied by the caller gate, or no answer at all: nothing was told
+        //    to exit, so the engine may still be running.
+        assert_eq!(
+            classify_engine_shutdown(&shutdown_result(false, GATE_REFUSAL)),
+            EngineRemovalOutcome::Denied(GATE_REFUSAL.to_string())
+        );
+        let denied = engine_removal_note(&EngineRemovalOutcome::Denied(GATE_REFUSAL.to_string()));
+        assert!(denied.contains("did not accept"), "{}", denied);
+        assert!(denied.contains(GATE_REFUSAL), "the engine's reason is quoted: {}", denied);
+        assert!(denied.contains("may still be running"), "an unaccepted request is not a stopped engine: {}", denied);
+
+        // Missing detail is reported as missing, never invented into a reason.
+        assert_eq!(
+            classify_engine_shutdown(&shutdown_result(false, "")),
+            EngineRemovalOutcome::Denied("(no detail)".to_string())
+        );
+        // The classification keys on the config key, so a reworded refusal
+        // still lands in the right bucket.
+        assert!(matches!(
+            classify_engine_shutdown(&shutdown_result(false, "refused: shutdown_on_request is off")),
+            EngineRemovalOutcome::Disabled(_)
+        ));
+
+        // All three end the same way — the TUI forgets the engine regardless,
+        // because a refusal is the engine's policy, not a failed removal — and
+        // they are three genuinely different lines.
+        for note in [&accepted, &disabled, &denied] {
+            assert!(note.contains("forgetting"), "every variant must say the TUI forgot it: {}", note);
+        }
+        assert_ne!(accepted, disabled);
+        assert_ne!(disabled, denied);
+        assert_ne!(accepted, denied);
+    }
+
+    /// Each outcome really does finish the removal, not just produce a line —
+    /// the three paths through the real event handler, since that is the only
+    /// place the answer is read.
+    #[test]
+    fn every_outcome_finishes_the_removal_the_same_way() {
+        for result in [
+            shutdown_result(true, ""),
+            shutdown_result(false, DISABLED_REFUSAL),
+            shutdown_result(false, GATE_REFUSAL),
+        ] {
+            let why = if result.success { "accepted" } else { &result.error }.to_string();
+            let mut s = engine_state();
+            let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+            begin_engine_removal(&mut s, &tx);
+            let _ = rx.try_recv();
+            handle_ws_event(
+                WsEvent::QueryResult {
+                    query_id: ENGINE_SHUTDOWN_QUERY.to_string(),
+                    result,
+                },
+                &mut s,
+                &tx,
+                &no_broadcast(),
+            );
+            assert!(s.engine_forgotten(), "the removal must finish: {}", why);
+            assert!(s.stats.engine_removed, "the removal must finish: {}", why);
+            assert!(matches!(rx.try_recv(), Ok(WsCommand::Disconnect)), "{}", why);
+        }
+    }
+
+    /// A socket that dies under an unanswered request is the same third answer
+    /// arriving a different way, and a request that is never answered at all
+    /// must not leave the removal half-done. Without these two the TUI can sit
+    /// on "asked, never resolved" for good — with the client still dialling an
+    /// engine it was told to forget.
+    #[test]
+    fn an_unanswered_request_still_finishes_the_removal() {
+        // The socket closed first.
+        let mut s = engine_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+        begin_engine_removal(&mut s, &tx);
+        assert!(s.pending_engine_removal.is_some());
+        let _ = rx.try_recv();
+        handle_ws_event(WsEvent::Disconnected, &mut s, &tx, &no_broadcast());
+        assert!(s.pending_engine_removal.is_none());
+        assert!(s.engine_forgotten(), "the removal still completes");
+        assert!(s.stats.engine_removed);
+        assert!(matches!(rx.try_recv(), Ok(WsCommand::Disconnect)));
+
+        // The engine went quiet without dropping the socket: the deadline the
+        // main loop's ticker acts on.
+        let mut s = engine_state();
+        let (tx2, _rx2) = mpsc::unbounded_channel::<WsCommand>();
+        begin_engine_removal(&mut s, &tx2);
+        let deadline = s.pending_engine_removal.expect("pending");
+        assert!(
+            !removal_deadline_passed(Some(deadline), deadline - Duration::from_millis(1)),
+            "a fresh request has time"
+        );
+        assert!(removal_deadline_passed(Some(deadline), deadline));
+        assert!(
+            !removal_deadline_passed(None, Instant::now() + Duration::from_secs(600)),
+            "no request in flight, no deadline"
+        );
+        // Nothing is removed by the deadline ALONE — it only decides that the
+        // wait is over; the finish is the same call the answer path uses.
+        assert!(!s.engine_forgotten());
+        if removal_deadline_passed(s.pending_engine_removal, deadline) {
+            s.pending_engine_removal = None;
+            finish_engine_removal(
+                &mut s,
+                &tx2,
+                EngineRemovalOutcome::Denied(format!("no answer within {}s", ENGINE_SHUTDOWN_TIMEOUT.as_secs())),
+            );
+        }
+        assert!(s.engine_forgotten());
+    }
+
+    /// The two ends of the removal switch must be the SAME flag. A structural
+    /// check, because the failure is invisible: both `AppState` and `WsClient`
+    /// construct their own `Arc<AtomicBool>`, so forgetting the hand-off in
+    /// `main()` leaves a client that reconnects forever to an engine the TUI
+    /// believes it has forgotten — every behavioural test still passing, because
+    /// each one drives one end.
+    #[test]
+    fn the_app_and_the_client_share_one_removal_switch() {
+        let state = AppState::new(
+            crate::colors::load_colors(&std::path::PathBuf::from("")),
+            crate::hotkeys::default_hotkeys(),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel::<WsEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<WsCommand>();
+        let mut client = ws_client::WsClient::new("127.0.0.1".into(), 1, 0, tx, cmd_rx);
+
+        // A fresh client is NOT already stopped: the switch is shared, not
+        // pre-set by the constructor.
+        assert!(!client.is_stopped());
+        // The hand-off main() performs.
+        client.stopped = state.engine_detached.clone();
+
+        let mut state = state;
+        state.detach_engine();
+        assert!(state.engine_forgotten());
+        assert!(
+            client.is_stopped(),
+            "raising the switch on the app must stop the client: they are one flag"
+        );
+    }
+
+    /// A press while a request is already in flight must not stack a second
+    /// one, and a press on an engine already forgotten must say so.
+    #[test]
+    fn a_second_remove_press_does_not_stack_a_second_request() {
+        let mut s = engine_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+        begin_engine_removal(&mut s, &tx);
+        let _ = rx.try_recv();
+        begin_engine_removal(&mut s, &tx);
+        assert!(rx.try_recv().is_err(), "only one request may be outstanding");
+        assert!(s.pending_engine_removal.is_some());
+
+        // Already gone.
+        finish_engine_removal(&mut s, &tx, EngineRemovalOutcome::Accepted);
+        let _ = rx.try_recv();
+        begin_engine_removal(&mut s, &tx);
+        assert!(rx.try_recv().is_err(), "a forgotten engine cannot be removed again");
+        assert!(s.stats.engine_removed);
+    }
+
+    /// Nothing to ask means nothing to wait for: a disconnected engine is
+    /// removed without a round trip, and the operator is still told that
+    /// nothing was asked of a running process.
+    #[test]
+    fn a_disconnected_engine_is_removed_without_asking() {
+        let mut s = engine_state();
+        s.connected = false;
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+        begin_engine_removal(&mut s, &tx);
+        assert!(s.engine_forgotten());
+        assert!(s.stats.engine_removed);
+        // No query: there was no engine to ask.
+        assert!(matches!(rx.try_recv(), Ok(WsCommand::Disconnect)));
+        let note = engine_removal_note(&EngineRemovalOutcome::Denied(
+            "not connected to an engine, so there was nothing to ask".to_string(),
+        ));
+        assert!(note.contains("did not accept"), "{}", note);
+    }
+
+    /// After the removal, nothing from the dead connection may put an engine
+    /// back. The late `Disconnected` is the real one: the engine answers FIRST
+    /// and exits second, so its close always arrives after the removal. A stats
+    /// update is the dangerous one — it replaces the whole `GlobalStats` and
+    /// would resurrect every cleared number.
+    #[test]
+    fn a_late_engine_event_cannot_revive_a_removed_engine() {
+        let mut s = engine_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<WsCommand>();
+        finish_engine_removal(&mut s, &tx, EngineRemovalOutcome::Accepted);
+
+        handle_ws_event(WsEvent::Connected, &mut s, &tx, &no_broadcast());
+        assert!(!s.connected, "a forgotten engine cannot reconnect");
+        assert!(s.stats.engine_removed);
+        assert_ne!(s.stats.engine_status, "connected");
+
+        handle_ws_event(WsEvent::Disconnected, &mut s, &tx, &no_broadcast());
+        assert!(s.stats.engine_removed);
+        assert_ne!(s.stats.engine_status, "connected");
+
+        // A whole `GlobalStats` from the dead engine: exactly the shape that
+        // would resurrect every cleared number if it were not dropped.
+        let stale = db::GlobalStats {
+            engine_status: "connected".to_string(),
+            module_entries: engine_state().stats.module_entries,
+            total_messages: 99,
+            ..Default::default()
+        };
+        handle_ws_event(WsEvent::StatsUpdate(stale), &mut s, &tx, &no_broadcast());
+        assert!(s.stats.module_entries.is_empty(), "a stale stats update must not come back");
+        assert_eq!(s.stats.total_messages, 0);
+
+        // Even the connection details, which arrive on every (re)connect.
+        handle_ws_event(
+            WsEvent::ConnectionInfo { ip: "10.0.0.1".into(), port: 9734, pin: 42 },
+            &mut s,
+            &tx,
+            &no_broadcast(),
+        );
+        assert!(s.stats.connection.ip.is_empty() && s.stats.connection.port == 0);
+
+        // And a prompt from the engine it no longer talks to is not queued.
+        handle_ws_event(
+            WsEvent::Prompt(cockatiel_client::proto::Prompt::default()),
+            &mut s,
+            &tx,
+            &no_broadcast(),
+        );
+        assert!(s.pending_prompt.is_empty());
+    }
+
+    /// "Remove the engine" is a TUI-side forgetting and this is the assertion
+    /// that keeps it one. The verb sits one key away from `DeleteModule`, which
+    /// really does destroy a module's registration, so the removal path must
+    /// contain no file writing, no registry editing and no process killing at
+    /// all. (Structural, because there is no honest way to observe "no file was
+    /// written" other than reading the code that does the writing.)
+    #[test]
+    fn removing_the_engine_never_touches_the_engines_files_or_process() {
+        let src = include_str!("main.rs");
+        let start = src.find("fn finish_engine_removal(").expect("finish_engine_removal");
+        let end = start + src[start..].find("\n}\n").expect("end of the fn");
+        let body = &src[start..end];
+        for forbidden in [
+            "write_atomic_0600",
+            "remove_file",
+            "clear_module_config",
+            "remove_from_ordering",
+            "engine_config_path",
+            "engine_env_path",
+            "engine_dir",
+            ".kill()",
+            "launch_engine",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the removal must not touch {:?} — it forgets the engine, it does not destroy it:\n{}",
+                forbidden,
+                body
+            );
+        }
+        // What it DOES do, in this order: report, stop the client, close the
+        // socket, clear the TUI's facts.
+        let report = body.find("engine_removal_note").expect("the answer must be reported");
+        let stop = body.find("detach_engine()").expect("the client must be stopped");
+        let close = body.find("WsCommand::Disconnect").expect("the socket must be closed");
+        let forget = body.find("forget_engine()").expect("the TUI's facts must be cleared");
+        assert!(report < stop && stop < close && close < forget, "the order is the sequence:\n{}", body);
+    }
+
+    /// The two engine-only keys are refused from a MODULE row, and from a
+    /// window with no row concept at all — the app's fallback there is "the
+    /// first known module", so an unguarded press would act on something the
+    /// operator never selected.
+    #[test]
+    fn the_engine_only_keys_are_refused_off_the_engine_row() {
+        use crate::app::WindowId;
+        let mut on_module = engine_state();
+        select_module_row(&mut on_module);
+        assert!(focused_selection_is_module(&on_module));
+        for a in [Action::RemoveEngine, Action::RestartEngine] {
+            assert!(is_engine_scoped(&a), "{:?} is engine-scoped", a);
+            assert!(is_dispatchable(&a), "{:?} must be dispatched", a);
+            assert!(!focused_selection_is_engine(&on_module), "a module row is not the engine row");
+        }
+        // A module action is not engine-scoped: the two lists do not overlap.
+        assert!(!is_engine_scoped(&Action::StartModule(String::new())));
+        assert!(!is_engine_scoped(&Action::EditConfig(String::new())));
+
+        // The engine row, and a window with no row at all.
+        assert!(focused_selection_is_engine(&engine_state()));
+        let mut other = engine_state();
+        other.windows = vec![Box::new(crate::windows::LogWindow::new())];
+        other.active_window = WindowId::Log;
+        assert!(!focused_selection_is_engine(&other));
+
+        // ...and through the real dispatch, a refused press sends nothing.
+        let mut s = engine_state();
+        select_module_row(&mut s);
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+        let mut supervisor: supervisor::ProcessTable = Default::default();
+        let mut plugins: Vec<crate::plugins::Plugin> = Vec::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for a in [Action::RemoveEngine, Action::RestartEngine] {
+                dispatch_action(
+                    &mut s,
+                    a,
+                    &mut supervisor,
+                    &mut plugins,
+                    0,
+                    0,
+                    &tx,
+                    "127.0.0.1:1".parse().unwrap(),
+                    "",
+                )
+                .await
+                .unwrap();
+            }
+        });
+        assert!(rx.try_recv().is_err(), "a refused press must send nothing");
+        assert!(!s.engine_forgotten() && !s.stats.engine_removed);
+        assert!(s.pending_engine_removal.is_none());
+    }
+
+    /// Move the selection off the engine row and onto the first module.
+    fn select_module_row(state: &mut AppState) {
+        use crate::app::WindowId;
+        let mut stats = std::mem::take(&mut state.stats);
+        if let Some(w) = state.get_window_mut(WindowId::Modules) {
+            w.handle_key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::empty(),
+                ),
+                &mut stats,
+            );
+        }
+        state.stats = stats;
+    }
+
+    // ── restarting the engine ─────────────────────────────────────────────
+
+    /// Restart: kill the tracked child, launch a new one, and register it under
+    /// the SAME key the original launch uses. That key is the load-bearing part
+    /// — it is what `drain()` reaps at teardown, so a restart that registered
+    /// under any other name is exactly how a restart becomes an orphan.
+    ///
+    /// The relaunch is injected (a unit test may not start a real engine), so
+    /// what is covered is the sequence and the registration. The `Command::spawn`
+    /// itself is the part that is not unit-testable, and the same is true of the
+    /// reconnect: it is the client's own backoff, the path an engine crash
+    /// already takes.
+    #[test]
+    fn a_restart_kills_the_old_child_and_re_registers_the_new_one() {
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        // A real, harmless child: `ManagedProcess` holds a `std::process::Child`,
+        // which cannot be faked, and the KILL is part of what is being tested.
+        let old_pid = track_stand_in_engine(&mut table);
+
+        let new = stand_in_child();
+        let new_pid = new.id();
+        let outcome = restart_engine(&s, &mut table, || Ok(new));
+
+        assert_eq!(outcome, RestartOutcome::Relaunched { old_pid, pid: new_pid });
+        // Tracked under the launch key, so teardown reaps it.
+        let registered = table.get(ENGINE_PROCESS).expect("the new engine must be registered");
+        assert_eq!(registered.lock().unwrap().pid(), new_pid);
+        assert_eq!(table.len(), 1, "exactly one supervised engine");
+        // ...and the old process is really gone, not merely untracked.
+        assert!(
+            !supervisor::pid_alive(old_pid as i32),
+            "the old engine must be killed, not orphaned"
+        );
+        // The operator is told what happened to the OLD one as well.
+        let note = restart_note(&outcome);
+        assert!(note.contains(&old_pid.to_string()), "{}", note);
+        assert!(note.contains(&new_pid.to_string()), "{}", note);
+        // A restart never detaches the client, so the engine can come back.
+        assert!(!s.engine_forgotten());
+
+        registered.lock().unwrap().kill();
+    }
+
+    /// The two refusals are different situations and must not be reported as
+    /// the same thing: one is "there is no engine", the other is "there is an
+    /// engine and it is not ours to kill".
+    #[test]
+    fn a_restart_is_refused_when_there_is_nothing_to_restart() {
+        // Removed from the TUI. Launching one here would create precisely the
+        // orphan the removal exists to prevent: the client was told never to
+        // reconnect, so a fresh engine would have nobody to talk to.
+        let mut s = engine_state();
+        s.stats.forget_engine();
+        let mut table: supervisor::ProcessTable = Default::default();
+        assert_eq!(
+            restart_engine(&s, &mut table, || Err("must not launch".to_string())),
+            RestartOutcome::Removed
+        );
+        let removed = restart_note(&RestartOutcome::Removed);
+        assert!(removed.contains("removed"), "{}", removed);
+        assert!(removed.contains("E"), "the config editor is the way back: {}", removed);
+
+        // Present but not ours — `--no-engine`, or it was already running. The
+        // TUI does not launch, so it does not kill.
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        assert_eq!(
+            restart_engine(&s, &mut table, || Err("must not launch".to_string())),
+            RestartOutcome::NotSupervised
+        );
+        let not_ours = restart_note(&RestartOutcome::NotSupervised);
+        assert!(not_ours.contains("did not launch"), "{}", not_ours);
+        assert!(not_ours.contains("--no-engine"), "and how to change that: {}", not_ours);
+
+        // A relaunch that fails says so, and says the config is untouched. The
+        // old engine is already dead at that point, which the operator has to be
+        // told rather than left to infer from a silence.
+        let mut table: supervisor::ProcessTable = Default::default();
+        let old_pid = track_stand_in_engine(&mut table);
+        let outcome = restart_engine(&s, &mut table, || Err("binary not found".to_string()));
+        assert_eq!(outcome, RestartOutcome::Failed { old_pid, error: "binary not found".into() });
+        let note = restart_note(&outcome);
+        assert!(note.contains("binary not found"), "{}", note);
+        assert!(note.contains("untouched"), "{}", note);
+        assert!(
+            !table.contains_key(ENGINE_PROCESS),
+            "a dead engine must not be left looking supervised"
+        );
+    }
+
+    /// A stand-in engine process, tracked exactly the way the real launch site
+    /// tracks the real one (same key, same `ManagedProcess` shape).
+    ///
+    /// Its own process group, like every supervisor child, so the group TERM in
+    /// `ManagedProcess::kill` actually reaches it. Without that the kill would
+    /// fall through to the 3s wait-for-child timeout on every run, and the
+    /// stand-in's own `sleep` would be left behind.
+    fn track_stand_in_engine(table: &mut supervisor::ProcessTable) -> u32 {
+        let child = stand_in_child();
+        let pid = child.id();
+        table.insert(
+            ENGINE_PROCESS.to_string(),
+            Arc::new(Mutex::new(supervisor::ManagedProcess {
+                child,
+                terminal_window: None,
+                terminal_pidfile: None,
+            })),
+        );
+        pid
+    }
+
+    fn stand_in_child() -> std::process::Child {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.spawn().expect("spawn a stand-in engine")
+    }
+
+    // ── engine start / stop (`s` / `x` on the engine row) ───────────────
+
+    #[test]
+    fn starting_an_engine_launches_and_supervises_it() {
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        let outcome = start_engine(&s, &mut table, || Ok(stand_in_child()), || false);
+        let EngineStartOutcome::Launched { pid } = outcome else {
+            panic!("expected a launch, got {outcome:?}");
+        };
+        let note = engine_start_note(&outcome);
+        assert!(note.contains("launched"), "{}", note);
+        assert!(note.contains(&format!("{pid}")), "names the pid: {}", note);
+        assert!(
+            table.contains_key(ENGINE_PROCESS),
+            "a launched engine must be supervised under {}",
+            ENGINE_PROCESS
+        );
+        // A fresh engine boots paused, so "start" must also re-open the
+        // pipeline — that is the whole point of pressing start.
+        assert!(
+            outcome.resume_pipeline(),
+            "launching the engine must resume the pipeline"
+        );
+        assert!(
+            engine_start_note(&outcome).contains("resuming"),
+            "the launch note must say the pipeline is being resumed"
+        );
+        // The next start press sees it and declines to double-launch, and —
+        // the engine now believed running (not paused) — must NOT pause
+        // anything it wasn't already pausing.
+        let mut s_running = engine_state();
+        s_running.stats.pipeline_paused = false;
+        assert_eq!(
+            start_engine(&s_running, &mut table, || panic!("must not launch twice"), || false),
+            EngineStartOutcome::AlreadySupervised { resumed: false }
+        );
+        let _ = table.remove(ENGINE_PROCESS);
+    }
+
+    #[test]
+    fn start_is_refused_after_removal_and_defers_to_a_running_engine() {
+        // Removed: the client is stopped forever, so launching a fresh engine
+        // would orphan it. Refuse rather than relaunch.
+        let mut s = engine_state();
+        s.stats.forget_engine();
+        let mut table: supervisor::ProcessTable = Default::default();
+        assert_eq!(
+            start_engine(&s, &mut table, || panic!("must not launch after removal"), || false),
+            EngineStartOutcome::Removed
+        );
+        let note = engine_start_note(&EngineStartOutcome::Removed);
+        assert!(note.contains("removed"), "{}", note);
+
+        // Something already listening on the port: connect, don't double-start.
+        // The engine state BELIEVES it is paused (boot default is paused), so
+        // the outcome must demand a resume — this is the exact bug report:
+        // "already listening on port" while the UI still says paused.
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        let outcome =
+            start_engine(&s, &mut table, || panic!("must not launch over a live port"), || true);
+        assert_eq!(outcome, EngineStartOutcome::AlreadyRunning { resumed: true });
+        assert!(
+            outcome.resume_pipeline(),
+            "an already-listening-but-paused engine must be resumed on start"
+        );
+        assert!(!table.contains_key(ENGINE_PROCESS), "no process registered");
+        let note = engine_start_note(&outcome);
+        assert!(note.contains("already listening"), "{}", note);
+        assert!(note.contains("resuming"), "the note must say the pipeline resumes: {}", note);
+
+        // The same engine, not paused: start is a no-op that must not resume
+        // (nothing to resume) and must not pause either.
+        let mut s_running = engine_state();
+        s_running.stats.pipeline_paused = false;
+        let outcome = start_engine(
+            &s_running,
+            &mut table,
+            || panic!("must not launch over a live port"),
+            || true,
+        );
+        assert_eq!(outcome, EngineStartOutcome::AlreadyRunning { resumed: false });
+        assert!(!outcome.resume_pipeline());
+        let note = engine_start_note(&outcome);
+        assert!(note.contains("pipeline is open"), "{}", note);
+    }
+
+    #[test]
+    fn start_failure_leaves_nothing_supervised() {
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        let outcome =
+            start_engine(&s, &mut table, || Err("port busy".to_string()), || false);
+        assert_eq!(outcome, EngineStartOutcome::Failed { error: "port busy".into() });
+        assert!(
+            !table.contains_key(ENGINE_PROCESS),
+            "a failed launch must not be left looking supervised"
+        );
+        let note = engine_start_note(&outcome);
+        assert!(note.contains("port busy"), "{}", note);
+        assert!(note.contains("untouched"), "{}", note);
+    }
+
+    #[test]
+    fn stopping_an_engine_kills_the_supervised_child() {
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        let pid = track_stand_in_engine(&mut table);
+        let outcome = stop_engine(&s, &mut table);
+        assert_eq!(outcome, EngineStopOutcome::Stopped { pid });
+        assert!(!table.contains_key(ENGINE_PROCESS), "killed engine must be deregistered");
+        let note = engine_stop_note(&outcome);
+        assert!(note.contains("killed"), "{}", note);
+    }
+
+    #[test]
+    fn stop_is_refused_when_there_is_no_engine_to_own() {
+        // Removed: nothing to stop.
+        let mut s = engine_state();
+        s.stats.forget_engine();
+        let mut table: supervisor::ProcessTable = Default::default();
+        assert_eq!(stop_engine(&s, &mut table), EngineStopOutcome::Removed);
+        let note = engine_stop_note(&EngineStopOutcome::Removed);
+        assert!(note.contains("already removed"), "{}", note);
+
+        // Present but not ours (the TUI started `--no-engine`, or connected to
+        // an engine it did not launch): do not kill a process we do not own.
+        let s = engine_state();
+        let mut table: supervisor::ProcessTable = Default::default();
+        assert_eq!(stop_engine(&s, &mut table), EngineStopOutcome::NotSupervised);
+        let note = engine_stop_note(&EngineStopOutcome::NotSupervised);
+        assert!(note.contains("did not launch"), "{}", note);
+    }
+
+    // ── --with-engine / --no-engine ───────────────────────────────────────
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The switch parses as a switch — it takes no value, so it must not eat the
+    /// next argument — and the last one given wins, so the pair reads left to
+    /// right.
+    #[test]
+    fn the_engine_launch_switches_parse() {
+        // Neither: nothing was said, which is what lets the config decide.
+        assert_eq!(parse_cli(&args(&[])).engine_launch, None);
+        assert_eq!(parse_cli(&args(&["--with-engine"])).engine_launch, Some(true));
+        assert_eq!(parse_cli(&args(&["--no-engine"])).engine_launch, Some(false));
+        assert_eq!(parse_cli(&args(&["--no-engine", "--with-engine"])).engine_launch, Some(true));
+        assert_eq!(parse_cli(&args(&["--with-engine", "--no-engine"])).engine_launch, Some(false));
+        // A value flag right after still finds its value.
+        let mixed = parse_cli(&args(&["--no-engine", "--port", "1234", "--with-engine"]));
+        assert_eq!(mixed.engine_launch, Some(true));
+        assert_eq!(mixed.override_port, Some(1234));
+    }
+
+    /// The pre-existing flags must parse exactly as they did. A refactor of the
+    /// hand-rolled loop is precisely where a working flag goes missing without
+    /// anyone noticing, and `-p` is `--port` — NOT a free short flag for
+    /// anything new.
+    #[test]
+    fn the_pre_existing_flags_still_parse() {
+        let full = parse_cli(&args(&[
+            "--detached",
+            "log",
+            "--ws-addr",
+            "127.0.0.1:9",
+            "--ws-token",
+            "tok",
+            "--ip",
+            "1.2.3.4",
+            "-i",
+            "5.6.7.8",
+            "--port",
+            "9999",
+            "-p",
+            "1111",
+            "--pin",
+            "2222",
+        ]));
+        assert_eq!(
+            full,
+            CliArgs {
+                detached_window: Some("log".into()),
+                ws_parent_addr: Some("127.0.0.1:9".into()),
+                ws_parent_token: Some("tok".into()),
+                // `-i` is the last one given, so it wins over `--ip`.
+                override_ip: Some("5.6.7.8".into()),
+                // ...and `-p` is `--port`, the same as it always was.
+                override_port: Some(1111),
+                override_pin: Some(2222),
+                engine_launch: None,
+            }
+        );
+        assert_eq!(parse_cli(&args(&["-p", "1234"])).override_port, Some(1234));
+        assert_eq!(parse_cli(&args(&["--pin", "4321"])).override_pin, Some(4321));
+        // A value flag with nothing after it is stepped over, not a panic — and
+        // an argument that LOOKS like a flag is still consumed as the value,
+        // which is the leniency (and the sharp edge) the loop always had.
+        let dangling = parse_cli(&args(&["--port", "--pin", "77"]));
+        assert_eq!(dangling.override_port, None, "'--pin' is eaten as the port");
+        assert_eq!(dangling.override_pin, None, "...so the pin is lost with it");
+        let trailing = parse_cli(&args(&["--port"]));
+        assert_eq!(trailing.override_port, None, "a trailing flag is simply ignored");
+        // Unknown arguments are ignored rather than fatal.
+        assert_eq!(parse_cli(&args(&["--wat", "1", "--no-engine"])).engine_launch, Some(false));
+    }
+
+    /// The precedence: the flag beats the config, the config beats the built-in
+    /// default, and the built-in default is LAUNCH — starting without the engine
+    /// is the special case, never the accident.
+    #[test]
+    fn the_flag_beats_the_config_and_the_default_is_to_launch() {
+        // The whole matrix, spelled out.
+        for (flag, config, expected) in [
+            (Some(true), Some(true), true),
+            (Some(true), Some(false), true),
+            (Some(true), None, true),
+            (Some(false), Some(true), false),
+            (Some(false), Some(false), false),
+            (Some(false), None, false),
+            (None, Some(true), true),
+            (None, Some(false), false),
+            // No flag, no key: launch. This is the row that must never change.
+            (None, None, true),
+        ] {
+            assert_eq!(
+                should_launch_engine(flag, config),
+                expected,
+                "flag={:?} config={:?} must be {}",
+                flag,
+                config,
+                expected
+            );
+        }
+    }
+
+    /// The probe and the flag compose: neither alone is enough. Launching over an
+    /// engine that is already listening means two engines and one port, and
+    /// launching when `--no-engine` was typed means starting the exact process
+    /// the operator said not to start.
+    #[test]
+    fn the_probe_and_the_flag_have_to_agree_before_anything_is_launched() {
+        // (already_up, should_launch) -> launch?
+        for (up, want, expected) in [
+            (false, true, true),  // the ordinary case: nothing there, we want one
+            (true, true, false),  // somebody's engine is already listening
+            (false, false, false), // --no-engine
+            (true, false, false),  // --no-engine, and there is one to use anyway
+        ] {
+            assert_eq!(
+                engine_start_decision(up, want),
+                expected,
+                "already_up={} should_launch={}",
+                up,
+                want
+            );
+        }
+    }
+
+    /// `--no-engine` is about the ENGINE and nothing else. The user database and
+    /// the module registration must stay outside the gate, or pointing the TUI
+    /// at somebody else's engine silently costs it its database and its modules
+    /// — and the engine needs both. Structural, because the launches are
+    /// processes: the assertion is about what the guard is wrapped around.
+    #[test]
+    fn no_engine_gates_the_engine_launch_and_nothing_else() {
+        let src = include_str!("main.rs");
+        let start = src.find("if engine_start_decision(").expect("the launch gate");
+        let end = start + src[start..].find("\n        }\n").expect("end of the guarded block");
+        let block = &src[start..end];
+
+        // What is inside: the engine, and the wait for its config afterwards.
+        assert!(block.contains("supervisor::launch_engine()"), "the gate is on the engine launch:\n{}", block);
+        // What is NOT: the other two services, and the plugin discovery the
+        // engine needs to approve them.
+        for outside in [
+            "launch_user_db",
+            "register_module",
+            "add_to_ordering",
+            "discover_plugins",
+        ] {
+            assert!(
+                !block.contains(outside),
+                "{:?} must not be behind the engine-launch gate:\n{}",
+                outside,
+                block
+            );
+        }
+        // And the user database is launched BEFORE the gate, unconditionally,
+        // on the way to it.
+        let db_at = src.find("supervisor::launch_user_db()").expect("the user database launch");
+        assert!(db_at < start, "the user database is not behind the engine gate");
+        // The gate is the decision function, not a bare boolean: a later edit
+        // cannot quietly drop the "already running" half of the condition.
+        assert!(src.contains("engine_start_decision(engine_up, should_launch)"));
     }
 }

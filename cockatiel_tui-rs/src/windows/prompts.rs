@@ -239,6 +239,25 @@ impl Window for PromptsWindow {
             y += 1;
         }
 
+        // Hotkey bar: wrapped to this window's width, so hints are no longer
+        // clipped off the right edge. The dialog is centred in `area`, so `area`
+        // is shortened by the rows the wrapped bar claimed.
+        let mut hotkey_text = "nav:[<|>]".to_string();
+        hotkey_text.push(' ');
+        hotkey_text.push_str(&hotkeys.format_window("prompts", &[]));
+        hotkey_text.push(' ');
+        hotkey_text.push_str("type/paste answer  enter submit  esc cancel  double-esc: quit");
+        let hotkey = crate::windows::hotkey_wrap::layout(
+            &[(hotkey_text, Style::default().fg(Color::DarkGray))],
+            area,
+            inner,
+        );
+        let inner = hotkey.content;
+        let area = Rect {
+            height: area.height.saturating_sub(hotkey.claimed),
+            ..area
+        };
+
         if pending_count == 0 {
             let text = Paragraph::new(Line::from(Span::styled(
                 "No pending prompts",
@@ -250,16 +269,8 @@ impl Window for PromptsWindow {
             self.draw_prompt_dialog(area, buf, &prompts[idx]);
         }
 
-        // Hotkey bar at bottom of window.
-        let hotkey_area = Rect { x: area.x + 1, y: area.y + area.height.saturating_sub(1), width: area.width.saturating_sub(2), height: 1 };
-        let mut hotkey_text = "nav:[<|>] ".to_string();
-        hotkey_text.push_str(&hotkeys.format_window("prompts", &[]));
-        hotkey_text.push_str("type/paste answer  enter submit  esc cancel  double-esc: quit");
-        let hotkeys_line = Line::from(vec![
-            Span::styled(hotkey_text, Style::default().fg(Color::DarkGray)),
-        ]);
-        let hotkey_para = Paragraph::new(hotkeys_line);
-        hotkey_para.render(hotkey_area, buf);
+        // Hotkey bar (already wrapped above).
+        Paragraph::new(hotkey.lines).render(hotkey.area, buf);
 
         block.render(area, buf);
     }

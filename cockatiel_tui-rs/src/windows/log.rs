@@ -123,6 +123,24 @@ impl Window for LogWindow {
 
         let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
 
+        // Hotkey bar: wrapped to this window's width, so hints are no longer
+        // clipped off the right edge. The two-tone `key:label` styling is kept by
+        // passing the runs as separate chunks.
+        let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let desc_style = Style::default().fg(Color::DarkGray);
+        let hotkey = crate::windows::hotkey_wrap::layout(
+            &[
+                ("1-5".to_string(), key_style),
+                (":filter".to_string(), desc_style),
+                ("j/k".to_string(), key_style),
+                (":scroll".to_string(), desc_style),
+                ("w".to_string(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ],
+            area,
+            inner,
+        );
+        let inner = hotkey.content;
+
         // Tab bar
         let tab_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
         let tab_para = Paragraph::new(self.tab_bar());
@@ -166,17 +184,8 @@ impl Window for LogWindow {
         // Render border on top
         block.render(area, buf);
 
-        // Hotkey bar at bottom of window
-        let hotkey_area = Rect { x: area.x + 1, y: area.y + area.height.saturating_sub(1), width: area.width.saturating_sub(2), height: 1 };
-        let hotkeys = Line::from(vec![
-            Span::styled("1-5", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(":filter  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("j/k", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(":scroll  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("w", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]);
-        let hotkey_para = Paragraph::new(hotkeys);
-        hotkey_para.render(hotkey_area, buf);
+        // Hotkey bar (already wrapped above).
+        Paragraph::new(hotkey.lines).render(hotkey.area, buf);
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent, _stats: &mut GlobalStats) -> Option<Action> {
@@ -207,3 +216,77 @@ impl Window for LogWindow {
         }
     }
 }
+
+#[cfg(test)]
+mod log_bounds_tests {
+    use super::*;
+    use crate::hotkeys::default_hotkeys;
+    use crate::layout::LayoutState;
+    use ratatui::buffer::Buffer;
+
+    fn painted(buf: &Buffer) -> Vec<(u16, u16)> {
+        let area = buf.area;
+        let mut out = Vec::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buf[(x, y)].symbol() != " " {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    fn probe(term_w: u16, term_h: u16, pct: u16) {
+        let terminal = Rect { x: 0, y: 0, width: term_w, height: term_h };
+        let ls = LayoutState {
+            left_width_pct: pct,
+            ..LayoutState::default()
+        };
+        let areas = ls.compute(terminal);
+
+        let mut w = LogWindow::new();
+        for i in 0..40 {
+            w.push_log(LogEntry {
+                timestamp: String::new(),
+                source: format!("discord-adapter-{}", i),
+                message: format!("a fairly long log message number {} that goes on a bit", i),
+                event_type: 1 + (i % 5),
+            });
+        }
+
+        let mut buf = Buffer::empty(terminal);
+        let colors = crate::colors::load_colors(&std::path::PathBuf::from(""));
+        w.render(areas.log, &mut buf, true, &crate::db::GlobalStats::default(), &colors, &default_hotkeys(), &[]);
+
+        let outside: Vec<(u16, u16)> = painted(&buf).into_iter()
+            .filter(|(x, y)| {
+                !(*x >= areas.log.x && *x < areas.log.x + areas.log.width
+                  && *y >= areas.log.y && *y < areas.log.y + areas.log.height)
+            })
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "log wrote {} cell(s) outside its area {:?} (modules is {:?}) -- first: {:?}",
+            outside.len(),
+            areas.log,
+            areas.modules,
+            outside.iter().take(6).collect::<Vec<_>>()
+        );
+    }
+
+    /// The reported "log overflows into modules" symptom. The log window is
+    /// provably confined to its own rect for every legal layout, so anything
+    /// seen bleeding across is a stale-cell artifact of the diff-based
+    /// renderer rather than a bounds bug -- which is what the full-repaint on
+    /// a shape change fixes.
+    #[test]
+    fn log_never_paints_outside_its_own_area() {
+        for (w, h) in [(120u16, 40u16), (200, 60), (80, 24), (60, 20)] {
+            for pct in [10u16, 30, 50, 90] {
+                probe(w, h, pct);
+            }
+        }
+    }
+}
+

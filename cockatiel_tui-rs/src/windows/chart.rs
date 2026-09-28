@@ -186,6 +186,23 @@ impl Window for ChartWindow {
 
         let inner = area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
 
+        // Hotkey bar: wrapped to this window's width, so hints are no longer
+        // clipped off the right edge on a narrow terminal. `inner` is shadowed
+        // with the bar's content rect so the toolbar and chart stop short of any
+        // rows the wrapped bar claims.
+        let mut hotkey_text = "nav:[h|l|arrows]".to_string();
+        hotkey_text.push(' ');
+        hotkey_text.push_str(&hotkeys.format_window(
+            "chart",
+            &["5m", "1h", "6h", "24h", "toggle", "zoom-in", "zoom-out", "popout"],
+        ));
+        let hotkey = crate::windows::hotkey_wrap::layout(
+            &[(hotkey_text, Style::default().fg(Color::DarkGray))],
+            area,
+            inner,
+        );
+        let inner = hotkey.content;
+
         // Toolbar (top 1 line)
         let toolbar_area = Rect {
             x: inner.x,
@@ -213,18 +230,8 @@ impl Window for ChartWindow {
         // Render border
         block.render(area, buf);
 
-        // Hotkey bar at bottom of window
-        let hotkey_area = Rect { x: area.x + 1, y: area.y + area.height.saturating_sub(1), width: area.width.saturating_sub(2), height: 1 };
-        let mut hotkey_text = "nav:[h|l|arrows]  ".to_string();
-        hotkey_text.push_str(&hotkeys.format_window(
-            "chart",
-            &["5m", "1h", "6h", "24h", "toggle", "zoom-in", "zoom-out", "popout"],
-        ));
-        let hotkeys_line = Line::from(vec![
-            Span::styled(hotkey_text, Style::default().fg(Color::DarkGray)),
-        ]);
-        let hotkey_para = Paragraph::new(hotkeys_line);
-        hotkey_para.render(hotkey_area, buf);
+        // Hotkey bar (already wrapped above).
+        Paragraph::new(hotkey.lines).render(hotkey.area, buf);
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent, area: Rect) -> Option<Action> {

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -26,6 +28,12 @@ pub enum WsCommand {
     SendQuery { query_id: String, sql: String },
     SendPromptResponse { prompt_id: String, accepted: bool, reason: String },
     SendLog { source: String, message: String },
+    /// Close the engine socket NOW and never reconnect. Sent when the TUI
+    /// removes the engine (`Action::RemoveEngine`): the engine is not coming
+    /// back on its own, so a client that kept retrying would be an orphan — the
+    /// same failure the detached-window give-up below exists to prevent, one
+    /// level up.
+    Disconnect,
 }
 
 pub struct WsClient {
@@ -38,6 +46,30 @@ pub struct WsClient {
     pub command_rx: mpsc::UnboundedReceiver<WsCommand>,
     pub stats: db::GlobalStats,
     pub parent_mode: bool,
+    /// Set by the TUI when the engine has been deliberately removed. Read
+    /// between connection attempts, so a detached client stops for good instead
+    /// of retrying an engine that is not coming back.
+    ///
+    /// An `Arc<AtomicBool>` because the client is moved into its own task while
+    /// the switch is raised from the main loop — the same shape as
+    /// `AppState::engine_detached`, which holds the other end.
+    pub stopped: Arc<AtomicBool>,
+}
+
+/// How many consecutive failures a DETACHED (pop-out) window tolerates before
+/// concluding its parent TUI is gone for good and exiting. With the backoff
+/// below that is roughly 75 seconds of trying.
+pub const DETACHED_GIVE_UP_AFTER: u32 = 5;
+
+/// Delay before reconnecting after `attempt` consecutive failures: 3s, 6s, 12s,
+/// 24s, then capped at 30s. Pure so the curve is testable.
+pub fn reconnect_backoff_secs(attempt: u32) -> u64 {
+    if attempt == 0 {
+        return 3;
+    }
+    // Shift is bounded so the doubling cannot overflow, and the result is capped
+    // at 30s: past that, waiting longer buys nothing.
+    (3u64 << attempt.min(4)).min(30)
 }
 
 impl WsClient {
@@ -58,6 +90,7 @@ impl WsClient {
             command_rx,
             stats: db::GlobalStats::default(),
             parent_mode: false,
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -76,21 +109,69 @@ impl WsClient {
             command_rx,
             stats: db::GlobalStats::default(),
             parent_mode: true,
+            stopped: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// True once the TUI has told this client to stop for good.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
     pub async fn run(&mut self) {
+        let mut consecutive_failures: u32 = 0;
         loop {
+            // Checked BEFORE the first attempt, not just between them: a client
+            // that was stopped while disconnected (the engine was removed) must
+            // never dial it again. This is the difference between "forgot the
+            // engine" and "the engine is down", and only the former is final.
+            if self.is_stopped() {
+                return;
+            }
+            // The `Result` is consumed inside the match rather than bound
+            // across the sleep below: `Box<dyn Error>` is not `Send`, so
+            // holding it over an await point would make this future unspawnable.
             match self.connect_and_run().await {
                 Ok(_) => {
                     let _ = self.event_tx.send(WsEvent::Disconnected);
+                    consecutive_failures = 0;
                 }
                 Err(e) => {
-                    eprintln!("[ws_client] connect_and_run ended with error: {}", e);
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    // A detached (pop-out) window talks to its PARENT TUI, not to
+                    // the engine. If the parent is gone its port is closed for
+                    // good, so retrying forever just leaves an orphan spamming
+                    // the log (and, before the stdio fix, the tty) every few
+                    // seconds. Give up and exit instead.
+                    if self.parent_mode && consecutive_failures >= DETACHED_GIVE_UP_AFTER {
+                        crate::app::supervisor_log_global(format!(
+                            "[ws_client] detached window: parent TUI is unreachable ({}), giving up",
+                            e
+                        ));
+                        std::process::exit(0);
+                    }
+                    if consecutive_failures == 1 {
+                        crate::app::supervisor_log_global(format!(
+                            "[ws_client] connect_and_run ended with error: {}",
+                            e
+                        ));
+                    }
                     let _ = self.event_tx.send(WsEvent::Disconnected);
                 }
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            // Stopped mid-attempt (the removal raised the switch while the
+            // socket was up): return without reporting anything — a deliberate
+            // detach is not a failure — and without sitting out a backoff for a
+            // reconnect that must not happen.
+            if self.is_stopped() {
+                return;
+            }
+            // Back off instead of hammering: a real outage should not turn into
+            // a log line every 3 seconds for as long as it lasts.
+            tokio::time::sleep(Duration::from_secs(reconnect_backoff_secs(
+                consecutive_failures,
+            )))
+            .await;
         }
     }
 
@@ -297,6 +378,11 @@ impl WsClient {
                                     let _ = write.send(WsMessage::Binary(buf.into())).await;
                                 }
                             }
+                            // Only the TUI removes the engine, and the TUI is
+                            // never in parent mode, so a child never receives
+                            // this — handled here so the variant cannot fall
+                            // through as a silent no-op if that ever changes.
+                            WsCommand::Disconnect => break,
                             _ => {}
                         }
                     }
@@ -411,11 +497,16 @@ impl WsClient {
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
-                                eprintln!("[ws_client] engine read error: {:?}", e);
+                                crate::app::supervisor_log_global(format!(
+                                    "[ws_client] engine read error: {:?}",
+                                    e
+                                ));
                                 break;
                             }
                             None => {
-                                eprintln!("[ws_client] engine closed the connection");
+                                crate::app::supervisor_log_global(
+                                    "[ws_client] engine closed the connection".to_string(),
+                                );
                                 break;
                             }
                         }
@@ -473,6 +564,11 @@ impl WsClient {
                                     let _ = write.send(WsMessage::Binary(buf.into())).await;
                                 }
                             }
+                            // The engine was removed from the TUI: close the
+                            // socket now rather than after the reconnect
+                            // backoff. `run()` reads the stop switch next and
+                            // returns without dialing again.
+                            WsCommand::Disconnect => break,
                         }
                     }
                     _ = query_interval.tick() => {
@@ -527,4 +623,144 @@ fn pinned_tls_config(cert_pem_path: &str) -> Result<rustls::ClientConfig, String
     Ok(rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth())
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::{reconnect_backoff_secs, DETACHED_GIVE_UP_AFTER};
+
+    /// A fixed 3s retry turned a real outage into a log line every 3 seconds
+    /// indefinitely. The curve has to grow and then cap.
+    #[test]
+    fn the_reconnect_backoff_grows_then_caps() {
+        assert_eq!(reconnect_backoff_secs(0), 3);
+        assert_eq!(reconnect_backoff_secs(1), 6);
+        assert_eq!(reconnect_backoff_secs(2), 12);
+        assert_eq!(reconnect_backoff_secs(3), 24);
+        assert_eq!(reconnect_backoff_secs(4), 30, "capped");
+        assert_eq!(reconnect_backoff_secs(50), 30);
+        assert_eq!(reconnect_backoff_secs(u32::MAX), 30);
+    }
+
+    #[test]
+    fn the_backoff_is_monotonic_and_never_zero() {
+        let mut last = 0;
+        for a in 0..40u32 {
+            let d = reconnect_backoff_secs(a);
+            assert!(d >= last, "backoff went backwards at attempt {a}");
+            assert!(d > 0);
+            last = d;
+        }
+    }
+
+    /// The orphan that motivated this: a detached window whose parent TUI had
+    /// died retried every 3 seconds for over an hour. It has to give up.
+    #[test]
+    fn a_detached_window_gives_up_eventually() {
+        // One failure is not enough evidence the parent is gone (a restart race
+        // is normal), so the budget has to allow several attempts — but the total
+        // time spent must stay short enough that a real orphan does not linger.
+        let total: u64 = (1..=DETACHED_GIVE_UP_AFTER)
+            .map(reconnect_backoff_secs)
+            .sum();
+        assert!(total <= 120, "gave up after {total}s, too slow");
+        assert!(total >= 10, "gave up after only {total}s, too eager");
+    }
+
+    /// Only a DETACHED window may give up. The main TUI talks to the ENGINE,
+    /// which the TUI itself supervises and restarts, so it must keep retrying
+    /// forever no matter how long the engine is down.
+    #[test]
+    fn only_a_detached_window_is_allowed_to_give_up() {
+        let src = include_str!("ws_client.rs");
+        let start = src.find("pub async fn run(&mut self)").expect("run() not found");
+        let body = &src[start..start + 2000];
+        assert!(
+            body.contains("self.parent_mode && consecutive_failures >= DETACHED_GIVE_UP_AFTER"),
+            "the give-up must be gated on parent_mode"
+        );
+        assert!(
+            body.contains("std::process::exit(0)"),
+            "the detached window must actually exit"
+        );
+    }
+
+    #[test]
+    fn a_repeated_failure_is_logged_once_not_every_retry() {
+        // The flood the operator saw was the same line every 3 seconds.
+        let src = include_str!("ws_client.rs");
+        let start = src.find("pub async fn run(&mut self)").expect("run() not found");
+        let body = &src[start..start + 2000];
+        assert!(
+            body.contains("if consecutive_failures == 1"),
+            "only the first failure in a streak should be logged"
+        );
+    }
+
+    /// Removing the engine from the TUI means the client must never speak to it
+    /// again. Checked BEHAVIOURALLY, not by reading the source: the stop switch
+    /// is set and `run()` is pointed at a port nothing is listening on, so if
+    /// the switch were not honoured the client would still be retrying (or
+    /// blocked in a connect) when the timeout fires. A stopped client is a
+    /// client that has left the building.
+    #[tokio::test]
+    async fn a_stopped_client_dials_nothing_and_returns() {
+        use super::{WsClient, WsCommand, WsEvent};
+        use tokio::sync::mpsc;
+        let (tx, mut rx) = mpsc::unbounded_channel::<WsEvent>();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel::<WsCommand>();
+        // Port 1: nothing listens there, so a client that ignored the switch
+        // would either be mid-reconnect or already backing off for 3s+.
+        let mut client = WsClient::new("127.0.0.1".to_string(), 1, 0, tx, cmd_rx);
+        client.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            client.run(),
+        )
+        .await;
+        assert!(ran.is_ok(), "a stopped client must return, not keep retrying");
+        // A deliberate detach is not a disconnection to report: the TUI has
+        // already forgotten the engine and would drop the event anyway.
+        assert!(
+            rx.try_recv().is_err(),
+            "stopping must not report anything to the TUI"
+        );
+    }
+
+    /// The stop switch is only half the mechanism: the socket has to CLOSE now,
+    /// not after the reconnect backoff, and `run()` has to re-check the switch
+    /// on the way out. Both are asserted on the source because neither is
+    /// reachable without a live engine socket: dropping the `Disconnect` arm
+    /// would leave the removal working in tests and hanging in the app.
+    #[test]
+    fn the_disconnect_command_and_the_stop_switch_both_end_the_client() {
+        let src = include_str!("ws_client.rs");
+        // Sliced to the CLIENT (everything before the test module) because this
+        // file is its own source here: searching the whole file would count the
+        // literal in the assertion below as a third implementation.
+        let start = src.find("pub async fn run(&mut self)").expect("run() not found");
+        let end = src.find("#[cfg(test)]").expect("test module not found");
+        let body = &src[start..end];
+        // The command breaks the read loop in BOTH modes (engine and parent), so
+        // it can never be a silently ignored variant.
+        assert_eq!(
+            body.matches("WsCommand::Disconnect => break,").count(),
+            2,
+            "the Disconnect command must break the read loop in both modes"
+        );
+        // The switch is read at the TOP of the retry loop (so a client stopped
+        // while disconnected never dials again) and again after each attempt
+        // (so a detach mid-attempt neither reports nor backs off).
+        let run = &body[..body.find("\n    ///").unwrap_or(body.len())];
+        assert!(
+            run.find("if self.is_stopped()").expect("run() must check the switch")
+                < run.find("self.connect_and_run()").expect("run() must connect"),
+            "the switch must be checked BEFORE the first dial, not only between retries"
+        );
+        assert!(
+            run.matches("if self.is_stopped()").count() >= 2,
+            "the switch must also be re-checked after an attempt, or a detach mid-connect backs off before it notices"
+        );
+    }
 }

@@ -4,6 +4,7 @@ pub mod modules;
 pub mod chart;
 pub mod prompts;
 pub mod users;
+pub mod hotkey_wrap;
 
 pub use logo::LogoWindow;
 pub use log::LogWindow;

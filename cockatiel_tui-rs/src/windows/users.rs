@@ -608,6 +608,17 @@ impl UsersWindow {
         line.render(area, buf);
     }
 
+    /// The hotkey bar text for the current focus. Split out so the wrapping
+    /// helper and any future test read the same source of truth.
+    fn hotkey_text(&self) -> String {
+        let mut text = "nav:[j|k|g|G]  filter:[/]  open:[Enter]  pane:[Tab]".to_string();
+        if self.focus == Focus::Detail {
+            text.push_str("  commend:[c]  reprimand:[r]  ban:[b]  timeout:[t]  roles:[1-4]  notes:[n]  del:[d]  values:[v]");
+        }
+        text.push_str("  quit:[q|esc]");
+        text
+    }
+
     fn render_dialog(&self, area: Rect, buf: &mut Buffer, colors: &ColorConfig) {
         let Some(dialog) = &self.dialog else { return };
         let w = 60u16.min(area.width.saturating_sub(4));
@@ -757,20 +768,20 @@ impl Window for UsersWindow {
 
         block.render(area, buf);
 
-        // Hotkey bar on the bottom border row (interior), like modules.rs.
-        let hotkey_area = Rect {
-            x: area.x + 1,
-            y: area.y + area.height.saturating_sub(1),
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        let mut hotkey_text = "nav:[j|k|g|G]  filter:[/]  open:[Enter]  pane:[Tab]  ".to_string();
-        if self.focus == Focus::Detail {
-            hotkey_text.push_str("commend:[c]  reprimand:[r]  ban:[b]  timeout:[t]  roles:[1-4]  notes:[n]  del:[d]  values:[v]  ");
-        }
-        hotkey_text.push_str("quit:[q|esc]");
-        let hotkeys_line = Line::from(vec![Span::styled(hotkey_text, Style::default().fg(Color::DarkGray))]);
-        Paragraph::new(hotkeys_line).render(hotkey_area, buf);
+        // Hotkey bar: wrapped to this window's width. This bar is the longest in
+        // the app and sits in the narrowest window, so it was the one that
+        // reliably lost its tail; it now wraps instead of clipping.
+        let hotkey = crate::windows::hotkey_wrap::layout(
+            &[(
+                self.hotkey_text(),
+                Style::default().fg(Color::DarkGray),
+            )],
+            area,
+            inner,
+        );
+
+        // Hotkey bar (already wrapped above).
+        Paragraph::new(hotkey.lines).render(hotkey.area, buf);
 
         self.render_dialog(area, buf, colors);
     }

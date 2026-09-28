@@ -86,6 +86,70 @@ pub fn engine_config_path() -> PathBuf {
     engine_dir().join("config.json")
 }
 
+/// The TUI's own `config.json` key: launch the engine at startup?
+///
+/// Named for what it decides rather than for the flag that overrides it, so the
+/// file reads as a setting and not as a mirror of one command-line switch.
+pub const LAUNCH_ENGINE_KEY: &str = "launch_engine";
+
+/// The TUI's `launch_engine` setting, or `None` when the file is missing, is not
+/// an object, or has no usable value for the key.
+///
+/// `None` is deliberately not the same as `false`: it means "nothing said", and
+/// the caller falls back to the built-in default (launch). A wrong value must
+/// never be invented from a typo.
+pub fn read_launch_engine_default(path: &Path) -> Option<bool> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config.get(LAUNCH_ENGINE_KEY).and_then(|v| v.as_bool())
+}
+
+/// Make sure the TUI's `config.json` exists and carries every default key.
+///
+/// This is THE writer for that file, so a fresh install (an empty directory, or
+/// a config.json written before a key existed) gets the key rather than relying
+/// on the checked-in one and silently falling back. It MERGES: an operator's
+/// other settings in the same file survive, an existing value is never
+/// overwritten, and a file that is not a JSON object is left completely alone
+/// (it is not ours to interpret, and a missing default is recoverable while a
+/// clobbered file is not).
+///
+/// Written with the same atomic 0600 writer as every other config file the
+/// supervisor touches.
+pub fn ensure_tui_config(path: &Path) {
+    let mut root: serde_json::Value = match std::fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+            // Missing, blank, corrupt, or a non-object: start from nothing
+            // rather than trying to preserve something we cannot read. Only the
+            // first two cases are written at all.
+            _ => {
+                if path.exists() {
+                    return;
+                }
+                serde_json::Value::Object(serde_json::Map::new())
+            }
+        },
+        Err(_) => serde_json::Value::Object(serde_json::Map::new()),
+    };
+    let serde_json::Value::Object(map) = &mut root else {
+        return;
+    };
+    if map.contains_key(LAUNCH_ENGINE_KEY) {
+        return;
+    }
+    map.insert(
+        LAUNCH_ENGINE_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+        let _ = write_atomic_0600(path, &pretty);
+    }
+}
+
 /// Path to the engine's self-signed TLS cert, if it exists. The engine writes
 /// this on startup; modules are launched with `COCKATIEL_TLS_CERT` set to it so
 /// they connect over WSS (the engine rejects plain ws://).
@@ -306,7 +370,12 @@ fn upsert_env_key(path: &Path, key: &str, value: &str) {
         Err(_) => out.push_str(&format!("{}={}\n", key, value)),
     }
     if let Err(e) = write_atomic_0600(path, &out) {
-        eprintln!("[supervisor] failed to persist {} in {}: {}", key, path.display(), e);
+        crate::app::supervisor_log_global(format!(
+            "[supervisor] failed to persist {} in {}: {}",
+            key,
+            path.display(),
+            e
+        ));
     }
 }
 
@@ -521,13 +590,106 @@ fn record_binary_route(p: &Plugin, path: &Path) {
 
     if let Ok(pretty) = serde_json::to_string_pretty(&root) {
         let _ = std::fs::write(&manifest_path, pretty);
-        eprintln!(
+        crate::app::supervisor_log_global(format!(
             "[supervisor] registered binary route {} / {} → {} for {}",
             os_key(),
             arch_key(),
             rel,
             p.manifest.name
-        );
+        ));
+    }
+}
+
+/// Launch an arbitrary argv in a NEW terminal window, returning once the window
+/// has been asked for.
+///
+/// This exists for the detached/pop-out window. A pop-out is a full-screen
+/// ratatui app, so spawning it with inherited stdio put a SECOND renderer with
+/// its own diff buffer on the same tty as the main UI — the two interleaved
+/// escape sequences, which is what made stray text appear at the cursor, inside
+/// a window, and at the bottom of the screen pushing the layout up. A detached
+/// window must therefore own a terminal of its own, exactly like a terminal
+/// module does.
+pub fn spawn_in_new_terminal(argv: &[String], title: &str) -> Result<(), String> {
+    if argv.is_empty() {
+        return Err("no command to launch".to_string());
+    }
+    // Each element is quoted so it survives both the outer shell's quote
+    // stripping and the inner `sh -c` re-parse, same reasoning as
+    // `spawn_terminal_from_parts`.
+    let cmd_line = argv
+        .iter()
+        .map(|a| nested_shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let marker = format!("cockatiel:{}", title);
+    let run = format!(
+        "printf '\\033]0;{}\\007'; sh -c '{}'",
+        shell_quote(&marker),
+        // The inner sh -c is single-quoted, so its payload must not contain a
+        // raw single quote; nested_shell_quote already escaped it.
+        cmd_line
+    );
+
+    match std::env::consts::OS {
+        "macos" => {
+            let script = format!(
+                "tell application \"Terminal\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\ndo script \"{}\" in w\nend if\nend tell",
+                apple_quote(&marker),
+                apple_quote(&run),
+                apple_quote(&run),
+            );
+            let mut cmd = Command::new("osascript");
+            cmd.arg("-e")
+                .arg(&script)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
+            cmd.spawn()
+                .map(|_| ())
+                .map_err(|e| format!("Failed to open a Terminal window for '{}': {}", title, e))
+        }
+        "windows" => Command::new("cmd")
+            .args(["/C", "start", "", "cmd", "/K"])
+            .arg(&run)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Failed to open a console for '{}': {}", title, e)),
+        _ => {
+            let candidates: &[(&str, &[&str])] = &[
+                ("x-terminal-emulator", &["-e", "sh", "-c"]),
+                ("gnome-terminal", &["--", "sh", "-c"]),
+                ("konsole", &["-e", "sh", "-c"]),
+                ("xterm", &["-e", "sh", "-c"]),
+            ];
+            let mut last = String::from("no terminal emulator found");
+            for (emu, args) in candidates {
+                let res = {
+                    let mut cmd = Command::new(emu);
+                    cmd.args(*args)
+                        .arg(&run)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    cmd.spawn().map(|_| ())
+                };
+                match res {
+                    Ok(()) => return Ok(()),
+                    Err(e) => last = format!("{}: {}", emu, e),
+                }
+            }
+            Err(format!("Failed to open a terminal for '{}' ({})", title, last))
+        }
     }
 }
 
@@ -1034,7 +1196,10 @@ fn kill_stale_terminal_processes(name: &str) {
             .map(|s| s.success())
             .unwrap_or(false);
         if alive {
-            eprintln!("[supervisor] killing stale {} process (pid {})", name, pid);
+            crate::app::supervisor_log_global(format!(
+                "[supervisor] killing stale {} process (pid {})",
+                name, pid
+            ));
             kill_pid(pid);
         }
     }
@@ -1046,7 +1211,18 @@ fn kill_stale_terminal_processes(name: &str) {
 /// window 1, and only then close it — never touching a user's unrelated
 /// window. `saving no` force-closes. Terminal is slow/reluctant, so this
 /// retries for several seconds. The module process should already be dead.
-fn close_terminal_windows(marker: &str) {
+/// Close every pop-out window this TUI opened. The detached windows are
+/// separate processes (reparented to init, so the parent cannot wait on them),
+/// and they talk to THIS process — so on a clean exit they would linger,
+/// reconnecting to a port that is about to disappear. The window title is the
+/// same `cockatiel:popout:<name>` marker `spawn_in_new_terminal` sets.
+pub fn close_popout_windows(names: &[String]) {
+    for name in names {
+        close_terminal_windows(&format!("cockatiel:popout:{}", name));
+    }
+}
+
+pub fn close_terminal_windows(marker: &str) {
     #[cfg(target_os = "macos")]
     {
         let _ = Command::new("osascript")
@@ -1774,9 +1950,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// The TUI's own `config.json` is what a fresh install reads its launch
+    /// default from, so the writer that generates the file has to emit that key
+    /// — and has to do it as a MERGE, because the same file is the operator's to
+    /// put other settings in.
     #[test]
-    fn upsert_env_key_generates_and_preserves() {
-        let tmp = std::env::temp_dir().join(format!("cockatiel-upsert-{}", uuid::Uuid::now_v7()));
+    fn the_tui_config_writer_emits_the_launch_default_without_clobbering() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-tuicfg-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("config.json");
+
+        // Nothing said yet -> the built-in default, i.e. "launch the engine".
+        assert_eq!(read_launch_engine_default(&path), None);
+
+        // A fresh install: the file is generated, and it says the default.
+        ensure_tui_config(&path);
+        assert!(path.is_file(), "a fresh install must get a config.json");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written[LAUNCH_ENGINE_KEY], serde_json::json!(true));
+        assert_eq!(read_launch_engine_default(&path), Some(true));
+
+        // Idempotent, and an operator's own value is never overwritten.
+        ensure_tui_config(&path);
+        assert_eq!(read_launch_engine_default(&path), Some(true));
+        std::fs::write(&path, r#"{"launch_engine": false, "operator_setting": 7}"#).unwrap();
+        ensure_tui_config(&path);
+        assert_eq!(read_launch_engine_default(&path), Some(false), "--no-engine by config must survive a write");
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(merged["operator_setting"], serde_json::json!(7), "another key must survive");
+
+        // A key added later still lands in a file that predates it...
+        std::fs::write(&path, r#"{"operator_setting": 7}"#).unwrap();
+        ensure_tui_config(&path);
+        assert_eq!(read_launch_engine_default(&path), Some(true));
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(merged["operator_setting"], serde_json::json!(7));
+
+        // ...and a file we cannot read as an object is left completely alone
+        // rather than replaced. A missing default is recoverable; a clobbered
+        // operator config is not.
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        ensure_tui_config(&path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2, 3]");
+        assert_eq!(read_launch_engine_default(&path), None, "an array is not a config object");
+
+        // A non-boolean value is "nothing said", never a guessed `false`.
+        std::fs::write(&path, r#"{"launch_engine": "yes"}"#).unwrap();
+        assert_eq!(read_launch_engine_default(&path), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The TUI's `config.json` sits in the same directory `find_engine_addr`
+    /// probes for an engine address. If that probe answered from a file holding
+    /// none of the address keys, every operator would silently get the built-in
+    /// default port — and the engine's real port would never be discovered.
+    #[test]
+    fn the_tui_config_does_not_hijack_engine_address_discovery() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-addr-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // The TUI's own file, written by the writer above.
+        let tui = tmp.join("config.json");
+        ensure_tui_config(&tui);
+        let tui_config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&tui).unwrap()).unwrap();
+        let has_addr_key = ["engine_ip", "engine_port", "engine_pin"]
+            .iter()
+            .any(|k| tui_config.get(*k).is_some());
+        assert!(!has_addr_key, "the TUI config must not look like an engine-address file");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn upsert_env_key_generates_and_preserves() {        let tmp = std::env::temp_dir().join(format!("cockatiel-upsert-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&tmp).unwrap();
         let path = tmp.join(".env");
         std::fs::write(&path, "# comment\nPORT=9736\n").unwrap();

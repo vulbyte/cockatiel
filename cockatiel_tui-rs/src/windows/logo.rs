@@ -81,13 +81,16 @@ impl Window for LogoWindow {
         let paragraph = Paragraph::new(lines).block(block);
         paragraph.render(area, buf);
 
-        // Hotkey bar at bottom of window
-        let hotkey_area = Rect { x: area.x + 1, y: area.y + area.height.saturating_sub(1), width: area.width.saturating_sub(2), height: 1 };
-        let hotkeys = Line::from(vec![
-            Span::styled("w", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]);
-        let hotkey_para = Paragraph::new(hotkeys);
-        hotkey_para.render(hotkey_area, buf);
+        // Hotkey bar: wrapped to this window's width so it is never clipped.
+        let hotkey = crate::windows::hotkey_wrap::layout(
+            &[(
+                "w".to_string(),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )],
+            area,
+            area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 }),
+        );
+        Paragraph::new(hotkey.lines).render(hotkey.area, buf);
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent, _stats: &mut GlobalStats) -> Option<Action> {

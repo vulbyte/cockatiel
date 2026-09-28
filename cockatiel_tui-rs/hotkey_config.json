@@ -3,6 +3,7 @@
     "Tab": "FocusNext",
     "BackTab": "FocusPrev",
     "q": "Quit",
+    "p": "TogglePipelinePause",
     "Ctrl+c": "Quit"
   },
   "modules": {
@@ -13,6 +14,9 @@
     "c": "DuplicateModule",
     "b": "ClearModuleConfig",
     "e": "EditConfig",
+    "E": "EditConfig",
+    "R": "RestartEngine",
+    "X": "RemoveEngine",
     "t": "RunTests",
     "Enter": "SelectModule",
     "C": "EditCredentials"

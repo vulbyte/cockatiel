@@ -33,7 +33,7 @@ impl WsServer {
             let listener = match TcpListener::bind(addr).await {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("WS server failed to bind: {}", e);
+                    crate::app::supervisor_log_global(format!("WS server failed to bind: {}", e));
                     return;
                 }
             };
@@ -46,7 +46,7 @@ impl WsServer {
                         let ws_command_tx = ws_command_tx.clone();
                         tokio::spawn(handle_child(stream, peer_addr, auth_token, rx, ws_command_tx));
                     }
-                    Err(e) => eprintln!("WS server: accept error: {}", e),
+                    Err(e) => crate::app::supervisor_log_global(format!("WS server: accept error: {}", e)),
                 }
             }
         });
@@ -63,7 +63,7 @@ async fn handle_child(
     let mut ws_stream = match accept_async(stream).await {
         Ok(ws) => ws,
         Err(e) => {
-            eprintln!("WS server: accept error: {}", e);
+            crate::app::supervisor_log_global(format!("WS server: accept error: {}", e));
             return;
         }
     };
@@ -83,7 +83,7 @@ async fn handle_child(
         let container = match Container::decode(data.as_slice()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("WS server: decode error: {}", e);
+                crate::app::supervisor_log_global(format!("WS server: decode error: {}", e));
                 return;
             }
         };
@@ -139,7 +139,7 @@ async fn handle_child(
         }
     }
 
-    eprintln!("WS server: child {} authenticated", peer_addr);
+    crate::app::supervisor_log_global(format!("WS server: child {} authenticated", peer_addr));
 
     let (mut sink, mut stream) = ws_stream.split();
     let child_uuid = my_uuid.clone();
