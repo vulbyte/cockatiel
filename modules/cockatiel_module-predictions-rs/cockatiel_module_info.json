@@ -1,0 +1,11 @@
+{
+  "name": "predictions",
+  "description": "chat-command predictions — !pred start/stop/bet, zero-sum parimutuel payouts; spawns its own display window",
+  "version": "0.1.0",
+  "capabilities": "preprocess",
+  "root_file": "./src/bin/prediction_brain.rs",
+  "launch_command": "cargo run",
+  "command_flags": ["--release", "--bin", "prediction_brain"],
+  "autostart": false,
+  "terminal": false
+}

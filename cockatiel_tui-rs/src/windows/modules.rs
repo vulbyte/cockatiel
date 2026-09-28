@@ -1768,9 +1768,11 @@ fn editor_key(&mut self, key: crossterm::event::KeyEvent, hotkeys: &HotkeyConfig
             let row = &mut ed.rows[ed.selected];
             let mut chars: Vec<char> = row.value.chars().collect();
             let pos = row.cursor.min(chars.len());
-            for c in text.chars() {
-                chars.insert(pos, c);
-            }
+            // splice inserts the WHOLE string at pos, in order. Inserting one
+            // char at the same `pos` per iteration reverses the paste (each
+            // char lands before the previous one): "https://" came out as
+            // "//:sptth". A paste is one logical edit at the cursor.
+            chars.splice(pos..pos, text.chars());
             row.value = chars.into_iter().collect();
             row.cursor = pos + text.chars().count();
         }
@@ -2161,6 +2163,64 @@ SECRET=s3
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(tmp.join("config.json")).unwrap()).unwrap();
         assert_eq!(cfg["model"], "mms", "discard should not save: {}", cfg);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn editor_paste_keeps_the_text_in_order_at_the_cursor() {
+        // Regression: pasting inserted each char at the SAME cursor index, so
+        // every char landed before the previous one and the paste came out
+        // reversed -- "https://" became "//:sptth". A paste is ONE logical
+        // edit at the cursor, in the order the text arrives.
+        let tmp = std::env::temp_dir().join(format!("cockatiel-paste-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("config.json"), r#"{"model":"mms","model_source":""}"#).unwrap();
+
+        let mut w = ModulesWindow::new();
+        w.start_config_editor(ConfigTarget::Module, "test-mod", tmp.clone());
+
+        // Select the `model_source` value row directly (its path is the key
+        // "model_source"), so the test does not depend on the flatten order.
+        {
+            use super::Seg;
+            let idx = w
+                .editing
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .position(|r| {
+                    matches!(r.path.first(), Some(Seg::Key(k)) if k == "model_source")
+                })
+                .expect("model_source row must exist");
+            let mut ed = w.editing.take().unwrap();
+            ed.selected = idx;
+            w.editing = Some(ed);
+        }
+
+        let url = "https://huggingface.co/facebook/mms-1b-all";
+        assert!(w.editor_paste(url), "paste should be consumed by the editor");
+
+        let row = w.editing.as_ref().unwrap().rows[w.editing.as_ref().unwrap().selected].clone();
+        assert_eq!(row.value, url, "paste must arrive in order, not reversed");
+        assert_eq!(
+            row.cursor,
+            row.value.chars().count(),
+            "cursor must sit after the pasted text"
+        );
+
+        // Pasting in the middle (cursor moved back two chars) inserts there.
+        let mut ed = w.editing.take().unwrap();
+        ed.rows[ed.selected].cursor = ed.rows[ed.selected].value.chars().count() - 2;
+        w.editing = Some(ed);
+        assert!(w.editor_paste("XX"));
+        let row = w.editing.as_ref().unwrap().rows[w.editing.as_ref().unwrap().selected].clone();
+        assert_eq!(
+            row.value,
+            "https://huggingface.co/facebook/mms-1b-aXXll",
+            "mid-string paste must splice at the cursor"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
