@@ -92,6 +92,11 @@ pub fn engine_config_path() -> PathBuf {
 /// file reads as a setting and not as a mirror of one command-line switch.
 pub const LAUNCH_ENGINE_KEY: &str = "launch_engine";
 
+/// The TUI's `auto_start` setting: whether autostart-tagged modules are
+/// launched automatically (and the paused pipeline resumed) once the TUI
+/// connects to the engine — a one-click start for a streamer.
+pub const AUTO_START_KEY: &str = "auto_start";
+
 /// The TUI's `launch_engine` setting, or `None` when the file is missing, is not
 /// an object, or has no usable value for the key.
 ///
@@ -102,6 +107,15 @@ pub fn read_launch_engine_default(path: &Path) -> Option<bool> {
     let content = std::fs::read_to_string(path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
     config.get(LAUNCH_ENGINE_KEY).and_then(|v| v.as_bool())
+}
+
+/// The TUI's `auto_start` setting, or `None` when the file is missing, is not
+/// an object, or has no usable value. `None` means "nothing said" and the
+/// caller uses the built-in default (off — autostart modules stay manual).
+pub fn read_auto_start(path: &Path) -> Option<bool> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config.get(AUTO_START_KEY).and_then(|v| v.as_bool())
 }
 
 /// Make sure the TUI's `config.json` exists and carries every default key.
@@ -135,13 +149,21 @@ pub fn ensure_tui_config(path: &Path) {
     let serde_json::Value::Object(map) = &mut root else {
         return;
     };
-    if map.contains_key(LAUNCH_ENGINE_KEY) {
+    // Add each default key independently, so an existing config that predates a
+    // key still gains it (the early-return-on-any-key would have skipped adding
+    // `auto_start` to a file that already had `launch_engine`).
+    let mut changed = false;
+    if !map.contains_key(LAUNCH_ENGINE_KEY) {
+        map.insert(LAUNCH_ENGINE_KEY.to_string(), serde_json::Value::Bool(true));
+        changed = true;
+    }
+    if !map.contains_key(AUTO_START_KEY) {
+        map.insert(AUTO_START_KEY.to_string(), serde_json::Value::Bool(false));
+        changed = true;
+    }
+    if !changed {
         return;
     }
-    map.insert(
-        LAUNCH_ENGINE_KEY.to_string(),
-        serde_json::Value::Bool(true),
-    );
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

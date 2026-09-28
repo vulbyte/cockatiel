@@ -222,6 +222,10 @@ pub struct AppState {
     /// The main loop only launches `pending_launch` when this is set, so a
     /// failed credential save never launches the module.
     pub pending_launch_confirmed: bool,
+    /// One-click start: when true, the TUI launches autostart-tagged modules
+    /// and resumes the pipeline on the first engine connect. Set from the
+    /// TUI's `auto_start` config at startup; a runtime toggle can flip it.
+    pub auto_start: bool,
     /// Supervisor-side module lifecycle status: "starting" / "connected" /
     /// "crashed" / "stopped". Merged over the engine-reported status at render.
     pub module_runs: Arc<Mutex<HashMap<String, String>>>,
@@ -318,6 +322,7 @@ impl AppState {
             credential_session: None,
             pending_launch: None,
             pending_launch_confirmed: false,
+            auto_start: false,
             module_runs: Arc::new(Mutex::new(HashMap::new())),
             rebuild_tx: None,
             rebuild_attempts: Arc::new(Mutex::new(HashMap::new())),

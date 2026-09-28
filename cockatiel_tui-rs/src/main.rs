@@ -220,6 +220,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // engine). Resolved ONCE, here, so the flag's effect is a value the launch
     // site reads rather than a second launch site.
     let should_launch = should_launch_engine(cli.engine_launch, config_launch_engine);
+    // One-click start for a streamer: when `auto_start` is on, the TUI launches
+    // every autostart-tagged module and resumes the pipeline the moment it
+    // connects to the engine — the whole stack comes up on launch.
+    let auto_start = supervisor::read_auto_start(&tui_config_path).unwrap_or(false);
 
     let hotkeys = load_hotkeys(&config_dir.join("hotkey_config.json"));
     let colors = load_colors(&config_dir.join("color_config.json"));
@@ -394,6 +398,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = AppState::new(colors, hotkeys);
+    state.auto_start = auto_start;
 
     // Auto-rebuild channel: a crashed module's name is sent here and the main
     // loop rebuilds + relaunches it (capped to avoid infinite loops).
@@ -565,6 +570,11 @@ async fn run_app(
     // the whole stats struct) cannot rewind the phase mid-blink.
     let mut pause_flash_tick: u64 = 0;
 
+    // One-click start: fires ONCE on the first engine connect (when auto_start
+    // is on), launching autostart-tagged modules and resuming the paused
+    // pipeline. A reconnect does not re-fire it.
+    let mut auto_start_done = false;
+
     // Unresponsive watchdog cadence (only runs when no input is pending).
     let mut watchdog_last = Instant::now();
     // Modules observed looking-dead once; they must look dead on TWO consecutive
@@ -620,6 +630,17 @@ async fn run_app(
             }
             maybe_ws = ws_event_rx.recv() => {
                 if let Some(ev) = maybe_ws {
+                    if matches!(ev, WsEvent::Connected) && state.auto_start && !auto_start_done {
+                        auto_start_done = true;
+                        auto_start_once(
+                            state,
+                            supervisor,
+                            &plugins,
+                            port,
+                            pin,
+                            &ws_command_tx,
+                        ).await;
+                    }
                     handle_ws_event(ev, state, &ws_command_tx, &ws_broadcast_tx);
                     while let Ok(ev) = ws_event_rx.try_recv() {
                         handle_ws_event(ev, state, &ws_command_tx, &ws_broadcast_tx);
@@ -1776,6 +1797,7 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::RunTests
             | Action::UserQuery(_, _)
             | Action::TogglePipelinePause
+            | Action::ToggleAutoStart
             | Action::RemoveEngine
             | Action::RestartEngine
     )
@@ -1965,6 +1987,61 @@ fn request_launch(
         let _ = launch_tx.send((plugin.manifest.name, result));
     });
     true
+}
+
+/// The modules whose manifest has `autostart: true`. `autostart` is not a
+/// parsed `ModuleManifest` field — it is read from the raw manifest JSON (the
+/// same way `ToggleAutostart` flips it), so a module missing the flag or whose
+/// manifest cannot be read is treated as not-autostart.
+fn autostart_module_names(plugins: &[crate::plugins::Plugin]) -> Vec<String> {
+    plugins
+        .iter()
+        .filter(|p| {
+            let path = p.directory.join(crate::plugins::MANIFEST_FILENAME);
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                .and_then(|m| m.get("autostart").and_then(|v| v.as_bool()))
+                .unwrap_or(false)
+        })
+        .map(|p| p.manifest.name.clone())
+        .collect()
+}
+
+/// One-click start: on the first engine connect, launch every module whose
+/// manifest has `autostart: true`, then resume the pipeline (the engine boots
+/// paused, so without this nothing would dispatch until the operator pressed
+/// `p`). Fires exactly once per TUI session.
+async fn auto_start_once(
+    state: &mut AppState,
+    supervisor: &mut supervisor::ProcessTable,
+    plugins: &[crate::plugins::Plugin],
+    port: u16,
+    pin: u32,
+    ws_command_tx: &mpsc::UnboundedSender<WsCommand>,
+) {
+    let autostart = autostart_module_names(plugins);
+    if !autostart.is_empty() {
+        supervisor_log(
+            state,
+            format!("[supervisor] auto_start: launching {} module(s)", autostart.len()),
+        );
+        for name in &autostart {
+            // Skip already-running and already-starting modules; each launch is
+            // async (build can take a while) and reports back via launch_rx.
+            request_launch(state, name, supervisor, plugins, port, pin, supervisor::LaunchMode::Prebuilt);
+        }
+    }
+    // Resume the engine pipeline so the freshly-started stack actually
+    // dispatches chat. The engine boots paused to give modules time to connect;
+    // at this point they are launching, so open the gate. Idempotent: if the
+    // pipeline was never paused this is a `changed: false` no-op.
+    send_engine_query(
+        ws_command_tx,
+        "pipeline_set_paused".to_string(),
+        serde_json::json!({ "paused": false }).to_string(),
+    );
+    supervisor_log(state, "[supervisor] auto_start: pipeline resumed");
 }
 
 /// Handle a completed background launch: spawn the resolved command, wire up
@@ -2752,6 +2829,36 @@ async fn dispatch_action(
                 pipeline_pause_toggle_sql(state.stats.pipeline_paused),
             );
         }
+        Action::ToggleAutoStart => {
+            // Flip one-click start: autostart-tagged modules launch (and the
+            // pipeline resumes) on engine connect. Persisted to the TUI's own
+            // config.json so the choice survives a restart.
+            let new_value = !state.auto_start;
+            state.auto_start = new_value;
+            let tui_config_path = std::env::current_dir().unwrap_or_default().join("config.json");
+            if let Some(mut root) = std::fs::read_to_string(&tui_config_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            {
+                if let Some(obj) = root.as_object_mut() {
+                    obj.insert(
+                        supervisor::AUTO_START_KEY.to_string(),
+                        serde_json::json!(new_value),
+                    );
+                    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+                        let _ = std::fs::write(&tui_config_path, pretty);
+                    }
+                }
+            }
+            supervisor_log(
+                state,
+                format!(
+                    "[supervisor] auto_start {} — autostart modules {}launch on connect",
+                    if new_value { "ON" } else { "OFF" },
+                    if new_value { "will " } else { "will NOT " },
+                ),
+            );
+        }
         // The two engine-only actions, guarded HERE rather than at the key
         // site, so no path into dispatch can skip the check. `is_engine_scoped`
         // keeps the list and the guard in one place; the arm before them turns
@@ -3330,8 +3437,10 @@ mod tests {
         // and the global pause toggle (it is engine-scoped, not module-scoped).
         assert!(!is_module_scoped(&Action::EditConfig(String::new())));
         assert!(!is_module_scoped(&Action::TogglePipelinePause));
+        assert!(!is_module_scoped(&Action::ToggleAutoStart), "one-click start is global, not a module action");
         assert!(is_dispatchable(&Action::EditConfig(String::new())));
         assert!(is_dispatchable(&Action::TogglePipelinePause));
+        assert!(is_dispatchable(&Action::ToggleAutoStart));
 
         // A module row is a module again, so every one of them is allowed.
         let module = state_with(1);
@@ -3346,6 +3455,62 @@ mod tests {
         other.windows = vec![Box::new(crate::windows::LogWindow::new())];
         other.active_window = WindowId::Log;
         assert!(focused_selection_is_module(&other));
+    }
+
+    /// `autostart_module_names` reads `autostart` from each plugin's raw
+    /// manifest (not the parsed struct), so a missing flag or unreadable
+    /// manifest is treated as not-autostart. This is the one-click-start
+    /// pick list.
+    #[test]
+    fn autostart_picks_only_manifests_that_say_true() {
+        use crate::plugins::MANIFEST_FILENAME;
+        use crate::plugins::ModuleManifest;
+
+        fn plugin(name: &str, dir: std::path::PathBuf) -> crate::plugins::Plugin {
+            crate::plugins::Plugin {
+                manifest: ModuleManifest {
+                    name: name.to_string(),
+                    description: String::new(),
+                    version: String::new(),
+                    capabilities: String::new(),
+                    root_file: String::new(),
+                    launch_command: String::new(),
+                    command_flags: Vec::new(),
+                    terminal: false,
+                    credentials: Vec::new(),
+                    binary: Default::default(),
+                    build_command: None,
+                    build_flags: Vec::new(),
+                },
+                directory: dir,
+            }
+        }
+
+        let tmp = std::env::temp_dir().join(format!("ck-autostart-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Three module dirs: one autostart:true, one autostart:false, one with
+        // no autostart key at all.
+        let on_dir = tmp.join("on");
+        std::fs::create_dir_all(&on_dir).unwrap();
+        std::fs::write(on_dir.join(MANIFEST_FILENAME), r#"{"name":"on","autostart":true}"#).unwrap();
+
+        let off_dir = tmp.join("off");
+        std::fs::create_dir_all(&off_dir).unwrap();
+        std::fs::write(off_dir.join(MANIFEST_FILENAME), r#"{"name":"off","autostart":false}"#).unwrap();
+
+        let unset_dir = tmp.join("unset");
+        std::fs::create_dir_all(&unset_dir).unwrap();
+        std::fs::write(unset_dir.join(MANIFEST_FILENAME), r#"{"name":"unset"}"#).unwrap();
+
+        let plugins = vec![
+            plugin("on", on_dir),
+            plugin("off", off_dir),
+            plugin("unset", unset_dir),
+        ];
+        assert_eq!(autostart_module_names(&plugins), vec!["on".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// End-to-end through the real dispatch: `E` with the engine row selected
