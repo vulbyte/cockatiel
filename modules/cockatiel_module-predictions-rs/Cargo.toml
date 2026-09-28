@@ -14,7 +14,7 @@ name = "prediction_display"
 path = "src/bin/prediction_display.rs"
 
 [dependencies]
-cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "184ccbcc049e74701ed8cbf1ec1997a60c8cfdf3" }
+cockatiel-client = { git = "https://github.com/vulbyte/cockatiel_client-rs", rev = "e36a9907f3c2fc11304ca825ecf472f008291bf8" }
 tokio = { version = "1.38", features = ["full"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
