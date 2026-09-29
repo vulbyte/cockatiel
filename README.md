@@ -36,3 +36,12 @@ I personally prefer C/C++/Odin, but Cockatiel is frontend-facing and handles inp
 > Why GPLv2?
 
 I don't want this project hijacked or obfuscated by a larger company. This is meant to be owned by the community and something everyone benefits from, not just me.
+
+## Modules
+
+Cockatiel's modules extend the pipeline (censor, score, translate, synthesize speech, archive, …). There are two tiers:
+
+- **[Supported modules (Rust)](https://github.com/vulbyte/cockatiel/tree/main/modules)** — the default, stable set. Native Rust binaries, no interpreter, no environment setup; the supervisor runs them directly. These are what the majority of users should use.
+- **[Experimental collection (Python)](https://github.com/vulbyte/cockatiel_module-tts_service-py)** — an opt-in escape hatch for model families the Rust set does not cover (e.g. `tts-experimental-py` for XTTS/Kokoro/F5 and other TTS models sherpa-onnx doesn't support). These need a working Python environment and are started manually, for users who want to go deeper.
+
+The default TTS module is **`tts-rs`** (Rust, zero-setup); `tts-experimental-py` is the opt-in alternative.
