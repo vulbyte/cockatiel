@@ -44,63 +44,259 @@ const ENGINE_REMOVED_STATUS: &str = "no engine";
 /// [`crate::hotkeys::PrimaryKeys`].
 const EDIT_PRIMARY_KEY: (&str, &str) = ("edit", "E");
 
-/// Row 0 of the modules window's list. The engine is a real, selectable row
-/// ahead of the modules, not a status line above them.
-pub const ENGINE_ROW: usize = 0;
+/// Row index of the ENGINE row in the grouped list. Row 0 is the `[ENGINE]`
+/// group header; the engine row itself sits directly under it. Kept as a named
+/// constant because the default selection lands here — the operator opens the
+/// window onto the engine, not onto the header that merely names it.
+pub const ENGINE_ROW: usize = 1;
 
-/// One selectable row in the modules window's unified list.
-///
-/// The list is the ENGINE followed by every entry of `GlobalStats::module_entries`,
-/// so `self.selected` indexes THIS space — one past where it used to point.
-/// Modelling the rows explicitly is what keeps that honest: every site that
-/// used to index `module_entries` directly now goes through [`EntryRow`], and
-/// `Module(_)` is the only variant that can yield a module name, so a
-/// module-scoped action cannot silently fire on a neighbouring row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryRow {
+/// The pipeline stage a group of rows belongs to, in pipeline order: input
+/// (adapters) is the earliest, pre-process and in-process are the two middle
+/// stages, post-process is the latest, and the engine is a thing apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
     Engine,
-    /// Index into `GlobalStats::module_entries`.
+    Adapters,
+    PreProcess,
+    InProcess,
+    PostProcess,
+}
+
+/// What one row in the grouped list IS: a group header, the engine, or a
+/// module. Split from [`GroupedRow`] so the row's SHAPE is matchable on its
+/// own — a header is selectable but names no module, and the engine is the one
+/// row the engine-only actions may fire from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A group's `[NAME]` header. Selectable, highlights like any row, but
+    /// names neither a module nor the engine: the hint bar narrows to the
+    /// window-level keys and module-scoped actions are refused.
+    Header,
+    /// The engine row. Selectable, not a module, and the one row the two
+    /// engine-only actions (restart / remove) can fire from.
+    Engine,
+    /// A module row, by index into `GlobalStats::module_entries`.
     Module(usize),
 }
 
-impl EntryRow {
-    /// How many selectable rows a list of `module_count` modules has. Never
-    /// zero: the engine row exists even with no modules registered.
-    pub fn total(module_count: usize) -> usize {
-        module_count + 1
-    }
+/// One selectable row in the modules window's grouped list.
+///
+/// The list is a VIEW over `GlobalStats::module_entries`, grouped by pipeline
+/// stage: the `[ENGINE]` header + engine row, then one header per non-empty
+/// group followed by its modules, in stage order. `self.selected` indexes THIS
+/// space, and `EntryKind::Module(_)` is the only kind that can yield a module
+/// name, so a module-scoped action cannot silently fire on a header or the
+/// engine row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GroupedRow {
+    pub group: Group,
+    pub kind: EntryKind,
+}
 
-    /// The row at `index`, or `None` when `index` is past the end of the list.
-    pub fn at(index: usize, module_count: usize) -> Option<Self> {
-        if index == ENGINE_ROW {
-            Some(EntryRow::Engine)
-        } else {
-            index
-                .checked_sub(1)
-                .filter(|i| *i < module_count)
-                .map(EntryRow::Module)
-        }
+/// The pipeline stage a module's reported `position` belongs to.
+///
+/// Mirrors the supervisor's `config_list_key`: `input` is the adapter group,
+/// `preprocess`/`inprocess`/`postprocess` are the three pipeline stages,
+/// `output` is treated as post-process (it is the engine's name for the stage
+/// the message is in when it is handed to a post-processor), and anything
+/// unknown falls into pre-process — the same default the engine's ordering
+/// uses for a capability it does not recognise.
+pub fn group_for_position(position: &str) -> Group {
+    match position {
+        "input" => Group::Adapters,
+        "preprocess" => Group::PreProcess,
+        "inprocess" => Group::InProcess,
+        "postprocess" | "output" => Group::PostProcess,
+        _ => Group::PreProcess,
     }
+}
 
-    /// The index into `module_entries`, or `None` for the engine row.
+/// The non-engine groups, in pipeline order.
+const PIPELINE_GROUPS: [Group; 4] = [
+    Group::Adapters,
+    Group::PreProcess,
+    Group::InProcess,
+    Group::PostProcess,
+];
+
+impl GroupedRow {
+    /// The index into `module_entries`, or `None` for a header or the engine.
     pub fn module_index(self) -> Option<usize> {
-        match self {
-            EntryRow::Engine => None,
-            EntryRow::Module(i) => Some(i),
+        match self.kind {
+            EntryKind::Module(i) => Some(i),
+            _ => None,
         }
     }
 
-    /// The module name this row names, or `None` for the engine row.
+    /// The module name this row names, or `None` for a header or the engine.
     ///
-    /// `None` is the point: the engine is not a module, so a caller that needs
-    /// a module has nothing to do here. Handing back a neighbouring row's name
-    /// instead is how "stop" ends up killing a module nobody selected.
+    /// `None` is the point: a header names a stage and the engine is not a
+    /// module, so a caller that needs a module has nothing to do here.
+    /// Handing back a neighbouring row's name instead is how "stop" ends up
+    /// killing a module nobody selected.
     pub fn module_name(self, stats: &GlobalStats) -> Option<String> {
         self.module_index()
             .and_then(|i| stats.module_entries.get(i))
             .map(|m| m.name.clone())
     }
+
+    /// Whether this row is the engine row (not a header, and not a module).
+    pub fn is_engine(self) -> bool {
+        matches!(self.kind, EntryKind::Engine)
+    }
+
+    /// Whether this row is a group header.
+    pub fn is_header(self) -> bool {
+        matches!(self.kind, EntryKind::Header)
+    }
 }
+
+/// The ordered selectable rows for the current stats: the `[ENGINE]` header
+/// and the engine row, then — in pipeline order — each non-empty group's
+/// header followed by its modules.
+///
+/// A group with no modules gets NO header at all: an empty `[ADAPTERS]` title
+/// with nothing under it is noise, not information, and skipping it keeps the
+/// window tight when the operator only uses two of the four stages. The engine
+/// header and row are unconditional, so the list is never empty — there is
+/// always the engine to sit on and look at.
+pub fn grouped_rows(stats: &GlobalStats) -> Vec<GroupedRow> {
+    let mut rows = Vec::new();
+    rows.push(GroupedRow {
+        group: Group::Engine,
+        kind: EntryKind::Header,
+    });
+    rows.push(GroupedRow {
+        group: Group::Engine,
+        kind: EntryKind::Engine,
+    });
+    for group in PIPELINE_GROUPS {
+        let members: Vec<usize> = stats
+            .module_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| group_for_position(&m.position) == group)
+            .map(|(i, _)| i)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        rows.push(GroupedRow {
+            group,
+            kind: EntryKind::Header,
+        });
+        for mi in members {
+            rows.push(GroupedRow {
+                group,
+                kind: EntryKind::Module(mi),
+            });
+        }
+    }
+    rows
+}
+
+/// One display line of the grouped list: a real row, or the blank separator
+/// line that separates groups.
+///
+/// Blank separators are SPACING, not rows: selection never lands on them and
+/// they are absent from the row model entirely. They exist only here, in the
+/// display model, because they still consume a screen line — and it is the
+/// screen lines the scroll arithmetic must count or a row near a group
+/// boundary silently falls off the bottom of the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupedLine {
+    Blank,
+    Row { index: usize },
+}
+
+/// The full ordered list of display lines for `rows`: every row, plus a blank
+/// separator before each group header that is not the first line of the list.
+///
+/// Rows and lines are deliberately NOT 1:1 — the same model the config editor
+/// uses for its tree, where a section header costs a line that is not an
+/// editable row. `self.scroll` and the render loop live in this space;
+/// `self.selected` stays in row space and `grouped_selected_line` bridges the
+/// two.
+fn grouped_lines(rows: &[GroupedRow]) -> Vec<GroupedLine> {
+    let mut out = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if row.is_header() && i > 0 {
+            out.push(GroupedLine::Blank);
+        }
+        out.push(GroupedLine::Row { index: i });
+    }
+    out
+}
+
+/// The display-line index of the selected row, or 0 when it is not in the list.
+fn grouped_selected_line(lines: &[GroupedLine], selected: usize) -> usize {
+    lines
+        .iter()
+        .position(|l| matches!(l, GroupedLine::Row { index } if *index == selected))
+        .unwrap_or(0)
+}
+
+/// The display label for a group header, with the indentation the mock draws:
+/// top-level groups (`[ENGINE]`, `[ADAPTERS]`) sit at the same 2-space base as
+/// the module rows, the nested pipeline stages (`[PRE-PROCESS]`, …) sit four
+/// in, so the nesting reads at a glance.
+fn header_label(group: Group) -> String {
+    let name = match group {
+        Group::Engine => "ENGINE",
+        Group::Adapters => "ADAPTERS",
+        Group::PreProcess => "PRE-PROCESS",
+        Group::InProcess => "IN-PROCESS",
+        Group::PostProcess => "POST-PROCESS",
+    };
+    let indent = match group {
+        Group::PreProcess | Group::InProcess | Group::PostProcess => "    ",
+        Group::Engine | Group::Adapters => "  ",
+    };
+    format!("{indent}[{name}]")
+}
+
+/// The direction a Shift+arrow moves a module through the pipeline stages.
+///
+/// Named for the pipeline, not the key: "earlier" (toward pre-process) is what
+/// Shift+up asks for and "later" (toward post-process) is what Shift+down asks
+/// for, but the function is really about stage order, so it is the order that
+/// is named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageDirection {
+    /// Shift+up: toward an earlier stage (post → in → pre).
+    Earlier,
+    /// Shift+down: toward a later stage (pre → in → post).
+    Later,
+}
+
+/// The pipeline stage a module moves to when Shift+arrowed toward an earlier or
+/// later stage, or `None` when it cannot move that way.
+///
+/// Stage order is preprocess < inprocess < postprocess. An `input` adapter is
+/// not in the three-stage chain at all — it feeds the pipeline rather than
+/// running inside it — so it is not moved in either direction. `None` means
+/// "no-op", and only a module already at the requested edge, or an input
+/// adapter, lands here; both are correct to leave alone.
+pub fn shift_stage(position: &str, direction: StageDirection) -> Option<&'static str> {
+    match direction {
+        StageDirection::Earlier => match position {
+            "postprocess" => Some("inprocess"),
+            "inprocess" => Some("preprocess"),
+            _ => None,
+        },
+        StageDirection::Later => match position {
+            "preprocess" => Some("inprocess"),
+            "inprocess" => Some("postprocess"),
+            _ => None,
+        },
+    }
+}
+
+/// The fixed width of the name column in the list, so every module's status
+/// starts on the same x. Wide enough for the longest real module name and for
+/// `cockatiel-engine`; a name that overflows it simply pushes its own status
+/// right rather than being truncated.
+const STATUS_COL: usize = 22;
 
 /// Clamp a stored selection into a list of `total` rows.
 pub fn clamp_selected(selected: usize, total: usize) -> usize {
@@ -150,22 +346,27 @@ pub fn scroll_for(selected: usize, scroll: usize, visible: usize, total: usize) 
 /// after the operator removes the engine there is no connection to restart and
 /// no engine to detach, and offering keys whose press can only be refused is a
 /// bar that lies about the row it is describing.
-fn hint_labels(row: EntryRow, engine_removed: bool) -> &'static [&'static str] {
-    match row {
+fn hint_labels(row: GroupedRow, engine_removed: bool) -> &'static [&'static str] {
+    match row.kind {
+        // A group header names a stage, not a module and not the engine, so
+        // the only keys that mean anything here are the window-level ones
+        // (`select`/`popout`/`users`). The pause toggle is global and is
+        // appended by the caller. Offering start/stop/del on a header would
+        // promise an action the press refuses (see `is_module_scoped`).
+        EntryKind::Header => &["select", "popout", "users"],
         // The engine: open its own config, start/stop it, and — while there IS
         // one — restart or remove it. `select`/`popout`/`users` act on the
-        // WINDOW, so they mean the same thing on every row. The pause toggle is
-        // global and is appended by the caller. `start`/`stop` are the SAME
-        // keys the modules use (s/x): on the engine row the dispatcher turns
-        // them into launch/kill of the engine process rather than of a module.
-        // The rest — del/auto/copy/creds/clear/test — is module-only and is
-        // refused on the engine row (see `is_module_scoped`), so advertising it
-        // would promise an action the key press refuses.
-        EntryRow::Engine if engine_removed => &["edit", "select", "popout", "users"],
-        EntryRow::Engine => &[
+        // WINDOW, so they mean the same thing on every row. `start`/`stop` are
+        // the SAME keys the modules use (s/x): on the engine row the dispatcher
+        // turns them into launch/kill of the engine process rather than of a
+        // module. The rest — del/auto/copy/creds/clear/test — is module-only
+        // and is refused on the engine row (see `is_module_scoped`), so
+        // advertising it would promise an action the key press refuses.
+        EntryKind::Engine if engine_removed => &["edit", "select", "popout", "users"],
+        EntryKind::Engine => &[
             "edit", "start", "stop", "restart", "detach", "select", "popout", "users",
         ],
-        EntryRow::Module(_) => &[
+        EntryKind::Module(_) => &[
             "start", "stop", "del", "auto", "copy", "creds", "edit", "clear", "test", "select",
             "popout", "users",
         ],
@@ -319,12 +520,13 @@ pub struct EngineRestartNote {
 #[derive(Debug, Clone)]
 pub struct ModulesWindow {
 
-    /// First VISIBLE row of the unified list, in the same index space as
-    /// `selected` (see [`EntryRow`]).
+    /// First VISIBLE display line of the grouped list, in the same line space
+    /// as the render loop (see [`GroupedLine`]).
     pub scroll: usize,
 
-    /// The selected row of the unified list: 0 is the engine, 1..=n are the
-    /// modules. Always an index into THAT list, never into `module_entries`.
+    /// The selected row of the grouped list: 0 is the `[ENGINE]` header,
+    /// [`ENGINE_ROW`] is the engine, the rest are group headers and module
+    /// rows. Always an index into that view, never into `module_entries`.
     pub selected: usize,
 
     /// Clickable region of the pending prompt's link, set during render.
@@ -524,7 +726,10 @@ impl ModulesWindow {
     pub fn new() -> Self {
         Self {
             scroll: 0,
-            selected: 0,
+            // Land on the ENGINE row, not the `[ENGINE]` header above it: the
+            // header merely names the group, while the engine row is where the
+            // engine's own actions (and its config editor) live.
+            selected: ENGINE_ROW,
             link_rect: None,
             link_url: None,
             editing: None,
@@ -1201,15 +1406,41 @@ fn engine_restart_notes(rows: &[EditorRow]) -> Vec<EngineRestartNote> {
 }
 
 impl ModulesWindow {
-    /// The row `self.selected` names, clamped into the current row space.
+    /// The row `self.selected` names, clamped into the current grouped view.
     ///
-    /// Never fails: the engine row always exists, so a selection left pointing
-    /// past the end of a shrunken module list resolves to the ENGINE rather
-    /// than to some module the operator is not looking at. Every selection
-    /// consumer goes through here, which is what keeps one index space for
-    /// `selected` instead of two.
-    fn selected_row(&self, stats: &GlobalStats) -> EntryRow {
-        EntryRow::at(self.selected, stats.module_entries.len()).unwrap_or(EntryRow::Engine)
+    /// Never fails: the engine row always exists (it is not conditional on any
+    /// module), so a selection left pointing past the end of a shrunken module
+    /// list resolves to the ENGINE rather than to some module the operator is
+    /// not looking at. Every selection consumer goes through here, which is
+    /// what keeps one index space for `selected` instead of two.
+    fn selected_row(&self, stats: &GlobalStats) -> GroupedRow {
+        grouped_rows(stats).get(self.selected).copied().unwrap_or(GroupedRow {
+            group: Group::Engine,
+            kind: EntryKind::Engine,
+        })
+    }
+
+    /// The `Action` for a Shift+arrow stage move on the selected row: the
+    /// module's name and the stage it is moving TO.
+    ///
+    /// Rows that name no module (headers, the engine) and modules that cannot
+    /// move the requested direction (input adapters, or a module already at the
+    /// edge) consume the key as a `Noop` rather than falling through — and, for
+    /// an adapter, rather than emitting a move the dispatcher would have to
+    /// refuse.
+    fn stage_action(&self, stats: &GlobalStats, direction: StageDirection) -> Option<Action> {
+        let Some((name, position)) = self
+            .selected_row(stats)
+            .module_index()
+            .and_then(|i| stats.module_entries.get(i))
+            .map(|m| (m.name.clone(), m.position.clone()))
+        else {
+            return Some(Action::Noop);
+        };
+        match shift_stage(&position, direction) {
+            Some(to) => Some(Action::MoveModuleStage(name, to.to_string())),
+            None => Some(Action::Noop),
+        }
     }
 }
 
@@ -1223,23 +1454,21 @@ impl Window for ModulesWindow {
     }
 
     fn selection_is_module(&self, stats: &GlobalStats) -> bool {
-        // The engine row is a real selection that is deliberately not a module,
-        // and the app's fallback (act on the first known module) is exactly the
-        // wrong thing to do with it.
+        // The engine row AND every group header are real selections that are
+        // deliberately not a module, and the app's fallback (act on the first
+        // known module) is exactly the wrong thing to do with them.
         self.selected_row(stats).module_index().is_some()
     }
 
     fn selection_is_engine(&self, stats: &GlobalStats) -> bool {
-        // Row 0. The two engine-only actions (restart / remove) are guarded on
-        // this rather than on "an engine exists", so they can never be fired
-        // from a MODULE row where the app would otherwise fall back to the first
-        // known module.
-        //
+        // Only the ENGINE row is the engine. The `[ENGINE]` header above it
+        // names no module AND no engine, so the two engine-only actions stay
+        // guarded on the row itself rather than on the group.
         // Stays `true` for a removed engine: the row is still selected, and
         // answering "no" there would hand the press to that same fallback.
         // Whether there is anything TO restart is a separate question, answered
         // by the action itself (`RestartOutcome::Removed`).
-        matches!(self.selected_row(stats), EntryRow::Engine)
+        self.selected_row(stats).is_engine()
     }
 
     fn pending_link(&self) -> Option<(Rect, String)> {
@@ -1285,12 +1514,12 @@ impl Window for ModulesWindow {
         // combined rows rather than `module_entries`, and the two have to agree
         // on which row that is or the bar describes a row the highlight is not
         // on.
-        let module_count = stats.module_entries.len();
-        let total_rows = EntryRow::total(module_count);
+        let rows = grouped_rows(stats);
+        let total_rows = rows.len();
         let selected = clamp_selected(self.selected, total_rows);
-        // Cannot be None: the clamp keeps `selected` inside the list and the
-        // list always contains the engine row.
-        let selected_row = EntryRow::at(selected, module_count).unwrap_or(EntryRow::Engine);
+        // Cannot be out of range: the clamp keeps `selected` inside the list
+        // and the list always contains the engine header + engine row.
+        let selected_row = rows[selected];
         let mut hotkey_text = "nav:[j|k|arrows]".to_string();
         hotkey_text.push(' ');
         // `edit` has two bindings on purpose (`e` and `E`); the bar prints the
@@ -1318,13 +1547,20 @@ impl Window for ModulesWindow {
 
         let mut y = inner.y;
 
-        // ── the list: row 0 is the ENGINE, rows 1.. are the modules ──
+        // ── the list: grouped sections, ENGINE first then each stage ──
         //
-        // One list, one selection, one scroll. The engine used to be a status
-        // line pinned above a modules-only list, which made it the one thing in
-        // this window you could not act on. It is a row now, and the [ENGINE]
-        // section header is gone with it: a header above row 0 would read as a
-        // title for the module list underneath it.
+        // One list, one selection, one scroll. The modules are grouped by
+        // pipeline stage ([ENGINE], then input adapters, then the pre/in/post
+        // stages), each group headed by a selectable `[NAME]` line. The engine
+        // is row [`ENGINE_ROW`] under the `[ENGINE]` header — a real, selectable
+        // row, not a status line.
+        //
+        // Scrolling runs over DISPLAY LINES (`grouped_lines`): each group's
+        // header is preceded by a blank separator line that is NOT a row, and
+        // those separators still consume screen rows, so a scroll that counted
+        // only rows would let the selected row fall off the bottom of the
+        // viewport at a group boundary. Selection stays in row space; the two
+        // meet at `grouped_selected_line`.
         let engine_status_color = if stats.engine_status == "connected" && !stats.engine_removed {
             colors.status_color("online")
         } else {
@@ -1336,108 +1572,148 @@ impl Window for ModulesWindow {
         // `Disconnected` must not be able to put a connection back on screen.
         let engine_live = !stats.engine_removed && stats.engine_status == "connected";
 
+        let lines = grouped_lines(&rows);
+        let selected_line = grouped_selected_line(&lines, selected);
         let available_lines = (inner.y + inner.height).saturating_sub(y) as usize;
-        let scroll = scroll_for(selected, self.scroll, available_lines, total_rows);
+        let scroll = scroll_for(selected_line, self.scroll, available_lines, lines.len());
 
         // Modules that currently have an unanswered prompt waiting.
         let prompts_waiting: std::collections::HashSet<&str> =
             prompts.iter().map(|p| p.prompt.origin.as_str()).collect();
 
         let mut rendered_rows: HashMap<String, u16> = HashMap::new();
-        for idx in scroll..total_rows {
-            if y >= inner.y + inner.height || idx >= scroll + available_lines {
+        for line in &lines[scroll..] {
+            if y >= inner.y + inner.height {
                 break;
             }
-            let Some(row) = EntryRow::at(idx, module_count) else { continue };
-            let is_selected = idx == selected && is_active;
-            let (line, name) = match row {
-                EntryRow::Engine => {
-                    // The engine is a different KIND of thing from a module and
-                    // the row has to say so: a diamond instead of a name, one
-                    // column in (modules sit two in), and no `[position]` tag,
-                    // because it is in no stage. Selection is still the same
-                    // full-row highlight a module gets, so "which row am I on"
-                    // never depends on the row's shape.
-                    let row_style = if is_selected {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
-                    } else {
-                        Style::default()
+            match line {
+                // A group separator: spacing, not a row. Consumes a screen line
+                // and nothing else.
+                GroupedLine::Blank => {
+                    y += 1;
+                }
+                GroupedLine::Row { index } => {
+                    let row = rows[*index];
+                    let is_selected = *index == selected && is_active;
+                    let (line, name) = match row.kind {
+                        EntryKind::Header => {
+                            let row_style = if is_selected {
+                                Style::default().fg(Color::Black).bg(Color::Cyan)
+                            } else {
+                                Style::default()
+                            };
+                            (
+                                Line::from(Span::styled(
+                                    header_label(row.group),
+                                    if is_selected {
+                                        row_style
+                                    } else {
+                                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                                    },
+                                )),
+                                None,
+                            )
+                        }
+                        EntryKind::Engine => {
+                            // The engine is a different KIND of thing from a
+                            // module, but it is not named differently on
+                            // screen: it is padded to the SAME name column as a
+                            // module so its status lines up with every other
+                            // status in the window. What separates it is the
+                            // name itself (`cockatiel-engine`, no module has
+                            // that), its own status colour, the PAUSED badge,
+                            // and the engine-only actions the row can fire.
+                            let row_style = if is_selected {
+                                Style::default().fg(Color::Black).bg(Color::Cyan)
+                            } else {
+                                Style::default()
+                            };
+                            // The row is STILL the engine's row after a removal —
+                            // it is the record of "this TUI has no engine", and
+                            // it is where the operator comes back to (`E`) to
+                            // read `shutdown_on_request` and relaunch. What it
+                            // must not show is a connection that no longer
+                            // exists, so the status becomes a flat "no engine"
+                            // instead of the last known connection, and the
+                            // PAUSED badge (a fact about a live gate) goes with
+                            // it.
+                            let status_text = if stats.engine_removed {
+                                ENGINE_REMOVED_STATUS
+                            } else {
+                                stats.engine_status.as_str()
+                            };
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!("  {:<width$}", "cockatiel-engine", width = STATUS_COL),
+                                    row_style
+                                        .fg(if is_selected { Color::Black } else { Color::White }),
+                                ),
+                                Span::styled(
+                                    status_text,
+                                    row_style
+                                        .fg(if is_selected { Color::Black } else { engine_status_color }),
+                                ),
+                            ];
+                            // Flashing PAUSED, inline with the engine status so
+                            // the row never changes shape (a blink must not
+                            // trigger a full repaint). Uses the same
+                            // warning-but-not-broken colour as the NEAR-LIMIT
+                            // row below rather than a hard red: a held pipeline
+                            // is the engine working as designed, not a fault.
+                            if paused_indicator_visible(
+                                engine_live,
+                                stats.pipeline_paused,
+                                crate::app::AppState::pause_flash_on(stats.pause_flash_tick),
+                            ) {
+                                spans.push(Span::styled(
+                                    "  PAUSED",
+                                    row_style
+                                        .fg(if is_selected { Color::Black } else { colors.status_color("stopped") })
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                            (Line::from(spans), None)
+                        }
+                        EntryKind::Module(mi) => {
+                            let module = &stats.module_entries[mi];
+                            let waiting = prompts_waiting.contains(module.name.as_str());
+                            let status_text = if waiting {
+                                "waiting for prompt"
+                            } else {
+                                module.status.as_str()
+                            };
+                            let status_color = if waiting {
+                                Color::Cyan
+                            } else {
+                                colors.status_color(&module.status)
+                            };
+                            let row_style = if is_selected {
+                                Style::default().fg(Color::Black).bg(Color::Cyan)
+                            } else {
+                                Style::default()
+                            };
+                            (
+                                // No `[position]` tag: the group header above the
+                                // row already says which stage it is in.
+                                Line::from(vec![
+                                    Span::styled(
+                                        format!("  {:<width$}", module.name, width = STATUS_COL),
+                                        row_style
+                                            .fg(if is_selected { Color::Black } else { Color::White }),
+                                    ),
+                                    Span::styled(status_text, row_style.fg(status_color)),
+                                ]),
+                                Some(module.name.clone()),
+                            )
+                        }
                     };
-                    let mut spans = vec![
-                        Span::styled(
-                            "\u{25c6} ",
-                            if is_selected { row_style } else { Style::default().fg(Color::Cyan) },
-                        ),
-                        Span::styled(
-                            "cockatiel: ",
-                            if is_selected { row_style } else { Style::default().fg(Color::DarkGray) },
-                        ),
-                    ];
-                    // The row is STILL the engine's row after a removal — it is
-                    // the record of "this TUI has no engine", and it is where
-                    // the operator comes back to (`E`) to read
-                    // `shutdown_on_request` and relaunch. What it must not show
-                    // is a connection that no longer exists, so the status
-                    // becomes a flat "no engine" instead of the last known
-                    // connection, and the PAUSED badge (a fact about a live
-                    // gate) goes with it.
-                    let status_text = if stats.engine_removed {
-                        ENGINE_REMOVED_STATUS
-                    } else {
-                        stats.engine_status.as_str()
-                    };
-                    spans.push(Span::styled(
-                        status_text,
-                        row_style.fg(if is_selected { Color::Black } else { engine_status_color }),
-                    ));
-                    // Flashing PAUSED, inline with the engine status so the row
-                    // never changes shape (a blink must not trigger a full
-                    // repaint). Uses the same warning-but-not-broken colour as
-                    // the NEAR-LIMIT row below rather than a hard red: a held
-                    // pipeline is the engine working as designed, not a fault.
-                    if paused_indicator_visible(
-                        engine_live,
-                        stats.pipeline_paused,
-                        crate::app::AppState::pause_flash_on(stats.pause_flash_tick),
-                    ) {
-                        spans.push(Span::styled(
-                            "  PAUSED",
-                            row_style
-                                .fg(if is_selected { Color::Black } else { colors.status_color("stopped") })
-                                .add_modifier(Modifier::BOLD),
-                        ));
+                    line.render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
+                    if let Some(name) = name {
+                        rendered_rows.insert(name, y);
                     }
-                    (Line::from(spans), None)
+                    y += 1;
                 }
-                EntryRow::Module(mi) => {
-                    let module = &stats.module_entries[mi];
-                    let waiting = prompts_waiting.contains(module.name.as_str());
-                    let status_text = if waiting { "waiting for prompt" } else { module.status.as_str() };
-                    let status_color = if waiting {
-                        Color::Cyan
-                    } else {
-                        colors.status_color(&module.status)
-                    };
-                    let row_style = if is_selected {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
-                    } else {
-                        Style::default()
-                    };
-                    (
-                        Line::from(vec![
-                            Span::styled(format!("  {:<20}", module.name), row_style.fg(if is_selected { Color::Black } else { Color::White })),
-                            Span::styled(status_text, row_style.fg(status_color)),
-                            Span::styled(format!("  [{}]", module.position), Style::default().fg(Color::DarkGray)),
-                        ]),
-                        Some(module.name.clone()),
-                    )
-                }
-            };
-            line.render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
-            if let Some(name) = name {
-                rendered_rows.insert(name, y);
             }
-            y += 1;
         }
 
         // Blank line
@@ -1551,33 +1827,52 @@ impl Window for ModulesWindow {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent, stats: &mut GlobalStats) -> Option<Action> {
-        // Row 0 is the engine, so the row count is one MORE than the module
-        // count and is never zero: with no modules registered at all there is
-        // still the engine row to sit on and look at, which is why the old
-        // "nothing to navigate" early return is gone. Every clamp is against
-        // the combined space, so the up/down bounds can never land on a row
-        // that does not exist (or, worse, on `module_entries[selected]` for a
-        // `selected` that now means something else).
-        let total = EntryRow::total(stats.module_entries.len());
+        // The engine header + engine row always exist, so the row count is
+        // never zero: with no modules registered at all there are still those
+        // two rows to sit on and look at, which is why the old "nothing to
+        // navigate" early return is gone. Every clamp is against the grouped
+        // view, so the up/down bounds can never land on a row that does not
+        // exist (or, worse, on `module_entries[selected]` for a `selected` that
+        // now means something else).
+        let rows = grouped_rows(stats);
+        let lines = grouped_lines(&rows);
+        let total = rows.len();
         self.selected = clamp_selected(self.selected, total);
-        self.scroll = clamp_selected(self.scroll, total);
+        self.scroll = clamp_selected(self.scroll, lines.len());
 
+        use crossterm::event::{KeyCode, KeyModifiers};
+        // The Shift guards matter: crossterm reports Shift+arrow as the plain
+        // key with SHIFT set, and without the guard the navigation arms below
+        // would swallow the very keys Shift+arrow is supposed to mean.
         match key.code {
-            crossterm::event::KeyCode::Char('j') | crossterm::event::KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.selected = clamp_selected(self.selected + 1, total);
-                self.scroll = self.selected;
+                self.scroll = grouped_selected_line(&lines, self.selected);
                 Some(Action::Noop)
             }
-            crossterm::event::KeyCode::Char('k') | crossterm::event::KeyCode::Up => {
+            KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.selected = clamp_selected(self.selected.saturating_sub(1), total);
-                self.scroll = self.selected;
+                self.scroll = grouped_selected_line(&lines, self.selected);
                 Some(Action::Noop)
+            }
+            // Shift+down / Shift+up move the selected module to a later /
+            // earlier pipeline stage (pre < in < post). The window answers only
+            // "which module, and to where"; the rewrite of the engine's
+            // config.json happens in the dispatch, which owns the supervisor.
+            // An input adapter, a header, the engine, or a module already at
+            // the requested edge is a no-op — the key is still consumed, so it
+            // does not fall through to some other binding.
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.stage_action(stats, StageDirection::Later)
+            }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.stage_action(stats, StageDirection::Earlier)
             }
             // `p` is NOT handled here. It is a global (nav) binding, matched
             // before the focused window's own key handling, so the pause toggle
             // works from every window and keeps working with the engine row
             // selected — reaching for it in here would shadow the global.
-            crossterm::event::KeyCode::Char('w') => Some(Action::PopOut("modules".to_string())),
+            KeyCode::Char('w') => Some(Action::PopOut("modules".to_string())),
             _ => None,
         }
     }
@@ -1603,14 +1898,15 @@ impl Window for ModulesWindow {
         // no plugin list contains it, so `Action::EditConfig` would otherwise
         // have nothing to open. A module row returns None so the caller
         // resolves the module's directory from the plugin manifest, which is
-        // where that knowledge lives.
-        match self.selected_row(stats) {
-            EntryRow::Engine => Some((
+        // where that knowledge lives. A header row returns None too — a stage
+        // name has no config to edit.
+        match self.selected_row(stats).kind {
+            EntryKind::Engine => Some((
                 crate::app::ConfigTarget::Engine,
                 ENGINE_ROW_LABEL.to_string(),
                 crate::supervisor::engine_dir(),
             )),
-            EntryRow::Module(_) => None,
+            _ => None,
         }
     }
 
@@ -1960,8 +2256,10 @@ SECRET=s3
 
         let render_to_string = |w: u16, h: u16| -> String {
             let mut win = ModulesWindow::new();
-            // Row 1 is the first module, so the per-module hint set is on show.
-            win.selected = 1;
+            // The first module row: index 3 in the grouped view
+            // ([ENGINE] header, engine, [PRE-PROCESS] header, m0), so the
+            // per-module hint set is on show.
+            win.selected = 3;
             let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
             let colors = crate::colors::load_colors(&std::path::PathBuf::from(""));
             let stats = stats_with_modules(2);
@@ -2083,14 +2381,18 @@ SECRET=s3
         // Next to the engine status on the same row, and in the same warning
         // colour family the NEAR-LIMIT row uses.
         let row = paused.lines().find(|l| l.contains("PAUSED")).expect("paused row");
-        assert!(row.contains("cockatiel: connected"), "indicator not beside the engine status: {:?}", row);
+        assert!(
+            row.contains("cockatiel-engine") && row.contains("connected"),
+            "indicator not beside the engine status: {:?}",
+            row
+        );
 
         assert!(
             !render("connected", true, dark_tick).contains("PAUSED"),
             "the flash's dark phase must clear the indicator"
         );
         let running = render("connected", false, visible_tick);
-        assert!(running.contains("cockatiel: connected"), "baseline render: {}", running);
+        assert!(running.contains("cockatiel-engine"), "baseline render: {}", running);
         assert!(!running.contains("PAUSED"), "connected+running must not show PAUSED:\n{}", running);
 
         let gone = render("disconnected", true, visible_tick);
@@ -2647,20 +2949,23 @@ mod editor_shape_tests {
 
 #[cfg(test)]
 mod engine_row_tests {
-    //! The engine became a selectable row (row 0) rather than a status line
-    //! above the module list. `self.selected` therefore indexes a list that is
-    //! one longer than `stats.module_entries`, and every site that used to
-    //! index `module_entries` directly had to be re-derived. These tests pin the
-    //! new index space and the scroll arithmetic, because the failure mode of
-    //! getting it wrong is silent: the wrong row highlights, the wrong module
-    //! gets stopped, or the list scrolls wrong.
+    //! The engine is a selectable row under a `[ENGINE]` header, ahead of the
+    //! grouped module sections. `self.selected` therefore indexes a VIEW
+    //! (`grouped_rows`) rather than `stats.module_entries`, and every site that
+    //! used to index `module_entries` directly had to be re-derived. These
+    //! tests pin the grouped index space, the display-line scroll, and the
+    //! Shift+arrow stage moves, because the failure mode of getting any of them
+    //! wrong is silent: the wrong row highlights, the wrong module gets
+    //! stopped, or the list scrolls wrong.
     use super::{
-        clamp_selected, scroll_for, EntryRow, ENGINE_REMOVED_STATUS, ENGINE_ROW,
-        ENGINE_ROW_LABEL, Reload, ENGINE_CONFIG_KEYS,
+        clamp_selected, scroll_for, grouped_rows, grouped_lines, grouped_selected_line,
+        GroupedLine, GroupedRow, Group, EntryKind, header_label, shift_stage, StageDirection,
+        ENGINE_REMOVED_STATUS, ENGINE_ROW, ENGINE_ROW_LABEL, STATUS_COL, Reload,
+        ENGINE_CONFIG_KEYS,
     };
     use crate::app::{ConfigTarget, Window};
     use crate::db::GlobalStats;
-    use crate::hotkeys::default_hotkeys;
+    use crate::hotkeys::{default_hotkeys, Action};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::tests::stats_with_modules;
@@ -2677,82 +2982,170 @@ mod engine_row_tests {
         KeyEvent::new(KeyCode::Up, KeyModifiers::empty())
     }
 
+    fn shift_down() -> KeyEvent {
+        KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT)
+    }
+
+    fn shift_up() -> KeyEvent {
+        KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)
+    }
+
+    /// Stats whose modules carry explicit positions, so a test can build a
+    /// group layout other than the all-pre-process one `stats_with_modules`
+    /// makes.
+    fn stats_with(pos: &[(&str, &str)]) -> GlobalStats {
+        crate::db::GlobalStats {
+            module_entries: pos
+                .iter()
+                .map(|(name, position)| {
+                    let mut m = super::tests::module(name);
+                    m.position = position.to_string();
+                    m
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     // ── the row model ────────────────────────────────────────────────────
 
     #[test]
-    fn the_list_is_the_engine_then_every_module() {
-        let stats = stats_with_modules(3);
-        // 3 modules + the engine.
-        assert_eq!(EntryRow::total(stats.module_entries.len()), 4);
-
-        assert_eq!(EntryRow::at(0, 3), Some(EntryRow::Engine));
-        assert_eq!(EntryRow::at(1, 3), Some(EntryRow::Module(0)));
-        assert_eq!(EntryRow::at(2, 3), Some(EntryRow::Module(1)));
-        assert_eq!(EntryRow::at(3, 3), Some(EntryRow::Module(2)));
-        // Past the end is not a row, rather than a wrapped index into
-        // module_entries (which is how "select module 0 twice" happens).
-        assert_eq!(EntryRow::at(4, 3), None);
+    fn grouped_rows_orders_engine_then_stage_groups() {
+        let stats = stats_with(&[
+            ("adapter", "input"),
+            ("clip", "preprocess"),
+            ("score", "inprocess"),
+            ("term", "postprocess"),
+        ]);
+        let describe = |r: GroupedRow| format!("{:?}:{:?}", r.group, r.kind);
+        let kinds: Vec<String> = grouped_rows(&stats).iter().map(|r| describe(*r)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "Engine:Header",
+                "Engine:Engine",
+                "Adapters:Header",
+                "Adapters:Module(0)",
+                "PreProcess:Header",
+                "PreProcess:Module(1)",
+                "InProcess:Header",
+                "InProcess:Module(2)",
+                "PostProcess:Header",
+                "PostProcess:Module(3)",
+            ],
+            "the groups must appear in pipeline order, each headed by its own \
+             header and holding its own modules"
+        );
     }
 
     #[test]
-    fn the_engine_row_has_no_module() {
+    fn a_module_without_a_known_position_falls_into_preprocess() {
+        // `output` is the engine's alias for the post-process stage; anything
+        // unrecognised falls into pre-process, matching the engine's own
+        // ordering default for an unknown capability.
+        let stats = stats_with(&[("term", "output"), ("odd", "not-a-stage")]);
+        let rows = grouped_rows(&stats);
+        assert!(
+            rows.iter().any(|r| r.group == Group::PostProcess && r.kind == EntryKind::Module(0)),
+            "output must be treated as post-process: {:?}",
+            rows
+        );
+        assert!(
+            rows.iter().any(|r| r.group == Group::PreProcess && r.kind == EntryKind::Module(1)),
+            "an unknown position must fall into pre-process: {:?}",
+            rows
+        );
+    }
+
+    #[test]
+    fn empty_groups_get_no_header() {
+        // No adapters: the [ADAPTERS] header would be a title with nothing
+        // under it, so it is left out of the view entirely.
+        let stats = stats_with(&[("clip", "preprocess"), ("term", "postprocess")]);
+        let rows = grouped_rows(&stats);
+        assert!(!rows.iter().any(|r| r.group == Group::Adapters));
+        assert!(rows.iter().any(|r| r.group == Group::PreProcess && r.kind == EntryKind::Header));
+        assert!(rows.iter().any(|r| r.group == Group::PostProcess && r.kind == EntryKind::Header));
+    }
+
+    #[test]
+    fn the_engine_row_and_headers_have_no_module() {
         let stats = stats_with_modules(2);
+        let rows = grouped_rows(&stats);
         // The accessor must refuse rather than hand back a neighbouring row's
-        // module: `x` with the engine selected would otherwise stop module 0.
-        assert_eq!(EntryRow::Engine.module_index(), None);
-        assert_eq!(EntryRow::Engine.module_name(&stats), None);
-        assert_eq!(EntryRow::Module(1).module_name(&stats), Some("m1".to_string()));
+        // module: `x` with a header or the engine selected would otherwise stop
+        // module 0.
+        let engine = rows[ENGINE_ROW];
+        assert_eq!(engine.module_index(), None);
+        assert_eq!(engine.module_name(&stats), None);
+        assert_eq!(rows[0].module_index(), None, "the [ENGINE] header is not a module");
+        assert_eq!(rows[0].module_name(&stats), None);
+        // The [PRE-PROCESS] header (rows[2] with two preprocess modules).
+        assert_eq!(rows[2].module_index(), None);
+        assert_eq!(rows[2].module_name(&stats), None);
+        assert_eq!(rows[3].module_name(&stats), Some("m0".to_string()));
     }
 
     #[test]
     fn the_row_count_is_never_zero() {
-        // The engine row exists even with no modules, so an empty list still has
-        // something selectable (and the old "nothing to navigate" early return
-        // is gone).
-        assert_eq!(EntryRow::total(0), 1);
-        assert_eq!(EntryRow::at(0, 0), Some(EntryRow::Engine));
-        assert_eq!(EntryRow::at(1, 0), None);
+        // The [ENGINE] header + engine row exist even with no modules, so an
+        // empty list still has something selectable (and the old "nothing to
+        // navigate" early return is gone).
+        let rows = grouped_rows(&GlobalStats::default());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], GroupedRow { group: Group::Engine, kind: EntryKind::Header });
+        assert_eq!(rows[1], GroupedRow { group: Group::Engine, kind: EntryKind::Engine });
     }
 
     #[test]
     fn the_window_reports_the_engine_row_as_not_a_module() {
         let mut w = super::ModulesWindow::new();
         let stats = stats_with_modules(2);
-        // Default selection is the engine.
+        // Default selection is the engine row.
         assert_eq!(w.selected, ENGINE_ROW);
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
 
-        w.selected = 1;
+        // rows[3] is the first module (after [ENGINE], engine, [PRE-PROCESS]).
+        w.selected = 3;
         assert!(w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), Some("m0".to_string()));
+
+        // A group header is selectable but names no module.
+        w.selected = 2;
+        assert!(!w.selection_is_module(&stats));
+        assert_eq!(w.selected_module_name(&stats), None);
     }
 
     // ── selection + scroll arithmetic ─────────────────────────────────────
 
     #[test]
-    fn navigation_clamps_at_both_ends_of_the_combined_list() {
+    fn navigation_clamps_at_both_ends_of_the_grouped_list() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(2);
-        let total = EntryRow::total(2);
-        assert_eq!(total, 3);
-
-        // The first row is the engine and up must not go above it.
-        w.handle_key(up(), &mut stats);
-        assert_eq!(w.selected, 0);
+        // rows = [ENGINE header, engine, PRE-PROCESS header, m0, m1].
+        assert_eq!(grouped_rows(&stats).len(), 5);
         assert_eq!(w.selected, ENGINE_ROW);
 
-        // The last row is the last MODULE, and down must not wrap to 0.
+        // Up from the engine row lands on the [ENGINE] header; further up is
+        // clamped.
+        w.handle_key(up(), &mut stats);
+        assert_eq!(w.selected, 0);
+        w.handle_key(up(), &mut stats);
+        assert_eq!(w.selected, 0);
+
+        // Down to the last MODULE; down must not wrap.
         for _ in 0..10 {
             w.handle_key(down(), &mut stats);
         }
-        assert_eq!(w.selected, total - 1);
-        assert_eq!(w.selected, 2, "row 2 is module_entries[1], not module_entries[2]");
+        assert_eq!(w.selected, 4, "the last row is m1 (module_entries[1])");
 
-        // ...and back up to the engine, crossing the boundary exactly once.
+        // ...and back up, crossing the header boundary exactly once.
         w.handle_key(up(), &mut stats);
-        assert_eq!(w.selected, 1);
+        assert_eq!(w.selected, 3);
         assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
+        w.handle_key(up(), &mut stats);
+        assert_eq!(w.selected, 2, "the [PRE-PROCESS] header is selectable");
         w.handle_key(up(), &mut stats);
         assert_eq!(w.selected, ENGINE_ROW);
         assert_eq!(w.selected_module_name(&stats), None);
@@ -2762,22 +3155,22 @@ mod engine_row_tests {
     fn a_shrunken_module_list_pulls_the_selection_back_into_range() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
-        for _ in 0..3 {
+        for _ in 0..5 {
             w.handle_key(down(), &mut stats);
         }
-        assert_eq!(w.selected, 3);
+        assert_eq!(w.selected, 5, "the last of [header, engine, header, m0, m1, m2]");
         // The engine drops two of its modules (a module removed itself).
         stats.module_entries.truncate(1);
         w.handle_key(key('j'), &mut stats);
-        // 1 module + engine = 2 rows, so the selection clamps to row 1 = m0 and
-        // the next press cannot walk off the end.
-        assert_eq!(w.selected, 1);
+        // 1 module + headers = 4 rows, so the selection clamps to row 3 = m0
+        // and the next press cannot walk off the end.
+        assert_eq!(w.selected, 3);
         w.handle_key(down(), &mut stats);
-        assert_eq!(w.selected, 1);
+        assert_eq!(w.selected, 3);
         // With NO modules at all the engine row is still reachable.
         stats.module_entries.clear();
         w.handle_key(down(), &mut stats);
-        assert_eq!(w.selected, 0);
+        assert_eq!(w.selected, 1);
         assert_eq!(w.selected, ENGINE_ROW);
     }
 
@@ -2809,8 +3202,45 @@ mod engine_row_tests {
     }
 
     #[test]
+    fn the_scroll_counts_display_lines_not_rows() {
+        // One module in each of the four groups: 2 engine rows + 4 group
+        // headers + 4 modules, plus a blank separator before every header
+        // after the first — the separators consume screen lines without being
+        // rows, and the scroll must count them or a row near a group boundary
+        // falls off the bottom of the viewport.
+        let stats = stats_with(&[
+            ("a", "input"),
+            ("p", "preprocess"),
+            ("i", "inprocess"),
+            ("t", "postprocess"),
+        ]);
+        let rows = grouped_rows(&stats);
+        let lines = grouped_lines(&rows);
+        assert_eq!(lines.len(), rows.len() + 4, "one blank per non-engine group");
+        // Every header after the first is preceded by its blank separator.
+        for (i, line) in lines.iter().enumerate() {
+            if let GroupedLine::Row { index } = line {
+                if rows[*index].is_header() && *index > 0 {
+                    assert_eq!(lines[i - 1], GroupedLine::Blank, "header at line {}", i);
+                }
+            }
+        }
+        // The last row maps to the last display line, and a scroll that keeps
+        // it on screen is valid for the view.
+        let last_row = rows.len() - 1;
+        let last_line = grouped_selected_line(&lines, last_row);
+        assert_eq!(last_line, lines.len() - 1);
+        let visible = 6usize;
+        let scroll = scroll_for(last_line, 0, visible, lines.len());
+        assert!(
+            last_line >= scroll && last_line < scroll + visible,
+            "the selected row must stay inside the viewport"
+        );
+    }
+
+    #[test]
     fn the_engine_row_comes_back_into_view_when_it_is_selected_again() {
-        // The engine is row 0, so scrolled down it is legitimately off screen.
+        // The engine is row 1, so scrolled down it is legitimately off screen.
         // The property that matters is the round trip: drive the real window to
         // the bottom, then walk the selection back to the engine and assert the
         // list scrolled home and the engine row is actually drawn again. A
@@ -2819,11 +3249,11 @@ mod engine_row_tests {
         let mut stats = stats_with_modules(8);
         let (width, height) = (60u16, 12u16);
 
-        for _ in 0..EntryRow::total(8) {
+        for _ in 0..grouped_rows(&stats).len() {
             w.handle_key(down(), &mut stats);
         }
         let bottom = super::tests::render(&mut w, &stats, width, height);
-        assert!(!bottom.contains("cockatiel"), "expected the list to be scrolled away from row 0:\n{}", bottom);
+        assert!(!bottom.contains("cockatiel"), "expected the list to be scrolled away from the engine:\n{}", bottom);
 
         while w.selected > ENGINE_ROW {
             w.handle_key(up(), &mut stats);
@@ -2843,13 +3273,15 @@ mod engine_row_tests {
     fn the_selected_row_is_highlighted_wherever_the_list_is_scrolled() {
         // The cyan background is the selection, independent of what the row is
         // called: assert there is exactly one highlighted row on screen and it
-        // is the selected one.
+        // is the selected one — for EVERY row of the grouped view, headers
+        // included.
         let mut w = super::ModulesWindow::new();
         let stats = stats_with_modules(8);
+        let rows = grouped_rows(&stats);
         let (width, height) = (60u16, 12u16);
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
-        for selected in 0..EntryRow::total(8) {
+        for (selected, grouped) in rows.iter().enumerate() {
             w.selected = selected;
             let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
             let colors = crate::colors::load_colors(&std::path::PathBuf::from(""));
@@ -2882,10 +3314,10 @@ mod engine_row_tests {
                 .chars()
                 .filter(|c| *c != ' ')
                 .collect::<String>();
-            let expected = match EntryRow::at(selected, 8) {
-                Some(EntryRow::Engine) => "cockatiel".to_string(),
-                Some(EntryRow::Module(i)) => format!("m{}", i),
-                None => panic!("no row at {}", selected),
+            let expected = match grouped.kind {
+                EntryKind::Header => header_label(grouped.group).trim().to_string(),
+                EntryKind::Engine => "cockatiel-engine".to_string(),
+                EntryKind::Module(i) => format!("m{}", i),
             };
             assert!(
                 row.contains(&expected),
@@ -2939,35 +3371,35 @@ mod engine_row_tests {
 
     /// The removal does not move the row arithmetic. That is the reason the row
     /// is kept rather than hidden: making the engine's PRESENCE conditional
-    /// would put "is there an engine" into `EntryRow::total`/`EntryRow::at` and
-    /// into every clamp, and a selection stored in the old index space would
-    /// silently start naming a MODULE. With the row kept, `selected` means
-    /// exactly what it meant before the removal.
+    /// would put "is there an engine" into `grouped_rows` and into every clamp,
+    /// and a selection stored in the old index space would silently start
+    /// naming a MODULE. With the row kept, `selected` means exactly what it
+    /// meant before the removal.
     #[test]
     fn removing_the_engine_does_not_move_the_row_arithmetic() {
         let before = stats_with_modules(3);
         let mut after = before.clone();
         after.forget_engine();
-        // `forget_engine` clears the module list, so the list is just the engine
-        // row — and the engine is still row 0 of it, not row 1, and not gone.
-        assert_eq!(EntryRow::total(before.module_entries.len()), 4);
-        assert_eq!(EntryRow::total(after.module_entries.len()), 1);
-        assert_eq!(EntryRow::at(0, after.module_entries.len()), Some(EntryRow::Engine));
-        assert_eq!(EntryRow::at(0, before.module_entries.len()), Some(EntryRow::Engine));
-        assert_eq!(EntryRow::at(1, after.module_entries.len()), None);
+        // `forget_engine` clears the module list, so the view is just the
+        // [ENGINE] header + the engine row — and the engine is still its row,
+        // not gone, and not demoted to a module.
+        assert_eq!(grouped_rows(&before).len(), 6);
+        assert_eq!(grouped_rows(&after).len(), 2);
+        assert_eq!(grouped_rows(&after)[0], GroupedRow { group: Group::Engine, kind: EntryKind::Header });
+        assert_eq!(grouped_rows(&after)[1], GroupedRow { group: Group::Engine, kind: EntryKind::Engine });
         assert_eq!(
-            clamp_selected(3, EntryRow::total(after.module_entries.len())),
-            0,
-            "a stale selection lands on the engine, not on a module"
+            clamp_selected(5, grouped_rows(&after).len()),
+            1,
+            "a stale selection lands on the engine row, not on a module"
         );
-        assert_eq!(scroll_for(0, 3, 2, EntryRow::total(after.module_entries.len())), 0);
+        assert_eq!(scroll_for(0, 3, 2, grouped_lines(&grouped_rows(&after)).len()), 0);
 
         // And the window agrees: the engine row is still selected, still not a
         // module, and still the engine — so the per-module actions stay refused
         // and the engine-only ones are refused by the ACTION, not by the row
         // vanishing under it.
         let mut w = super::ModulesWindow::new();
-        w.selected = 3;
+        w.selected = 5;
         assert!(!w.selection_is_module(&after));
         assert!(w.selection_is_engine(&after));
         assert_eq!(w.selected_module_name(&after), None);
@@ -2980,10 +3412,16 @@ mod engine_row_tests {
     fn the_engine_row_is_recognisable_by_the_app() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(2);
-        assert!(w.selection_is_engine(&stats), "row 0 is the engine");
+        assert!(w.selection_is_engine(&stats), "row ENGINE_ROW is the engine");
         assert!(!w.selection_is_module(&stats), "…and it is not a module");
+        // One down lands on the [PRE-PROCESS] header: still not the engine,
+        // and not a module either.
         w.handle_key(down(), &mut stats);
-        assert!(!w.selection_is_engine(&stats), "row 1 is a module");
+        assert!(!w.selection_is_engine(&stats));
+        assert!(!w.selection_is_module(&stats), "a group header is not a module");
+        // The row after it IS a module.
+        w.handle_key(down(), &mut stats);
+        assert!(!w.selection_is_engine(&stats));
         assert!(w.selection_is_module(&stats));
         // A window with no notion of the engine row must not claim it, or the
         // app's "act on the first known module" fallback would be one more way
@@ -3000,38 +3438,46 @@ mod engine_row_tests {
         let screen = super::tests::render(&mut w, &stats, 60, 24);
         let engine = screen
             .lines()
-            .find(|l| l.contains("cockatiel"))
+            .find(|l| l.contains("cockatiel-engine"))
             .expect("the engine row");
         // Its own status text, not a module name...
         assert!(engine.contains("connected"), "engine row: {:?}", engine);
-        // ...a marker, because it is a different KIND of row...
-        assert!(engine.contains('\u{25c6}'), "engine row: {:?}", engine);
-        // ...and no stage tag, because it is in no pipeline stage.
+        // ...a name no module has, and no stage tag, because it is in no stage.
         assert!(!engine.contains('['), "the engine is not in a stage: {:?}", engine);
-        // The [ENGINE] section header is gone: the engine is a row now, and a
-        // header above row 0 read as a title for the module list under it.
-        assert!(!screen.contains("[ENGINE]"), "stale section header:\n{}", screen);
-        // And the modules are still there, still indented one level deeper.
+        // The [ENGINE] section header leads the list again — the engine is now
+        // one row under the group it heads.
+        assert!(screen.contains("[ENGINE]"), "the [ENGINE] header is missing:\n{}", screen);
+        // The modules are still there, still under their own group header.
+        assert!(screen.contains("[PRE-PROCESS]"), "module group header missing:\n{}", screen);
         assert!(screen.contains("m0"), "module rows missing:\n{}", screen);
         assert!(screen.contains("m1"), "module rows missing:\n{}", screen);
     }
 
     // ── the action rule for the engine row ───────────────────────────────
 
-    /// Per-module actions are REFUSED on the engine row, loudly, rather than
-    /// falling through to a neighbouring module. The app side of this is
-    /// `is_module_scoped` + `focused_selection_is_module` in main.rs; what the
-    /// window owes them is a selection that says "not a module".
+    /// Per-module actions are REFUSED on the engine row AND on every group header,
+    /// loudly, rather than falling through to a neighbouring module. The app
+    /// side of this is `is_module_scoped` + `focused_selection_is_module` in
+    /// main.rs; what the window owes them is a selection that says "not a
+    /// module".
     #[test]
     fn a_module_action_has_no_target_on_the_engine_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
+        // One down lands on the [PRE-PROCESS] header, which also names no
+        // module — so the "first known module" fallback must not fire there
+        // either.
+        w.handle_key(down(), &mut stats);
+        assert!(!w.selection_is_module(&stats));
+        assert_eq!(w.selected_module_name(&stats), None);
+
         w.handle_key(down(), &mut stats);
         assert!(w.selection_is_module(&stats));
         let first = w.selected_module_name(&stats);
         // The fallback the app would otherwise use: the FIRST known module.
         assert_eq!(first.as_deref(), Some("m0"));
 
+        w.handle_key(up(), &mut stats);
         w.handle_key(up(), &mut stats);
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
@@ -3101,7 +3547,11 @@ mod engine_row_tests {
     fn the_hint_bar_offers_the_module_actions_on_a_module_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
+        // Down to the first module: [ENGINE] header → engine row →
+        // [PRE-PROCESS] header → m0.
         w.handle_key(down(), &mut stats);
+        w.handle_key(down(), &mut stats);
+        assert!(w.selection_is_module(&stats));
         let bar = super::tests::render_with(&mut w, &stats, 220, 20, &keymap());
         assert_eq!(
             bar_labels(&bar),
@@ -3112,6 +3562,27 @@ mod engine_row_tests {
             "module bar:\n{}",
             bar
         );
+    }
+
+    /// A group header names a stage, so its bar is the window-level keys only —
+    /// no module actions (there is no module), and no engine actions (there is
+    /// no engine on a header row).
+    #[test]
+    fn the_hint_bar_offers_only_window_actions_on_a_group_header() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with_modules(3);
+        w.handle_key(down(), &mut stats);
+        assert!(w.selected_row(&stats).is_header());
+        let bar = super::tests::render_with(&mut w, &stats, 220, 20, &keymap());
+        assert_eq!(
+            bar_labels(&bar),
+            vec!["nav", "select", "users", "pause"],
+            "a header names no module and no engine:\n{}",
+            bar
+        );
+        for gone in ["start:[s]", "del:[d]", "restart:[R]", "detach:[X]", "edit:[E]"] {
+            assert!(!bar.contains(gone), "a header must not advertise {:?}:\n{}", gone, bar);
+        }
     }
 
     /// The pause key is a GLOBAL (nav) binding, matched before any window's own
@@ -3137,6 +3608,138 @@ mod engine_row_tests {
         );
     }
 
+    // ── Shift+arrows: moving a module between pipeline stages ────────────
+
+    /// The stage-order rule, as a pure function: pre < in < post, and input
+    /// adapters are not in the chain at all.
+    #[test]
+    fn shift_stage_moves_between_the_three_pipeline_stages() {
+        // Later: pre → in → post.
+        assert_eq!(shift_stage("preprocess", StageDirection::Later), Some("inprocess"));
+        assert_eq!(shift_stage("inprocess", StageDirection::Later), Some("postprocess"));
+        // Earlier: post → in → pre.
+        assert_eq!(shift_stage("postprocess", StageDirection::Earlier), Some("inprocess"));
+        assert_eq!(shift_stage("inprocess", StageDirection::Earlier), Some("preprocess"));
+        // The edges: nothing to move to, so a no-op rather than a wrap-around.
+        assert_eq!(shift_stage("postprocess", StageDirection::Later), None);
+        assert_eq!(shift_stage("preprocess", StageDirection::Earlier), None);
+        // Input adapters feed the pipeline rather than running inside it.
+        assert_eq!(shift_stage("input", StageDirection::Later), None);
+        assert_eq!(shift_stage("input", StageDirection::Earlier), None);
+    }
+
+    /// The window answers "which module, and to where"; the rewrite of the
+    /// engine's config.json happens in the dispatch. Shift+down on a pre
+    /// module asks for in-process; once the dispatch has applied that move to
+    /// the view (the module now sits in the in-process group), Shift+up asks
+    /// for pre-process again.
+    #[test]
+    fn shift_down_moves_a_pre_module_to_inprocess_and_shift_up_back() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with_modules(3); // all pre-process
+        w.handle_key(down(), &mut stats); // [PRE-PROCESS] header
+        w.handle_key(down(), &mut stats); // m0
+        assert!(w.selection_is_module(&stats));
+        assert_eq!(
+            w.handle_key(shift_down(), &mut stats),
+            Some(Action::MoveModuleStage("m0".to_string(), "inprocess".to_string()))
+        );
+        // The window has NOT changed the view (the dispatch owns that), so the
+        // module still reads as pre-process and cannot move earlier yet.
+        assert_eq!(
+            w.handle_key(shift_up(), &mut stats),
+            Some(Action::Noop),
+            "a pre-process module cannot move earlier"
+        );
+        // Simulate the dispatch having applied the move: the module is now
+        // grouped under [IN-PROCESS], and Shift+up sends it back.
+        stats.module_entries[0].position = "inprocess".to_string();
+        w.selected = grouped_rows(&stats)
+            .iter()
+            .position(|r| r.kind == EntryKind::Module(0))
+            .expect("m0 must be in the grouped view");
+        assert_eq!(
+            w.handle_key(shift_up(), &mut stats),
+            Some(Action::MoveModuleStage("m0".to_string(), "preprocess".to_string()))
+        );
+    }
+
+    /// A module at the requested edge, or an input adapter, cannot move that
+    /// direction — the key is consumed as a no-op rather than emitting a move
+    /// the dispatcher would have to refuse.
+    #[test]
+    fn shift_on_an_adapter_or_a_stage_edge_is_a_noop() {
+        // A post-process module shifted down is already last.
+        let mut stats = stats_with(&[("term", "postprocess")]);
+        let mut w = super::ModulesWindow::new();
+        w.handle_key(down(), &mut stats); // [POST-PROCESS] header
+        w.handle_key(down(), &mut stats); // term
+        assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
+        // ...and an earlier shift-up DOES move it into in-process.
+        assert_eq!(
+            w.handle_key(shift_up(), &mut stats),
+            Some(Action::MoveModuleStage("term".to_string(), "inprocess".to_string()))
+        );
+
+        // An input adapter is not moved at all, either direction.
+        let mut stats2 = stats_with(&[("discord", "input")]);
+        let mut w2 = super::ModulesWindow::new();
+        w2.handle_key(down(), &mut stats2); // [ADAPTERS] header
+        w2.handle_key(down(), &mut stats2); // discord
+        assert_eq!(w2.handle_key(shift_down(), &mut stats2), Some(Action::Noop));
+        assert_eq!(w2.handle_key(shift_up(), &mut stats2), Some(Action::Noop));
+    }
+
+    /// Headers and the engine row name no module, so a Shift+arrow there is a
+    /// no-op too — but the key is still consumed, so it does not fall through
+    /// to navigation or any other binding.
+    #[test]
+    fn shift_on_a_header_or_the_engine_row_is_a_noop() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with_modules(2);
+        // Engine row.
+        assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
+        assert_eq!(w.handle_key(shift_up(), &mut stats), Some(Action::Noop));
+        // The [PRE-PROCESS] header.
+        w.handle_key(down(), &mut stats);
+        assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
+    }
+
+    // ── the status column ────────────────────────────────────────────────
+
+    /// Every module's status (and the engine's) starts at the same x, so the
+    /// status column reads as one vertical line instead of ragged text. The
+    /// name column width is `STATUS_COL`; the engine row is padded to the same
+    /// width so its status lines up with the modules below it.
+    #[test]
+    fn the_status_column_is_aligned_across_all_rows() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with(&[
+            ("discord-adapter", "input"),
+            ("clip", "preprocess"),
+            ("banned-words-manager", "inprocess"),
+        ]);
+        stats.engine_status = "connected".to_string();
+        let screen = super::tests::render(&mut w, &stats, 120, 24);
+        // The status column: the window's left border (`│`, 3 UTF-8 bytes) +
+        // the 2-space row indent + the fixed-width name column.
+        let status_at = 3 + 2 + STATUS_COL;
+        for needle in ["cockatiel-engine", "discord-adapter", "clip", "banned-words-manager"] {
+            let line = screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{} is missing:\n{}", needle, screen));
+            let col = line
+                .find("connected")
+                .unwrap_or_else(|| panic!("{} has no status on its line: {:?}", needle, line));
+            assert_eq!(
+                col, status_at,
+                "the {} status must start at the status column (x={})",
+                needle, status_at
+            );
+        }
+    }
+
     // ── E: the engine's own config ───────────────────────────────────────
 
     #[test]
@@ -3155,11 +3758,16 @@ mod engine_row_tests {
         // A module row defers to the plugin manifest, which is where a module's
         // directory is known — the window must not guess it.
         let mut stats2 = stats.clone();
-        w.selected = 1;
+        w.selected = 3; // rows[3] is the first module (m0).
+        assert_eq!(w.config_editor_target(&stats2), None);
+        // A header row names a stage, so it has no config either.
+        w.selected = 2;
         assert_eq!(w.config_editor_target(&stats2), None);
         // ...and it is the engine row that is the special one, not "no modules".
         stats2.module_entries.clear();
         w.selected = 0;
+        assert_eq!(w.config_editor_target(&stats2), None, "the [ENGINE] header is not the engine");
+        w.selected = ENGINE_ROW;
         assert!(w.config_editor_target(&stats2).is_some());
     }
 

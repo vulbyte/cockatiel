@@ -1800,6 +1800,7 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::ToggleAutoStart
             | Action::RemoveEngine
             | Action::RestartEngine
+            | Action::MoveModuleStage(_, _)
     )
 }
 
@@ -1829,6 +1830,7 @@ fn is_module_scoped(action: &Action) -> bool {
             | Action::ClearModuleConfig(_)
             | Action::EditCredentials(_)
             | Action::RunTests
+            | Action::MoveModuleStage(_, _)
     )
 }
 
@@ -2883,6 +2885,39 @@ async fn dispatch_action(
             let outcome = restart_engine(state, supervisor, supervisor::launch_engine);
             supervisor_log(state, restart_note(&outcome));
         }
+        Action::MoveModuleStage(name, to) => {
+            // Shift+arrow in the modules window: rewrite the module's stage in
+            // the engine's config.json AND move it in the TUI's view so the row
+            // jumps to its new group immediately. The engine's config-poll task
+            // re-reads the ordering lists on change, so a running engine picks
+            // the move up live. The module's CURRENT stage is read from the
+            // view (the window has not touched it); the window already refused
+            // adapters and edge moves, but the guards are cheap and make the
+            // dispatch safe against any future path that skips the window.
+            let Some(from) = state
+                .stats
+                .module_entries
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.position.clone())
+            else {
+                return Ok(false);
+            };
+            if from == "input" || from == to {
+                return Ok(false);
+            }
+            supervisor::move_module_stage(&name, &from, &to);
+            if let Some(m) = state.stats.module_entries.iter_mut().find(|m| m.name == name) {
+                m.position = to.clone();
+            }
+            supervisor_log(
+                state,
+                format!(
+                    "[supervisor] moved {} {} → {} (config.json rewritten; a running engine re-reads the ordering live)",
+                    name, from, to
+                ),
+            );
+        }
         _ => {}
     }
     Ok(false)
@@ -3408,8 +3443,8 @@ mod tests {
             s
         };
 
-        // Row 0 is the engine.
-        let engine = state_with(0);
+        // Row ENGINE_ROW is the engine (row 0 is the [ENGINE] header above it).
+        let engine = state_with(1);
         assert!(!focused_selection_is_module(&engine));
         // The module-only actions are refused on the engine row.
         for a in [
@@ -3442,8 +3477,10 @@ mod tests {
         assert!(is_dispatchable(&Action::TogglePipelinePause));
         assert!(is_dispatchable(&Action::ToggleAutoStart));
 
-        // A module row is a module again, so every one of them is allowed.
-        let module = state_with(1);
+        // A module row is a module again, so every one of them is allowed. With two
+        // pre-process modules the first one sits at row 3 ([ENGINE] header,
+        // engine, [PRE-PROCESS] header, m0).
+        let module = state_with(3);
         assert!(focused_selection_is_module(&module));
         assert!(!is_module_scoped(&Action::StopModule(String::new()))
             || focused_selection_is_module(&module));
@@ -4296,18 +4333,25 @@ mod engine_lifecycle_tests {
         assert!(s.pending_engine_removal.is_none());
     }
 
-    /// Move the selection off the engine row and onto the first module.
+    /// Move the selection off the engine row and onto the first module. In the
+    /// grouped list the first Down lands on the [PRE-PROCESS] header, so keep
+    /// pressing until a row that IS a module is selected.
     fn select_module_row(state: &mut AppState) {
         use crate::app::WindowId;
         let mut stats = std::mem::take(&mut state.stats);
         if let Some(w) = state.get_window_mut(WindowId::Modules) {
-            w.handle_key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Down,
-                    crossterm::event::KeyModifiers::empty(),
-                ),
-                &mut stats,
-            );
+            for _ in 0..8 {
+                w.handle_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Down,
+                        crossterm::event::KeyModifiers::empty(),
+                    ),
+                    &mut stats,
+                );
+                if w.selection_is_module(&stats) {
+                    break;
+                }
+            }
         }
         state.stats = stats;
     }

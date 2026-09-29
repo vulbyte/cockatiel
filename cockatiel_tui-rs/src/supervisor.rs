@@ -1432,6 +1432,60 @@ pub fn remove_from_ordering(name: &str) {
     }
 }
 
+/// The priority a moved module keeps when its ordering entry has none recorded.
+///
+/// The same default `add_to_ordering` uses for a module with no explicit
+/// priority, so a stage move never silently drops an operator-tuned value but
+/// also never invents a fancier one for an entry that was written bare.
+const DEFAULT_PRIORITY: i32 = 100;
+
+/// The recorded priority of `name` in the ordering list for `from`, if it has
+/// one. Read from the CURRENT stage's list so an operator-tuned priority
+/// survives a stage move rather than being reset to the default.
+fn read_priority(root: &serde_json::Value, name: &str, from: &str) -> Option<i32> {
+    root.get(config_list_key(from))?
+        .as_array()?
+        .iter()
+        .find(|e| e.get("name").and_then(|v| v.as_str()) == Some(name))
+        .and_then(|e| e.get("priority").and_then(|v| v.as_i64()).map(|p| p as i32))
+}
+
+/// Move a module between pipeline stages in the engine's `config.json`:
+/// removed from every ordering list and re-added to the target stage's list,
+/// keeping its recorded priority.
+///
+/// Used by the modules window's Shift+up/down reorder. `from`/`to` are the
+/// capability strings the engine reports (`preprocess`/`inprocess`/
+/// `postprocess`); both map through [`config_list_key`]. The engine's
+/// config-poll task re-reads the three pipeline lists on change, so a running
+/// engine picks the move up live.
+pub fn move_module_stage(name: &str, from: &str, to: &str) {
+    move_module_stage_at(&engine_config_path(), name, from, to);
+}
+
+/// As [`move_module_stage`], but against a specific `config.json` so unit tests
+/// can point it at a temp file instead of the live engine config.
+fn move_module_stage_at(path: &Path, name: &str, from: &str, to: &str) {
+    let Ok(data) = std::fs::read_to_string(path) else { return };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&data) else { return };
+    let priority = read_priority(&root, name, from).unwrap_or(DEFAULT_PRIORITY);
+    for key in ["inputs", "preprocessModules", "inprocessModules", "postprocessModules"] {
+        if let Some(list) = root.get_mut(key).and_then(|v| v.as_array_mut()) {
+            list.retain(|e| e.get("name").and_then(|v| v.as_str()) != Some(name));
+        }
+    }
+    let key = config_list_key(to);
+    if root.get(key).is_none() {
+        root[key] = serde_json::json!([]);
+    }
+    if let Some(list) = root[key].as_array_mut() {
+        list.push(serde_json::json!({ "name": name, "priority": priority }));
+    }
+    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+        let _ = write_atomic_0600(path, &pretty);
+    }
+}
+
 /// A managed running process (module or engine).
 pub struct ManagedProcess {
     pub child: Child,
@@ -1631,6 +1685,47 @@ mod tests {
         assert_eq!(cfg["score"], "", "cfg: {}", cfg);
         assert_eq!(cfg["channels"], serde_json::json!([]), "cfg: {}", cfg);
         assert_eq!(cfg["servers"]["g"], serde_json::json!([]), "cfg: {}", cfg);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn move_module_stage_rewrites_the_ordering_lists() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-move-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"inputs":[{"name":"discord","priority":100}],"preprocessModules":[{"name":"clip","priority":100},{"name":"polling","priority":50}],"inprocessModules":[{"name":"banned-words","priority":100}]}"#,
+        )
+        .unwrap();
+
+        // Move `polling` pre → in: gone from preprocess, appended to inprocess,
+        // and its operator-tuned priority survives the move.
+        move_module_stage_at(&path, "polling", "preprocess", "inprocess");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = root["preprocessModules"].as_array().unwrap();
+        assert_eq!(pre.len(), 1, "polling must leave preprocess: {:?}", pre);
+        assert_eq!(pre[0]["name"], "clip");
+        let in_ = root["inprocessModules"].as_array().unwrap();
+        assert_eq!(in_.len(), 2, "polling must join inprocess: {:?}", in_);
+        assert_eq!(in_[1]["name"], "polling");
+        assert_eq!(in_[1]["priority"], 50, "a tuned priority must survive");
+        // Nothing else changed, and polling is in no other list.
+        assert_eq!(root["inputs"].as_array().unwrap().len(), 1);
+        assert!(root.get("postprocessModules").is_none());
+
+        // A module with NO recorded priority moves with the default.
+        std::fs::write(&path, r#"{"preprocessModules":[{"name":"clip"}]}"#).unwrap();
+        move_module_stage_at(&path, "clip", "preprocess", "postprocess");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["preprocessModules"].as_array().unwrap().len(), 0);
+        let post = root["postprocessModules"].as_array().unwrap();
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0]["name"], "clip");
+        assert_eq!(post[0]["priority"], DEFAULT_PRIORITY);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

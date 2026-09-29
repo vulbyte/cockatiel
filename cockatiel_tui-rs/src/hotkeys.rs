@@ -63,6 +63,12 @@ pub enum Action {
     /// when the TUI is not the engine's parent, and when the engine has been
     /// removed from the TUI.
     RestartEngine,
+    /// Move a module to a different pipeline stage (`preprocess` < `inprocess`
+    /// < `postprocess`), rewriting its position in the engine's `config.json`
+    /// ordering. Produced by Shift+up/down in the modules window; the payload
+    /// is `(module name, target stage)`, and the dispatcher owns the
+    /// supervisor call that persists the move.
+    MoveModuleStage(String, String),
     Noop,
 }
 
@@ -256,6 +262,7 @@ pub fn action_label(action: &Action) -> &'static str {
         // as "delete the engine's files". Nothing is deleted here.
         Action::RemoveEngine => "detach",
         Action::RestartEngine => "restart",
+        Action::MoveModuleStage(_, _) => "stage",
         Action::Quit => "quit",
         Action::FocusNext => "window-next",
         Action::FocusPrev => "window-prev",
