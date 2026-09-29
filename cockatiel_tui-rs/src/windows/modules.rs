@@ -296,6 +296,20 @@ pub enum StageDirection {
 /// right rather than being truncated.
 const STATUS_COL: usize = 22;
 
+/// The fixed width of the status column (e.g. `connected`, `offline`,
+/// `waiting for prompt`). Padded so the autostart marker and the ms column
+/// start on the same x on every row.
+const STATUS_TEXT_COL: usize = 12;
+
+/// The fixed width of the autostart column. A module with autostart shows
+/// `A`; one without shows blank. The width keeps the ms column fixed either
+/// way.
+const AUTOSTART_COL: usize = 2;
+
+/// The fixed width of the ms column, right-aligned within it so `7.3ms` and
+/// `157.3ms` share a right edge.
+const MS_COL: usize = 9;
+
 /// Clamp a stored selection into a list of `total` rows.
 pub fn clamp_selected(selected: usize, total: usize) -> usize {
     if total == 0 {
@@ -1649,34 +1663,34 @@ impl Window for ModulesWindow {
                             } else {
                                 Style::default()
                             };
-                            // The right side of a group header shows the
-                            // category average MS (sum of its modules' rolling
-                            // averages); the engine header carries the label
-                            // for the total the engine row shows. Adapters are
-                            // feeds, not processors — their header shows the
-                            // same label but the row values are absent, so a
-                            // blank is right.
+                            // The group header's right column shows the ms sum
+                            // for the stage (its category average), in the same
+                            // fixed ms column as the rows below it, so the
+                            // header and its modules line up. No label — the ms
+                            // column is self-explanatory next to the row
+                            // values.
                             let header_name = header_label(row.group);
-                            let right = match row.group {
-                                Group::Engine => "  total average time".to_string(),
-                                Group::Adapters => "  category average MS".to_string(),
-                                Group::PreProcess
-                                | Group::InProcess
-                                | Group::PostProcess => {
-                                    format!(
-                                        "  category average MS  {:>8}",
-                                        format_ms(Some(group_total_ms(stats, row.group)))
-                                    )
-                                }
+                            let sum_ms = match row.group {
+                                Group::Engine => group_total_ms(stats, Group::Adapters)
+                                    + group_total_ms(stats, Group::PreProcess)
+                                    + group_total_ms(stats, Group::InProcess)
+                                    + group_total_ms(stats, Group::PostProcess),
+                                _ => group_total_ms(stats, row.group),
                             };
-                            let pad = (inner.width as usize).saturating_sub(header_name.len() + right.len());
-                            let header_text = format!(
-                                "{header_name}{}{right}",
-                                " ".repeat(pad)
-                            );
+                            let ms_text = format_ms(Some(sum_ms));
+                            // Blank fill to the ms column, whose start includes
+                            // the same 2-space row indent a module row has (the
+                            // header label carries that indent too).
+                            let ms_start = 2 + STATUS_COL + STATUS_TEXT_COL + AUTOSTART_COL;
+                            let pad = ms_start.saturating_sub(header_name.len());
                             (
                                 Line::from(Span::styled(
-                                    header_text,
+                                    format!(
+                                        "{header_name}{}{:>width$}",
+                                        " ".repeat(pad),
+                                        ms_text,
+                                        width = MS_COL
+                                    ),
                                     if is_selected {
                                         row_style
                                     } else {
@@ -1721,42 +1735,63 @@ impl Window for ModulesWindow {
                                         .fg(if is_selected { Color::Black } else { Color::White }),
                                 ),
                                 Span::styled(
-                                    status_text,
+                                    format!("{:<width$}", status_text, width = STATUS_TEXT_COL),
                                     row_style
                                         .fg(if is_selected { Color::Black } else { engine_status_color }),
                                 ),
                             ];
-                            // Flashing PAUSED, inline with the engine status so
-                            // the row never changes shape (a blink must not
-                            // trigger a full repaint). Uses the same
+                            // Flashing PAUSED, placed in the space where the
+                            // autostart marker would sit on a module row (the
+                            // engine has no autostart column of its own), so
+                            // the ms column stays fixed. Uses the same
                             // warning-but-not-broken colour as the NEAR-LIMIT
                             // row below rather than a hard red: a held pipeline
                             // is the engine working as designed, not a fault.
-                            if paused_indicator_visible(
+                            let paused_text = if paused_indicator_visible(
                                 engine_live,
                                 stats.pipeline_paused,
                                 crate::app::AppState::pause_flash_on(stats.pause_flash_tick),
                             ) {
-                                spans.push(Span::styled(
-                                    "  PAUSED",
-                                    row_style
-                                        .fg(if is_selected { Color::Black } else { colors.status_color("stopped") })
-                                        .add_modifier(Modifier::BOLD),
-                                ));
-                            }
-                            // Total pipeline time: the sum of every module's
-                            // rolling average, right-aligned — the number the
-                            // `[ENGINE]` header's "total average time" label
-                            // points at.
+                                Some("PAUSED")
+                            } else {
+                                None
+                            };
+                            // The engine's total: the sum of every module's
+                            // rolling average, right-aligned in the same fixed
+                            // ms column (absolute x = the module rows' ms
+                            // column) so the value lines up under the group
+                            // headers' totals.
                             let total_ms = group_total_ms(stats, Group::Adapters)
                                 + group_total_ms(stats, Group::PreProcess)
                                 + group_total_ms(stats, Group::InProcess)
                                 + group_total_ms(stats, Group::PostProcess);
                             let total_text = format_ms(Some(total_ms));
-                            let left_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                            let gap = (inner.width as usize).saturating_sub(left_len + total_text.len() + 1);
+                            let indent = 2;
+                            let ms_start = indent + STATUS_COL + STATUS_TEXT_COL + AUTOSTART_COL;
+                            let ms_right = ms_start + MS_COL;
+                            // Everything rendered so far: name + status. The
+                            // badge (if any) then the ms must end at `ms_right`.
+                            let rendered: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                            let mut gap = ms_start.saturating_sub(rendered);
+                            // The badge consumes gap space; if it overflows the
+                            // autostart column the ms still right-aligns to the
+                            // fixed right edge.
+                            if let Some(badge) = paused_text {
+                                spans.push(Span::styled(
+                                    format!("{badge:>width$}", width = gap.saturating_add(badge.len())),
+                                    row_style
+                                        .fg(if is_selected { Color::Black } else { colors.status_color("stopped") })
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                                gap = 0;
+                            }
+                            let rendered: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                            let before_ms = ms_right
+                                .saturating_sub(rendered)
+                                .saturating_sub(total_text.len())
+                                .max(1);
                             spans.push(Span::styled(
-                                format!("{}{}", " ".repeat(gap), total_text),
+                                format!("{}{}", " ".repeat(before_ms), total_text),
                                 row_style.fg(if is_selected { Color::Black } else { Color::Yellow }),
                             ));
                             (Line::from(spans), None)
@@ -1779,45 +1814,43 @@ impl Window for ModulesWindow {
                             } else {
                                 Style::default()
                             };
-                            // Left: name + status. The autostart marker (`A`)
-                            // sits right after the status, then the rolling
-                            // average ms is pushed to the right edge so every
-                            // row's timing lines up in one column.
+                            // Left: name + status, both fixed-width so the autostart marker and the
+                            // rolling average ms each land in their own column
+                            // on every row.
                             let mut spans = vec![
                                 Span::styled(
                                     format!("  {:<width$}", module.name, width = STATUS_COL),
                                     row_style
                                         .fg(if is_selected { Color::Black } else { Color::White }),
                                 ),
-                                Span::styled(status_text, row_style.fg(status_color)),
+                                Span::styled(
+                                    format!("{:<width$}", status_text, width = STATUS_TEXT_COL),
+                                    row_style.fg(status_color),
+                                ),
                             ];
-                            if module.autostart {
-                                spans.push(Span::styled(
-                                    " A",
-                                    row_style.fg(if is_selected {
-                                        Color::Black
-                                    } else {
-                                        Color::DarkGray
-                                    }),
-                                ));
-                            }
-                            // Right-align the ms to the window's right edge.
+                            // Autostart marker: `A` for a module set to start
+                            // automatically, blank otherwise — a fixed column
+                            // so the ms never shifts.
+                            let autostart_text = if module.autostart { "A" } else { "" };
+                            spans.push(Span::styled(
+                                format!("{:<width$}", autostart_text, width = AUTOSTART_COL),
+                                row_style.fg(if is_selected {
+                                    Color::Black
+                                } else {
+                                    Color::DarkGray
+                                }),
+                            ));
+                            // The rolling average ms, right-aligned in its fixed
+                            // column.
                             let ms_text = format_ms(module.avg_ms);
-                            if !ms_text.is_empty() {
-                                let left_len: usize = spans
-                                    .iter()
-                                    .map(|s| s.content.chars().count())
-                                    .sum();
-                                let gap = (inner.width as usize).saturating_sub(left_len + ms_text.len() + 1);
-                                spans.push(Span::styled(
-                                    format!("{}{}", " ".repeat(gap), ms_text),
-                                    row_style.fg(if is_selected {
-                                        Color::Black
-                                    } else {
-                                        Color::Yellow
-                                    }),
-                                ));
-                            }
+                            spans.push(Span::styled(
+                                format!("{:>width$}", ms_text, width = MS_COL),
+                                row_style.fg(if is_selected {
+                                    Color::Black
+                                } else {
+                                    Color::Yellow
+                                }),
+                            ));
                             (
                                 Line::from(spans),
                                 Some(module.name.clone()),
@@ -4084,6 +4117,25 @@ mod engine_row_tests {
             line("[IN-PROCESS]").contains("12.5ms"),
             "in-process header must show the category sum: {screen}"
         );
+        // The ms is a FIXED COLUMN: every value ends at the same x (the right edge
+        // of the ms column), and there is no label text next to it. Position is
+        // measured from a module row (the ground truth for the column layout)
+        // and the header's category sum must land at exactly the same spot.
+        let lang = line("7.3ms");
+        let ms_end = lang.find("7.3ms").unwrap() + "7.3ms".len();
+        for needle in ["<1ms", "12.5ms"] {
+            let l = line(needle);
+            let end = l.find(needle).unwrap() + needle.len();
+            assert_eq!(
+                end, ms_end,
+                "the {} value must end at the fixed ms column (x={}): {l:?}",
+                needle, ms_end
+            );
+        }
+        assert!(
+            !screen.contains("category average"),
+            "the header label must be removed: {screen}"
+        );
     }
 
     // ── E: the engine's own config ───────────────────────────────────────
@@ -4378,6 +4430,8 @@ mod engine_row_tests {
             original: original.to_string(),
         }
     }
+
+
 
 
 
