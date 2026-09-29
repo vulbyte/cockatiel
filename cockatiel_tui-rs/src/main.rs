@@ -2909,9 +2909,11 @@ async fn dispatch_action(
             }
             match supervisor::move_module_by_direction(None, &name, &from, direction) {
                 Ok(Some(new_pos)) => {
-                    if let Some(m) = state.stats.module_entries.iter_mut().find(|m| m.name == name) {
-                        m.position = new_pos.clone();
-                    }
+                    // Re-apply the config's authoritative ordering + positions
+                    // locally so the moved row jumps to its new spot NOW — the
+                    // engine's next module_list poll reports the same order, so
+                    // the view and the poll agree and nothing flickers back.
+                    supervisor::reorder_module_entries(&mut state.stats);
                     // The cursor follows the moved module to its new row, so the
                     // operator is not left looking at whatever row the old
                     // index now names.

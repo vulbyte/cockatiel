@@ -1715,6 +1715,81 @@ pub fn move_module_by_direction(
     }
 }
 
+/// Re-read the engine's config.json and re-apply the authoritative ordering +
+/// positions to a local `Vec<ModuleStatus>`, so the TUI's view reflects a move
+/// IMMEDIATELY instead of waiting for the next module_list poll.
+///
+/// The engine's module_list is the source of truth: in-process modules in chain
+/// order (config.json `inprocessModules`), everything else alphabetical, and
+/// each entry's position from the config lists. The TUI keeps `module_entries`
+/// in response order, so after a move it must re-derive that order itself or
+/// the moved row stays put (and the cursor re-anchor lands on the wrong row).
+pub fn reorder_module_entries(stats: &mut crate::db::GlobalStats) {
+    reorder_module_entries_at(None, stats);
+}
+
+fn reorder_module_entries_at(path_override: Option<&Path>, stats: &mut crate::db::GlobalStats) {
+    let live_path;
+    let path: &Path = match path_override {
+        Some(p) => p,
+        None => {
+            live_path = engine_config_path();
+            &live_path
+        }
+    };
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&data) else {
+        return;
+    };
+    let list = |key: &str| -> Vec<String> {
+        root.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let chain = list("inprocessModules");
+    // Position by name, checked in the same precedence the engine uses.
+    let position_of = |name: &str| -> Option<String> {
+        if list("preprocessModules").iter().any(|n| n == name) {
+            return Some("preprocess".to_string());
+        }
+        if chain.iter().any(|n| n == name) {
+            return Some("inprocess".to_string());
+        }
+        if list("postprocessModules").iter().any(|n| n == name) {
+            return Some("postprocess".to_string());
+        }
+        if list("inputs").iter().any(|n| n == name) {
+            return Some("input".to_string());
+        }
+        None
+    };
+    let chain_idx = |name: &str| -> Option<usize> { chain.iter().position(|n| n == name) };
+
+    for m in stats.module_entries.iter_mut() {
+        if let Some(pos) = position_of(&m.name) {
+            m.position = pos;
+        }
+    }
+    // In-process modules by chain order; everything else alphabetical (the
+    // same sort the engine's module_list applies, so the view matches what the
+    // next poll will report).
+    stats
+        .module_entries
+        .sort_by(|a, b| match (chain_idx(&a.name), chain_idx(&b.name)) {
+            (Some(i), Some(j)) => i.cmp(&j),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.cmp(&b.name),
+        });
+}
+
 /// A managed running process (module or engine).
 pub struct ManagedProcess {
     pub child: Child,
@@ -2635,6 +2710,53 @@ mod tests {
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(names(&root["preprocessModules"]), vec!["clip"]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reorder_module_entries_applies_chain_order_and_positions_immediately() {
+        // After a move the TUI must reflect the new chain order + positions
+        // right away (not wait for the next 2s module_list poll): the engine's
+        // module_list reports in-process modules in config chain order, so the
+        // local view has to match or the moved row looks stuck and the cursor
+        // re-anchor lands on the wrong row.
+        let (tmp, path) = scratch_config(
+            "reorder",
+            r#"{"preprocessModules":[{"name":"clip","priority":100}],"inprocessModules":[{"name":"bravo","priority":100},{"name":"alpha","priority":100}],"postprocessModules":[{"name":"zebra","priority":100}]}"#,
+        );
+        let mut stats = crate::db::GlobalStats::default();
+        let mk = |name: &str, pos: &str| crate::db::ModuleStatus {
+            name: name.to_string(),
+            description: String::new(),
+            status: "offline".to_string(),
+            position: pos.to_string(),
+            credentials: Vec::new(),
+            directory: String::new(),
+            credential_values: std::collections::HashMap::new(),
+            config_complete: false,
+            alive: false,
+            last_seen: 0,
+        };
+        // Simulate the stale pre-poll state: alpha was moved to the head of the
+        // chain by a Shift+up, but the local entries still show the old order.
+        stats.module_entries = vec![
+            mk("alpha", "inprocess"),
+            mk("bravo", "inprocess"),
+            mk("zebra", "postprocess"),
+            mk("clip", "preprocess"),
+        ];
+        reorder_module_entries_at(Some(&path), &mut stats);
+        let names: Vec<&str> = stats.module_entries.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["bravo", "alpha", "clip", "zebra"],
+            "in-process must follow the config chain order (bravo before alpha), others alphabetical"
+        );
+        let pos = |n: &str| stats.module_entries.iter().find(|m| m.name == n).unwrap().position.as_str();
+        assert_eq!(pos("bravo"), "inprocess");
+        assert_eq!(pos("clip"), "preprocess");
+        assert_eq!(pos("zebra"), "postprocess");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
