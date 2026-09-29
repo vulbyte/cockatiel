@@ -2885,15 +2885,16 @@ async fn dispatch_action(
             let outcome = restart_engine(state, supervisor, supervisor::launch_engine);
             supervisor_log(state, restart_note(&outcome));
         }
-        Action::MoveModuleStage(name, to) => {
-            // Shift+arrow in the modules window: rewrite the module's stage in
-            // the engine's config.json AND move it in the TUI's view so the row
-            // jumps to its new group immediately. The engine's config-poll task
-            // re-reads the ordering lists on change, so a running engine picks
-            // the move up live. The module's CURRENT stage is read from the
-            // view (the window has not touched it); the window already refused
-            // adapters and edge moves, but the guards are cheap and make the
-            // dispatch safe against any future path that skips the window.
+        Action::MoveModuleStage(name, direction) => {
+            // Shift+arrow in the modules window: rewrite the module's position
+            // in the engine's config.json ordering lists AND move it in the
+            // TUI's view so the row jumps to its new group immediately. The
+            // engine's config-poll task re-reads the ordering lists on change,
+            // so a running engine picks the move up live. The window sends only
+            // the DIRECTION plus the module's name; the resolver here reads the
+            // module's current stage and the engine's chain order and decides
+            // what the move actually is (a stage jump, or an in-process
+            // reorder), because the window has no access to the config.
             let Some(from) = state
                 .stats
                 .module_entries
@@ -2903,20 +2904,36 @@ async fn dispatch_action(
             else {
                 return Ok(false);
             };
-            if from == "input" || from == to {
+            if from == "input" {
                 return Ok(false);
             }
-            supervisor::move_module_stage(&name, &from, &to);
-            if let Some(m) = state.stats.module_entries.iter_mut().find(|m| m.name == name) {
-                m.position = to.clone();
+            match supervisor::move_module_by_direction(None, &name, &from, direction) {
+                Ok(Some(new_pos)) => {
+                    if let Some(m) = state.stats.module_entries.iter_mut().find(|m| m.name == name) {
+                        m.position = new_pos.clone();
+                    }
+                    supervisor_log(
+                        state,
+                        format!(
+                            "[supervisor] moved {} {} → {} (config.json rewritten; a running engine re-reads the ordering live)",
+                            name, from, new_pos
+                        ),
+                    );
+                }
+                Ok(None) => {
+                    // A no-op (an input adapter, or a module already at the
+                    // stage edge): nothing to rewrite. The press was still
+                    // consumed.
+                    return Ok(false);
+                }
+                Err(e) => {
+                    supervisor_log(
+                        state,
+                        format!("[supervisor] could not move {}: {}", name, e),
+                    );
+                    return Ok(false);
+                }
             }
-            supervisor_log(
-                state,
-                format!(
-                    "[supervisor] moved {} {} → {} (config.json rewritten; a running engine re-reads the ordering live)",
-                    name, from, to
-                ),
-            );
         }
         _ => {}
     }

@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::plugins::Plugin;
+use crate::windows::modules::StageDirection;
 
 /// Write a file atomically with mode 0o600: write to a `.tmp-<uuid>` sibling,
 /// chmod it to 0o600 BEFORE renaming (so a secret never exists world-readable,
@@ -1450,25 +1451,105 @@ fn read_priority(root: &serde_json::Value, name: &str, from: &str) -> Option<i32
         .and_then(|e| e.get("priority").and_then(|v| v.as_i64()).map(|p| p as i32))
 }
 
-/// Move a module between pipeline stages in the engine's `config.json`:
-/// removed from every ordering list and re-added to the target stage's list,
-/// keeping its recorded priority.
-///
-/// Used by the modules window's Shift+up/down reorder. `from`/`to` are the
-/// capability strings the engine reports (`preprocess`/`inprocess`/
-/// `postprocess`); both map through [`config_list_key`]. The engine's
-/// config-poll task re-reads the three pipeline lists on change, so a running
-/// engine picks the move up live.
-pub fn move_module_stage(name: &str, from: &str, to: &str) {
-    move_module_stage_at(&engine_config_path(), name, from, to);
+/// The move one Shift+arrow resolves to, once the engine's config ordering is
+/// known. Split from the resolver so the two ways a move can end (a jump into a
+/// different stage, or a reorder within the in-process chain) are matchable on
+/// their own instead of as a bundle of strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StageMove {
+    /// Move into a different stage. `to` is `preprocess`|`inprocess`|
+    /// `postprocess`.
+    JumpTo { to: &'static str },
+    /// Reorder within in-process: place `name` immediately before `other`.
+    Before { other: String },
+    /// Reorder within in-process: place `name` immediately after `other`.
+    After { other: String },
 }
 
-/// As [`move_module_stage`], but against a specific `config.json` so unit tests
-/// can point it at a temp file instead of the live engine config.
-fn move_module_stage_at(path: &Path, name: &str, from: &str, to: &str) {
-    let Ok(data) = std::fs::read_to_string(path) else { return };
-    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&data) else { return };
-    let priority = read_priority(&root, name, from).unwrap_or(DEFAULT_PRIORITY);
+/// Resolve a Shift+arrow DIRECTION against the engine's config ordering.
+///
+/// The semantics come from what each stage IS:
+///  - pre-process and post-process are UNORDERED async fanouts, so a shift
+///    toward in-process from either is a single JUMP into in-process (appended
+///    at the end), and the reverse direction is a no-op — there is nothing
+///    earlier than pre, nothing later than post.
+///  - in-process is an ORDERED sequential chain, so within it a shift
+///    REORDERS: shifted up swaps with the module directly above it, shifted
+///    down swaps with the module directly below it. A module already at the
+///    chain's head (up) or tail (down) falls out into the neighbouring
+///    UNORDERED stage, where it is inserted alphabetically (the only
+///    deterministic order an unordered stage has).
+///  - an `input` adapter feeds the pipeline rather than running inside it, so
+///    it is never moved in either direction.
+///
+/// `from` is the module's CURRENT position as the engine reports it (`output`
+/// is the engine's alias for post-process, the same mapping the modules
+/// window's `group_for_position` uses). The in-process ORDER comes from the
+/// `inprocessModules` list, which is why this lives here and not in the window:
+/// the window's `module_entries` are alphabetical and have no chain order.
+/// Returns `None` for a no-op.
+fn resolve_stage_move(
+    root: &serde_json::Value,
+    name: &str,
+    from: &str,
+    direction: StageDirection,
+) -> Option<StageMove> {
+    let from = if from == "output" { "postprocess" } else { from };
+    if from == "input" {
+        return None;
+    }
+    let members = |key: &str| -> Vec<String> {
+        root.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    match (from, direction) {
+        ("preprocess", StageDirection::Earlier) => None,
+        ("postprocess", StageDirection::Later) => None,
+        ("preprocess", StageDirection::Later) => Some(StageMove::JumpTo { to: "inprocess" }),
+        ("postprocess", StageDirection::Earlier) => Some(StageMove::JumpTo { to: "inprocess" }),
+        ("inprocess", StageDirection::Earlier) => {
+            let chain = members("inprocessModules");
+            let idx = chain.iter().position(|m| m == name)?;
+            if idx == 0 {
+                // At the head of the chain: fall out into the unordered
+                // pre-process stage (alphabetical insertion).
+                Some(StageMove::JumpTo { to: "preprocess" })
+            } else {
+                // Swap with the module directly above: `name` ends up
+                // immediately BEFORE the module that was above it.
+                Some(StageMove::Before { other: chain[idx - 1].clone() })
+            }
+        }
+        ("inprocess", StageDirection::Later) => {
+            let chain = members("inprocessModules");
+            let idx = chain.iter().position(|m| m == name)?;
+            if idx + 1 >= chain.len() {
+                // At the tail of the chain: fall out into the unordered
+                // post-process stage (alphabetical insertion).
+                Some(StageMove::JumpTo { to: "postprocess" })
+            } else {
+                // Swap with the module directly below: `name` ends up
+                // immediately AFTER the module that was below it.
+                Some(StageMove::After { other: chain[idx + 1].clone() })
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Apply a stage JUMP: remove `name` from every ordering list, then insert it
+/// into the target stage's list, keeping its recorded priority. In-process is
+/// appended (the chain grows at the end); pre/post are inserted alphabetically
+/// because those stages are unordered and alphabetical is the deterministic
+/// order.
+fn apply_stage_jump(root: &mut serde_json::Value, name: &str, from: &str, to: &str) {
+    let priority = read_priority(root, name, from).unwrap_or(DEFAULT_PRIORITY);
     for key in ["inputs", "preprocessModules", "inprocessModules", "postprocessModules"] {
         if let Some(list) = root.get_mut(key).and_then(|v| v.as_array_mut()) {
             list.retain(|e| e.get("name").and_then(|v| v.as_str()) != Some(name));
@@ -1479,10 +1560,112 @@ fn move_module_stage_at(path: &Path, name: &str, from: &str, to: &str) {
         root[key] = serde_json::json!([]);
     }
     if let Some(list) = root[key].as_array_mut() {
-        list.push(serde_json::json!({ "name": name, "priority": priority }));
+        let entry = serde_json::json!({ "name": name, "priority": priority });
+        if to == "preprocess" || to == "postprocess" {
+            let pos = list.iter().position(|e| {
+                e.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n > name)
+                    .unwrap_or(false)
+            });
+            match pos {
+                Some(i) => list.insert(i, entry),
+                None => list.push(entry),
+            }
+        } else {
+            list.push(entry);
+        }
     }
-    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-        let _ = write_atomic_0600(path, &pretty);
+}
+
+/// Apply an in-process REORDER: move `name` so it sits immediately before
+/// (`before`) or after (`after`) `other` within the in-process chain. The entry
+/// itself is moved, so its recorded fields (priority) survive untouched.
+fn apply_inprocess_reorder(root: &mut serde_json::Value, name: &str, other: &str, before: bool) {
+    let Some(list) = root.get_mut("inprocessModules").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    let Some(idx) = list
+        .iter()
+        .position(|e| e.get("name").and_then(|v| v.as_str()) == Some(name))
+    else {
+        return;
+    };
+    let entry = list.remove(idx);
+    // `other`'s position is found AFTER the removal, so the reorder is relative
+    // to the post-removal chain (removing `name` can shift `other` by one).
+    if let Some(oi) = list
+        .iter()
+        .position(|e| e.get("name").and_then(|v| v.as_str()) == Some(other))
+    {
+        let insert_at = if before { oi } else { oi + 1 };
+        list.insert(insert_at.min(list.len()), entry);
+    } else {
+        // `other` vanished (defensive — a concurrent rewrite); put `name` back
+        // where it was rather than dropping it.
+        list.insert(idx.min(list.len()), entry);
+    }
+}
+
+/// Move a module between/within pipeline stages by a Shift+arrow DIRECTION
+/// rather than by a pre-computed target stage.
+///
+/// `path: None` targets the live engine `config.json` (`engine_config_path()`);
+/// `Some` points at a temp file so unit tests never touch the real engine. `from`
+/// is the module's CURRENT position as the engine reports it. Reads the four
+/// ordering lists, resolves the move against them, rewrites `config.json`, and
+/// returns the module's NEW position — `None` when the requested move is a
+/// no-op (an `input` adapter, or a module already at the requested stage edge).
+///
+/// This is the ONLY place the Shift+arrow move is decided. The in-process
+/// order lives in the `inprocessModules` list, and the window has no access to
+/// it, so the window sends the direction and this resolver does the rest. The
+/// engine's config-poll task re-reads the three pipeline lists on change, so a
+/// running engine picks the move up live.
+pub fn move_module_by_direction(
+    path: Option<&Path>,
+    name: &str,
+    from: &str,
+    direction: StageDirection,
+) -> Result<Option<String>, String> {
+    let live_path;
+    let path: &Path = match path {
+        Some(p) => p,
+        None => {
+            live_path = engine_config_path();
+            &live_path
+        }
+    };
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("cannot parse {}: {}", path.display(), e))?;
+
+    let Some(move_) = resolve_stage_move(&root, name, from, direction) else {
+        return Ok(None);
+    };
+    match move_ {
+        StageMove::JumpTo { to } => {
+            apply_stage_jump(&mut root, name, from, to);
+            if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+                let _ = write_atomic_0600(path, &pretty);
+            }
+            Ok(Some(to.to_string()))
+        }
+        StageMove::Before { other } => {
+            apply_inprocess_reorder(&mut root, name, &other, true);
+            if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+                let _ = write_atomic_0600(path, &pretty);
+            }
+            Ok(Some("inprocess".to_string()))
+        }
+        StageMove::After { other } => {
+            apply_inprocess_reorder(&mut root, name, &other, false);
+            if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+                let _ = write_atomic_0600(path, &pretty);
+            }
+            Ok(Some("inprocess".to_string()))
+        }
     }
 }
 
@@ -1689,44 +1872,178 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn move_module_stage_rewrites_the_ordering_lists() {
-        let tmp = std::env::temp_dir().join(format!("cockatiel-move-{}", uuid::Uuid::now_v7()));
+    /// A temp `config.json` written from a JSON string, returned with its path.
+    fn scratch_config(tag: &str, json: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-move-{}-{}", tag, uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&tmp).unwrap();
         let path = tmp.join("config.json");
-        std::fs::write(
-            &path,
-            r#"{"inputs":[{"name":"discord","priority":100}],"preprocessModules":[{"name":"clip","priority":100},{"name":"polling","priority":50}],"inprocessModules":[{"name":"banned-words","priority":100}]}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, json).unwrap();
+        (tmp, path)
+    }
 
-        // Move `polling` pre → in: gone from preprocess, appended to inprocess,
-        // and its operator-tuned priority survives the move.
-        move_module_stage_at(&path, "polling", "preprocess", "inprocess");
+    /// The module names of an ordering list, in order, for legible assertions.
+    fn names(list: &serde_json::Value) -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn a_pre_module_shifted_later_jumps_into_inprocess_at_the_end() {
+        let (tmp, path) = scratch_config(
+            "pre-later",
+            r#"{"preprocessModules":[{"name":"clip","priority":100},{"name":"polling","priority":50}],"inprocessModules":[{"name":"banned-words","priority":100}]}"#,
+        );
+        let new =
+            move_module_by_direction(Some(&path), "polling", "preprocess", StageDirection::Later).unwrap();
+        assert_eq!(new.as_deref(), Some("inprocess"));
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let pre = root["preprocessModules"].as_array().unwrap();
-        assert_eq!(pre.len(), 1, "polling must leave preprocess: {:?}", pre);
-        assert_eq!(pre[0]["name"], "clip");
-        let in_ = root["inprocessModules"].as_array().unwrap();
-        assert_eq!(in_.len(), 2, "polling must join inprocess: {:?}", in_);
-        assert_eq!(in_[1]["name"], "polling");
-        assert_eq!(in_[1]["priority"], 50, "a tuned priority must survive");
-        // Nothing else changed, and polling is in no other list.
-        assert_eq!(root["inputs"].as_array().unwrap().len(), 1);
-        assert!(root.get("postprocessModules").is_none());
+        assert_eq!(names(&root["preprocessModules"]), vec!["clip"]);
+        assert_eq!(
+            names(&root["inprocessModules"]),
+            vec!["banned-words", "polling"],
+            "an unordered stage's jump into in-process must be APPENDED at the end"
+        );
+        assert_eq!(root["inprocessModules"][1]["priority"], 50, "a tuned priority must survive the jump");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
-        // A module with NO recorded priority moves with the default.
-        std::fs::write(&path, r#"{"preprocessModules":[{"name":"clip"}]}"#).unwrap();
-        move_module_stage_at(&path, "clip", "preprocess", "postprocess");
+    #[test]
+    fn a_post_module_shifted_earlier_jumps_into_inprocess_at_the_end() {
+        let (tmp, path) = scratch_config(
+            "post-earlier",
+            r#"{"postprocessModules":[{"name":"clip","priority":100},{"name":"term","priority":10}],"inprocessModules":[{"name":"banned-words","priority":100}]}"#,
+        );
+        let new = move_module_by_direction(Some(&path), "term", "postprocess", StageDirection::Earlier).unwrap();
+        assert_eq!(new.as_deref(), Some("inprocess"));
         let root: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(root["preprocessModules"].as_array().unwrap().len(), 0);
-        let post = root["postprocessModules"].as_array().unwrap();
-        assert_eq!(post.len(), 1);
-        assert_eq!(post[0]["name"], "clip");
-        assert_eq!(post[0]["priority"], DEFAULT_PRIORITY);
+        assert_eq!(names(&root["postprocessModules"]), vec!["clip"]);
+        assert_eq!(names(&root["inprocessModules"]), vec!["banned-words", "term"]);
+        assert_eq!(root["inprocessModules"][1]["priority"], 10);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
+    #[test]
+    fn an_inprocess_module_shifted_up_swaps_with_the_one_above() {
+        let (tmp, path) = scratch_config(
+            "in-up",
+            r#"{"inprocessModules":[{"name":"alpha","priority":100},{"name":"bravo","priority":100},{"name":"charlie","priority":100}]}"#,
+        );
+        let new = move_module_by_direction(Some(&path), "bravo", "inprocess", StageDirection::Earlier).unwrap();
+        assert_eq!(new.as_deref(), Some("inprocess"));
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            names(&root["inprocessModules"]),
+            vec!["bravo", "alpha", "charlie"],
+            "shifted up must swap with the module directly above"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_inprocess_module_shifted_down_swaps_with_the_one_below() {
+        let (tmp, path) = scratch_config(
+            "in-down",
+            r#"{"inprocessModules":[{"name":"alpha","priority":100},{"name":"bravo","priority":100},{"name":"charlie","priority":100}]}"#,
+        );
+        let new = move_module_by_direction(Some(&path), "bravo", "inprocess", StageDirection::Later).unwrap();
+        assert_eq!(new.as_deref(), Some("inprocess"));
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            names(&root["inprocessModules"]),
+            vec!["alpha", "charlie", "bravo"],
+            "shifted down must swap with the module directly below"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_first_inprocess_module_shifted_up_falls_out_into_preprocess_alphabetically() {
+        let (tmp, path) = scratch_config(
+            "in-head",
+            r#"{"preprocessModules":[{"name":"zebra","priority":100},{"name":"apple","priority":100}],"inprocessModules":[{"name":"alpha","priority":100},{"name":"bravo","priority":100}]}"#,
+        );
+        let new = move_module_by_direction(Some(&path), "alpha", "inprocess", StageDirection::Earlier).unwrap();
+        assert_eq!(new.as_deref(), Some("preprocess"));
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(names(&root["inprocessModules"]), vec!["bravo"]);
+        assert_eq!(
+            names(&root["preprocessModules"]),
+            vec!["alpha", "zebra", "apple"],
+            "pre-process is unordered, so the module must be inserted alphabetically"
+        );
+        assert_eq!(root["preprocessModules"][0]["priority"], 100);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_last_inprocess_module_shifted_down_falls_out_into_postprocess_alphabetically() {
+        let (tmp, path) = scratch_config(
+            "in-tail",
+            r#"{"inprocessModules":[{"name":"alpha","priority":100},{"name":"bravo","priority":100}],"postprocessModules":[{"name":"zebra","priority":100},{"name":"apple","priority":100}]}"#,
+        );
+        let new = move_module_by_direction(Some(&path), "bravo", "inprocess", StageDirection::Later).unwrap();
+        assert_eq!(new.as_deref(), Some("postprocess"));
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(names(&root["inprocessModules"]), vec!["alpha"]);
+        assert_eq!(
+            names(&root["postprocessModules"]),
+            vec!["bravo", "zebra", "apple"],
+            "post-process is unordered, so the module must be inserted alphabetically"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_input_adapter_or_a_stage_edge_is_a_noop_in_either_direction() {
+        // input adapters feed the pipeline rather than running inside it.
+        let (tmp, path) = scratch_config("input", r#"{"inputs":[{"name":"discord","priority":100}]}"#);
+        assert_eq!(
+            move_module_by_direction(Some(&path), "discord", "input", StageDirection::Earlier).unwrap(),
+            None
+        );
+        assert_eq!(
+            move_module_by_direction(Some(&path), "discord", "input", StageDirection::Later).unwrap(),
+            None
+        );
+        // pre + Earlier: nothing earlier than pre.
+        let (tmp2, path2) = scratch_config("pre-edge", r#"{"preprocessModules":[{"name":"clip","priority":100}]}"#);
+        assert_eq!(
+            move_module_by_direction(Some(&path2), "clip", "preprocess", StageDirection::Earlier).unwrap(),
+            None
+        );
+        // post + Later: nothing later than post.
+        let (tmp3, path3) = scratch_config("post-edge", r#"{"postprocessModules":[{"name":"term","priority":100}]}"#);
+        assert_eq!(
+            move_module_by_direction(Some(&path3), "term", "postprocess", StageDirection::Later).unwrap(),
+            None
+        );
+        for t in [&tmp, &tmp2, &tmp3] {
+            let _ = std::fs::remove_dir_all(t);
+        }
+    }
+
+    #[test]
+    fn output_is_treated_as_postprocess_for_the_move() {
+        // The engine reports the post-process stage as `output` sometimes; the
+        // resolver must not lose the move to the unknown-position fallback.
+        let (tmp, path) = scratch_config(
+            "output",
+            r#"{"postprocessModules":[{"name":"term","priority":100}],"inprocessModules":[{"name":"banned-words","priority":100}]}"#,
+        );
+        let new = move_module_by_direction(Some(&path), "term", "output", StageDirection::Earlier).unwrap();
+        assert_eq!(new.as_deref(), Some("inprocess"));
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(names(&root["inprocessModules"]), vec!["banned-words", "term"]);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

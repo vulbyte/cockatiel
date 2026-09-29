@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 
+use crate::windows::modules::StageDirection;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
     FocusLeft,
@@ -63,12 +65,14 @@ pub enum Action {
     /// when the TUI is not the engine's parent, and when the engine has been
     /// removed from the TUI.
     RestartEngine,
-    /// Move a module to a different pipeline stage (`preprocess` < `inprocess`
-    /// < `postprocess`), rewriting its position in the engine's `config.json`
-    /// ordering. Produced by Shift+up/down in the modules window; the payload
-    /// is `(module name, target stage)`, and the dispatcher owns the
-    /// supervisor call that persists the move.
-    MoveModuleStage(String, String),
+    /// Move a module through the pipeline by a Shift+arrow DIRECTION
+    /// (`preprocess` < `inprocess` < `postprocess`), rewriting its position in
+    /// the engine's `config.json` ordering. Produced by Shift+up/down in the
+    /// modules window; the payload is `(module name, direction)`. The window
+    /// has no access to the engine's chain order, so it sends only the
+    /// direction and the dispatcher — which owns the supervisor — resolves what
+    /// the move actually is (a stage jump, or an in-process reorder).
+    MoveModuleStage(String, StageDirection),
     Noop,
 }
 

@@ -68,8 +68,9 @@ pub enum Group {
 /// row the engine-only actions may fire from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
-    /// A group's `[NAME]` header. Selectable, highlights like any row, but
-    /// names neither a module nor the engine: the hint bar narrows to the
+    /// A group's `[NAME]` header. DISPLAY-ONLY: it highlights when selected but
+    /// navigation never lands on it (see [`next_selectable`]), and it names
+    /// neither a module nor the engine — so the hint bar narrows to the
     /// window-level keys and module-scoped actions are refused.
     Header,
     /// The engine row. Selectable, not a module, and the one row the two
@@ -252,36 +253,15 @@ fn header_label(group: Group) -> String {
 /// Named for the pipeline, not the key: "earlier" (toward pre-process) is what
 /// Shift+up asks for and "later" (toward post-process) is what Shift+down asks
 /// for, but the function is really about stage order, so it is the order that
-/// is named.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// is named. Carried inside `Action::MoveModuleStage` as the ONLY thing the
+/// window can know about the move; where the direction lands is decided by the
+/// supervisor, which owns the engine's chain order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StageDirection {
     /// Shift+up: toward an earlier stage (post → in → pre).
     Earlier,
     /// Shift+down: toward a later stage (pre → in → post).
     Later,
-}
-
-/// The pipeline stage a module moves to when Shift+arrowed toward an earlier or
-/// later stage, or `None` when it cannot move that way.
-///
-/// Stage order is preprocess < inprocess < postprocess. An `input` adapter is
-/// not in the three-stage chain at all — it feeds the pipeline rather than
-/// running inside it — so it is not moved in either direction. `None` means
-/// "no-op", and only a module already at the requested edge, or an input
-/// adapter, lands here; both are correct to leave alone.
-pub fn shift_stage(position: &str, direction: StageDirection) -> Option<&'static str> {
-    match direction {
-        StageDirection::Earlier => match position {
-            "postprocess" => Some("inprocess"),
-            "inprocess" => Some("preprocess"),
-            _ => None,
-        },
-        StageDirection::Later => match position {
-            "preprocess" => Some("inprocess"),
-            "inprocess" => Some("postprocess"),
-            _ => None,
-        },
-    }
 }
 
 /// The fixed width of the name column in the list, so every module's status
@@ -297,6 +277,41 @@ pub fn clamp_selected(selected: usize, total: usize) -> usize {
     } else {
         selected.min(total - 1)
     }
+}
+
+/// The next SELECTABLE row index from `selected`, walking `dir` (1 = down,
+/// -1 = up) through `rows` while skipping group headers.
+///
+/// Headers are display-only: navigation must never LAND on one, so the walk
+/// stops at the first non-header. When the walk runs off the end of the list
+/// (the trailing `[IN-PROCESS]`/`[POST-PROCESS]` headers are always present,
+/// empty or not, so the boundary row IS a header), it settles on the last
+/// selectable row in the walked direction rather than on the header. Clamped at
+/// both ends — a press at the top or bottom holds the current row instead of
+/// wrapping or landing on a header.
+pub fn next_selectable(selected: usize, total: usize, rows: &[GroupedRow], dir: i32) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    // Walk in the direction, skipping headers...
+    let mut i = selected as i64 + dir as i64;
+    while i >= 0 && i < total as i64 {
+        if !rows[i as usize].is_header() {
+            return i as usize;
+        }
+        i += dir as i64;
+    }
+    // ...and off the end: the boundary is a header, so fall back to the nearest
+    // selectable row in the walked direction (the last module, or the engine).
+    let mut j = if dir > 0 { total as i64 - 1 } else { 0 };
+    while j >= 0 && j < total as i64 {
+        if !rows[j as usize].is_header() {
+            return j as usize;
+        }
+        j -= dir as i64;
+    }
+    // No selectable row at all — cannot happen while the engine row exists.
+    selected
 }
 
 /// The scroll offset that keeps row `selected` inside a `visible`-row viewport
@@ -519,6 +534,8 @@ pub struct ModulesWindow {
     /// The selected row of the grouped list: 0 is the `[ENGINE]` header,
     /// [`ENGINE_ROW`] is the engine, the rest are group headers and module
     /// rows. Always an index into that view, never into `module_entries`.
+    /// Navigation keeps the selection on the engine row or a module row —
+    /// headers are display-only (see [`next_selectable`]).
     pub selected: usize,
 
     /// Clickable region of the pending prompt's link, set during render.
@@ -1413,26 +1430,21 @@ impl ModulesWindow {
     }
 
     /// The `Action` for a Shift+arrow stage move on the selected row: the
-    /// module's name and the stage it is moving TO.
+    /// module's name and the DIRECTION the operator asked for.
     ///
-    /// Rows that name no module (headers, the engine) and modules that cannot
-    /// move the requested direction (input adapters, or a module already at the
-    /// edge) consume the key as a `Noop` rather than falling through — and, for
-    /// an adapter, rather than emitting a move the dispatcher would have to
-    /// refuse.
+    /// The window answers only "which module" — the direction is all it can
+    /// know, because the actual move (a jump into another stage, or a reorder
+    /// within the in-process chain) depends on the engine's `config.json`
+    /// ordering, which the window has no access to. The dispatch, which owns
+    /// the supervisor, resolves the direction against the chain order and
+    /// refuses the no-ops (input adapters, stage edges). A row that names no
+    /// module — a header, the engine — is a no-op here, and the key is still
+    /// consumed so it does not fall through to navigation or another binding.
     fn stage_action(&self, stats: &GlobalStats, direction: StageDirection) -> Option<Action> {
-        let Some((name, position)) = self
-            .selected_row(stats)
-            .module_index()
-            .and_then(|i| stats.module_entries.get(i))
-            .map(|m| (m.name.clone(), m.position.clone()))
-        else {
+        let Some(name) = self.selected_row(stats).module_name(stats) else {
             return Some(Action::Noop);
         };
-        match shift_stage(&position, direction) {
-            Some(to) => Some(Action::MoveModuleStage(name, to.to_string())),
-            None => Some(Action::Noop),
-        }
+        Some(Action::MoveModuleStage(name, direction))
     }
 }
 
@@ -1448,7 +1460,9 @@ impl Window for ModulesWindow {
     fn selection_is_module(&self, stats: &GlobalStats) -> bool {
         // The engine row AND every group header are real selections that are
         // deliberately not a module, and the app's fallback (act on the first
-        // known module) is exactly the wrong thing to do with them.
+        // known module) is exactly the wrong thing to do with them. Navigation
+        // never lands on a header, but a stale selection after a shrunken list
+        // can still resolve to one, so the refusal must hold there too.
         self.selected_row(stats).module_index().is_some()
     }
 
@@ -1543,7 +1557,7 @@ impl Window for ModulesWindow {
         //
         // One list, one selection, one scroll. The modules are grouped by
         // pipeline stage ([ENGINE], then input adapters, then the pre/in/post
-        // stages), each group headed by a selectable `[NAME]` line. The engine
+        // stages), each group headed by a display-only `[NAME]` line. The engine
         // is row [`ENGINE_ROW`] under the `[ENGINE]` header — a real, selectable
         // row, not a status line.
         //
@@ -1838,22 +1852,25 @@ impl Window for ModulesWindow {
         // would swallow the very keys Shift+arrow is supposed to mean.
         match key.code {
             KeyCode::Char('j') | KeyCode::Down if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.selected = clamp_selected(self.selected + 1, total);
+                // Group headers are DISPLAY-ONLY: selection lands on the engine
+                // row or a module row, so down/up skip the `[NAME]` lines.
+                self.selected = next_selectable(self.selected, total, &rows, 1);
                 self.scroll = grouped_selected_line(&lines, self.selected);
                 Some(Action::Noop)
             }
             KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.selected = clamp_selected(self.selected.saturating_sub(1), total);
+                self.selected = next_selectable(self.selected, total, &rows, -1);
                 self.scroll = grouped_selected_line(&lines, self.selected);
                 Some(Action::Noop)
             }
-            // Shift+down / Shift+up move the selected module to a later /
-            // earlier pipeline stage (pre < in < post). The window answers only
-            // "which module, and to where"; the rewrite of the engine's
-            // config.json happens in the dispatch, which owns the supervisor.
-            // An input adapter, a header, the engine, or a module already at
-            // the requested edge is a no-op — the key is still consumed, so it
-            // does not fall through to some other binding.
+            // Shift+down / Shift+up ask the dispatcher to move the selected
+            // module earlier or later through the pipeline. The window answers
+            // only "which module, and which direction"; the dispatch reads the
+            // engine's config.json ordering and resolves the move (a stage
+            // jump, an in-process reorder, or a no-op for an input adapter or a
+            // stage edge). A header or the engine names no module, so those are
+            // a no-op here — the key is still consumed, so it does not fall
+            // through to some other binding.
             KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.stage_action(stats, StageDirection::Later)
             }
@@ -2953,9 +2970,9 @@ mod engine_row_tests {
     //! wrong is silent: the wrong row highlights, the wrong module gets
     //! stopped, or the list scrolls wrong.
     use super::{
-        clamp_selected, scroll_for, grouped_rows, grouped_lines, grouped_selected_line,
-        GroupedLine, GroupedRow, Group, EntryKind, header_label, shift_stage, StageDirection,
-        ENGINE_REMOVED_STATUS, ENGINE_ROW, ENGINE_ROW_LABEL, STATUS_COL, Reload,
+        clamp_selected, scroll_for, next_selectable, grouped_rows, grouped_lines,
+        grouped_selected_line, GroupedLine, GroupedRow, Group, EntryKind, header_label,
+        StageDirection, ENGINE_REMOVED_STATUS, ENGINE_ROW, ENGINE_ROW_LABEL, STATUS_COL, Reload,
         ENGINE_CONFIG_KEYS,
     };
     use crate::app::{ConfigTarget, Window};
@@ -3166,48 +3183,48 @@ mod engine_row_tests {
     // ── selection + scroll arithmetic ─────────────────────────────────────
 
     #[test]
-    fn navigation_clamps_at_both_ends_of_the_grouped_list() {
+    fn navigation_skips_group_headers_and_clamps_at_both_ends() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(2);
         // rows = [ENGINE], engine, [ADAPTERS], [PRE-PROCESS], m0, m1,
-        // [IN-PROCESS], [POST-PROCESS] → 8 rows.
+        // [IN-PROCESS], [POST-PROCESS] → 8 rows, of which 3 are selectable.
         let rows = grouped_rows(&stats);
         assert_eq!(rows.len(), 8);
         assert_eq!(w.selected, ENGINE_ROW);
 
-        // Up from the engine row lands on the [ENGINE] header; further up is
-        // clamped.
+        // Up from the engine row: the [ENGINE] header is display-only, so the
+        // selection stays on the engine row.
         w.handle_key(up(), &mut stats);
-        assert_eq!(w.selected, 0);
+        assert_eq!(w.selected, ENGINE_ROW);
         w.handle_key(up(), &mut stats);
-        assert_eq!(w.selected, 0);
+        assert_eq!(w.selected, ENGINE_ROW);
 
-        // Down to the bottom; down must not wrap. The last row is now the
-        // [POST-PROCESS] header, not a module — every header is always there.
+        // Down: the [ADAPTERS]/[PRE-PROCESS] headers are skipped, so one press
+        // lands on the first module, and the walk never stops on the trailing
+        // [IN-PROCESS]/[POST-PROCESS] headers.
+        let m0 = row_index(&rows, Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        let m1 = row_index(&rows, Group::PreProcess, EntryKind::Module(1)).expect("m1");
+        w.handle_key(down(), &mut stats);
+        assert_eq!(w.selected, m0, "one down from the engine must land on the first module");
+        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
+        w.handle_key(down(), &mut stats);
+        assert_eq!(w.selected, m1);
         for _ in 0..10 {
             w.handle_key(down(), &mut stats);
         }
-        assert_eq!(w.selected, rows.len() - 1, "down must not wrap");
+        assert_eq!(w.selected, m1, "down must stop at the last selectable row, never on a header");
+        assert!(!rows[w.selected].is_header(), "a header must never become the selected row");
 
-        // ...and back up: past the trailing [IN-PROCESS] header to the last
-        // module, then across the [PRE-PROCESS] header to the engine row.
-        w.handle_key(up(), &mut stats); // [IN-PROCESS]
-        w.handle_key(up(), &mut stats); // m1
-        w.handle_key(up(), &mut stats); // m0
-        let m0 = row_index(&rows, Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        // ...and back up: straight across the headers to the engine row.
+        w.handle_key(up(), &mut stats);
         assert_eq!(w.selected, m0);
-        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
-        w.handle_key(up(), &mut stats); // [PRE-PROCESS]
-        let pre = row_index(&rows, Group::PreProcess, EntryKind::Header).expect("[PRE-PROCESS]");
-        assert_eq!(w.selected, pre, "the [PRE-PROCESS] header is selectable");
-        w.handle_key(up(), &mut stats); // [ADAPTERS]
-        w.handle_key(up(), &mut stats); // engine
+        w.handle_key(up(), &mut stats);
         assert_eq!(w.selected, ENGINE_ROW);
         assert_eq!(w.selected_module_name(&stats), None);
     }
 
     #[test]
-    fn a_shrunken_module_list_pulls_the_selection_back_into_range() {
+    fn a_shrunken_module_list_pulls_the_selection_onto_a_selectable_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
         // Walk to the last MODULE (m2), not just the last row — the shrink
@@ -3219,25 +3236,25 @@ mod engine_row_tests {
         assert!(w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m2"));
 
-        // The engine drops two of its modules (a module removed itself).
+        // The engine drops two of its modules (a module removed itself). The
+        // stale selection clamps onto a HEADER, and the next press must walk
+        // back to the last SELECTABLE row — the walk never settles on a header.
         stats.module_entries.truncate(1);
         w.handle_key(key('j'), &mut stats);
-        // 1 module + 5 headers = 7 rows: the stale selection is still inside,
-        // so it holds, and the next press cannot walk off the end.
-        assert_eq!(w.selected, grouped_rows(&stats).len() - 1);
+        let rows = grouped_rows(&stats);
+        let m0 = row_index(&rows, Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        assert_eq!(
+            w.selected, m0,
+            "a shrunken list must land on the last selectable row, not a header"
+        );
         w.handle_key(down(), &mut stats);
-        assert_eq!(w.selected, grouped_rows(&stats).len() - 1);
+        assert_eq!(w.selected, m0, "down past the end must hold on the last selectable row");
 
-        // With NO modules at all the list is the headers + the engine row, and
-        // the stale selection is pulled back into range — never wrapped.
+        // With NO modules at all the only selectable row is the engine row —
+        // a stale selection pulled back onto the trailing headers walks home.
         stats.module_entries.clear();
         w.handle_key(down(), &mut stats);
-        assert_eq!(w.selected, grouped_rows(&stats).len() - 1, "clamped, not wrapped");
-        // ...and the engine row is still reachable.
-        while w.selected > ENGINE_ROW {
-            w.handle_key(up(), &mut stats);
-        }
-        assert_eq!(w.selected, ENGINE_ROW);
+        assert_eq!(w.selected, ENGINE_ROW, "with no modules, the engine row is the only landing spot");
     }
 
     #[test]
@@ -3247,6 +3264,39 @@ mod engine_row_tests {
         assert_eq!(clamp_selected(9, 4), 3);
         assert_eq!(clamp_selected(0, 1), 0);
         assert_eq!(clamp_selected(5, 1), 0);
+    }
+
+    #[test]
+    fn next_selectable_skips_headers_and_clamps_at_both_ends() {
+        // rows = [ENGINE](0), engine(1), [ADAPTERS](2), [PRE-PROCESS](3), m0(4),
+        // m1(5), [IN-PROCESS](6), [POST-PROCESS](7) — 8 rows, 3 selectable.
+        let stats = stats_with_modules(2);
+        let rows = grouped_rows(&stats);
+        let total = rows.len();
+        let m0 = row_index(&rows, Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        let m1 = row_index(&rows, Group::PreProcess, EntryKind::Module(1)).expect("m1");
+
+        // Down: engine → m0 → m1, then clamps on m1 (the trailing headers are
+        // skipped, and a press at the bottom holds).
+        assert_eq!(next_selectable(ENGINE_ROW, total, &rows, 1), m0);
+        assert_eq!(next_selectable(m0, total, &rows, 1), m1);
+        assert_eq!(next_selectable(m1, total, &rows, 1), m1);
+        assert_eq!(
+            next_selectable(total - 1, total, &rows, 1),
+            m1,
+            "down past the end must clamp on the last selectable row, not the boundary header"
+        );
+
+        // Up: m1 → m0 → engine, then clamps on the engine (the leading header
+        // is skipped, and a press at the top holds).
+        assert_eq!(next_selectable(m1, total, &rows, -1), m0);
+        assert_eq!(next_selectable(m0, total, &rows, -1), ENGINE_ROW);
+        assert_eq!(next_selectable(ENGINE_ROW, total, &rows, -1), ENGINE_ROW);
+        assert_eq!(
+            next_selectable(0, total, &rows, -1),
+            ENGINE_ROW,
+            "up from the top header must clamp on the engine row"
+        );
     }
 
     #[test]
@@ -3481,19 +3531,18 @@ mod engine_row_tests {
         let mut stats = stats_with_modules(2);
         assert!(w.selection_is_engine(&stats), "row ENGINE_ROW is the engine");
         assert!(!w.selection_is_module(&stats), "…and it is not a module");
-        // One down lands on the [ADAPTERS] header: still not the engine, and
-        // not a module either.
+        // One down lands on the FIRST MODULE — the [ADAPTERS] and [PRE-PROCESS]
+        // headers are skipped by navigation.
         w.handle_key(down(), &mut stats);
+        assert!(!w.selection_is_engine(&stats));
+        assert!(w.selection_is_module(&stats), "one down from the engine must land on a module");
+        // A group header — reachable only by direct assignment now — is still
+        // not a module, and a stale selection pulled back onto one stays that
+        // way.
+        let adapters = row_index(&grouped_rows(&stats), Group::Adapters, EntryKind::Header).expect("[ADAPTERS]");
+        w.selected = adapters;
         assert!(!w.selection_is_engine(&stats));
         assert!(!w.selection_is_module(&stats), "a group header is not a module");
-        // The row after it is the [PRE-PROCESS] header (also not a module),
-        // and the one after that IS a module.
-        w.handle_key(down(), &mut stats);
-        assert!(!w.selection_is_engine(&stats));
-        assert!(!w.selection_is_module(&stats), "a group header is not a module");
-        w.handle_key(down(), &mut stats);
-        assert!(!w.selection_is_engine(&stats));
-        assert!(w.selection_is_module(&stats));
         // A window with no notion of the engine row must not claim it, or the
         // app's "act on the first known module" fallback would be one more way
         // to restart an engine nobody selected.
@@ -3535,25 +3584,25 @@ mod engine_row_tests {
     fn a_module_action_has_no_target_on_the_engine_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
-        // One down lands on the [ADAPTERS] header, which also names no module
-        // — so the "first known module" fallback must not fire there either.
-        w.handle_key(down(), &mut stats);
+        // The engine row names no module, so the "first known module" fallback
+        // must not fire there.
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
 
-        // The next row is the [PRE-PROCESS] header (still not a module) and
-        // the one after it is m0.
-        w.handle_key(down(), &mut stats);
-        assert!(!w.selection_is_module(&stats));
+        // One down lands on the FIRST module — the [ADAPTERS] and [PRE-PROCESS]
+        // headers are skipped — so the module fallback is correct there.
         w.handle_key(down(), &mut stats);
         assert!(w.selection_is_module(&stats));
-        let first = w.selected_module_name(&stats);
-        // The fallback the app would otherwise use: the FIRST known module.
-        assert_eq!(first.as_deref(), Some("m0"));
+        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
 
-        // Up three times crosses both headers back to the engine row.
-        w.handle_key(up(), &mut stats);
-        w.handle_key(up(), &mut stats);
+        // A group header — reachable only by direct assignment, since
+        // navigation skips it — still names no module.
+        let adapters = row_index(&grouped_rows(&stats), Group::Adapters, EntryKind::Header).expect("[ADAPTERS]");
+        w.selected = adapters;
+        assert!(!w.selection_is_module(&stats));
+        assert_eq!(w.selected_module_name(&stats), None);
+
+        // Up from the header crosses back to the engine row, still no module.
         w.handle_key(up(), &mut stats);
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
@@ -3623,10 +3672,8 @@ mod engine_row_tests {
     fn the_hint_bar_offers_the_module_actions_on_a_module_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
-        // Down to the first module: [ENGINE] header → engine row → [ADAPTERS]
-        // → [PRE-PROCESS] header → m0.
-        w.handle_key(down(), &mut stats);
-        w.handle_key(down(), &mut stats);
+        // One down from the engine lands on the first module — the [ADAPTERS]
+        // and [PRE-PROCESS] headers are skipped.
         w.handle_key(down(), &mut stats);
         assert!(w.selection_is_module(&stats));
         let bar = super::tests::render_with(&mut w, &stats, 220, 20, &keymap());
@@ -3643,12 +3690,15 @@ mod engine_row_tests {
 
     /// A group header names a stage, so its bar is the window-level keys only —
     /// no module actions (there is no module), and no engine actions (there is
-    /// no engine on a header row).
+    /// no engine on a header row). Navigation never lands on a header, so the
+    /// bar is reached by direct assignment — the renderer still draws whatever
+    /// `selected` names.
     #[test]
     fn the_hint_bar_offers_only_window_actions_on_a_group_header() {
         let mut w = super::ModulesWindow::new();
-        let mut stats = stats_with_modules(3);
-        w.handle_key(down(), &mut stats);
+        let stats = stats_with_modules(3);
+        let adapters = row_index(&grouped_rows(&stats), Group::Adapters, EntryKind::Header).expect("[ADAPTERS]");
+        w.selected = adapters;
         assert!(w.selected_row(&stats).is_header());
         let bar = super::tests::render_with(&mut w, &stats, 220, 20, &keymap());
         assert_eq!(
@@ -3685,52 +3735,45 @@ mod engine_row_tests {
         );
     }
 
-    // ── Shift+arrows: moving a module between pipeline stages ────────────
+    // ── Shift+arrows: moving a module through the pipeline ──────────────
 
-    /// The stage-order rule, as a pure function: pre < in < post, and input
-    /// adapters are not in the chain at all.
+    /// The window answers only "which module, and which direction" — the
+    /// actual move (a stage jump vs an in-process reorder) is resolved by the
+    /// dispatcher against the engine's config.json ordering, which the window
+    /// has no access to. So a module ALWAYS emits a direction, even at a stage
+    /// edge or on an adapter; the no-op lives in the resolver.
     #[test]
-    fn shift_stage_moves_between_the_three_pipeline_stages() {
-        // Later: pre → in → post.
-        assert_eq!(shift_stage("preprocess", StageDirection::Later), Some("inprocess"));
-        assert_eq!(shift_stage("inprocess", StageDirection::Later), Some("postprocess"));
-        // Earlier: post → in → pre.
-        assert_eq!(shift_stage("postprocess", StageDirection::Earlier), Some("inprocess"));
-        assert_eq!(shift_stage("inprocess", StageDirection::Earlier), Some("preprocess"));
-        // The edges: nothing to move to, so a no-op rather than a wrap-around.
-        assert_eq!(shift_stage("postprocess", StageDirection::Later), None);
-        assert_eq!(shift_stage("preprocess", StageDirection::Earlier), None);
-        // Input adapters feed the pipeline rather than running inside it.
-        assert_eq!(shift_stage("input", StageDirection::Later), None);
-        assert_eq!(shift_stage("input", StageDirection::Earlier), None);
-    }
-
-    /// The window answers "which module, and to where"; the rewrite of the
-    /// engine's config.json happens in the dispatch. Shift+down on a pre
-    /// module asks for in-process; once the dispatch has applied that move to
-    /// the view (the module now sits in the in-process group), Shift+up asks
-    /// for pre-process again.
-    #[test]
-    fn shift_down_moves_a_pre_module_to_inprocess_and_shift_up_back() {
+    fn shift_on_a_module_emits_the_direction_not_a_target_stage() {
         let mut w = super::ModulesWindow::new();
-        let mut stats = stats_with_modules(3); // all pre-process
-        w.handle_key(down(), &mut stats); // [ADAPTERS] header
-        w.handle_key(down(), &mut stats); // [PRE-PROCESS] header
-        w.handle_key(down(), &mut stats); // m0
+        let mut stats = stats_with_modules(2); // all pre-process
+        w.handle_key(down(), &mut stats); // m0 (headers are skipped)
         assert!(w.selection_is_module(&stats));
         assert_eq!(
             w.handle_key(shift_down(), &mut stats),
-            Some(Action::MoveModuleStage("m0".to_string(), "inprocess".to_string()))
+            Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Later))
         );
-        // The window has NOT changed the view (the dispatch owns that), so the
-        // module still reads as pre-process and cannot move earlier yet.
         assert_eq!(
             w.handle_key(shift_up(), &mut stats),
-            Some(Action::Noop),
-            "a pre-process module cannot move earlier"
+            Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Earlier)),
+            "even a pre module at the earlier edge emits the direction; the resolver refuses it"
         );
-        // Simulate the dispatch having applied the move: the module is now
-        // grouped under [IN-PROCESS], and Shift+up sends it back.
+    }
+
+    /// The window has NOT changed the view (the dispatch owns that), so a
+    /// Shift+down on a pre module still emits `Later`; the resolver turns pre +
+    /// Later into a jump into in-process.
+    #[test]
+    fn shift_down_on_a_pre_module_emits_later_until_the_dispatch_moves_it() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with_modules(3); // all pre-process
+        w.handle_key(down(), &mut stats); // m0 (headers are skipped)
+        assert_eq!(
+            w.handle_key(shift_down(), &mut stats),
+            Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Later))
+        );
+        // Simulate the dispatch having applied the move: the module now sits in
+        // the in-process group, and Shift+up asks for the earlier direction
+        // (which the resolver turns into a reorder, or a fall-out to pre).
         stats.module_entries[0].position = "inprocess".to_string();
         w.selected = grouped_rows(&stats)
             .iter()
@@ -3738,42 +3781,48 @@ mod engine_row_tests {
             .expect("m0 must be in the grouped view");
         assert_eq!(
             w.handle_key(shift_up(), &mut stats),
-            Some(Action::MoveModuleStage("m0".to_string(), "preprocess".to_string()))
+            Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Earlier))
         );
     }
 
-    /// A module at the requested edge, or an input adapter, cannot move that
-    /// direction — the key is consumed as a no-op rather than emitting a move
-    /// the dispatcher would have to refuse.
+    /// A module at the requested edge, or an input adapter, is refused by the
+    /// RESOLVER (which sees the config order), not by the window — the window
+    /// cannot know a post module is already last, or that an adapter feeds the
+    /// pipeline rather than running inside it, so it keeps emitting the
+    /// direction and the dispatcher no-ops.
     #[test]
-    fn shift_on_an_adapter_or_a_stage_edge_is_a_noop() {
+    fn shift_on_an_adapter_or_a_stage_edge_still_emits_the_direction() {
         // A post-process module shifted down is already last.
         let mut stats = stats_with(&[("term", "postprocess")]);
         let mut w = super::ModulesWindow::new();
-        w.handle_key(down(), &mut stats); // [ADAPTERS] header
-        w.handle_key(down(), &mut stats); // [PRE-PROCESS] header
-        w.handle_key(down(), &mut stats); // [IN-PROCESS] header
-        w.handle_key(down(), &mut stats); // [POST-PROCESS] header
-        w.handle_key(down(), &mut stats); // term
-        assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
+        w.handle_key(down(), &mut stats); // term (headers are skipped)
+        assert_eq!(
+            w.handle_key(shift_down(), &mut stats),
+            Some(Action::MoveModuleStage("term".to_string(), StageDirection::Later))
+        );
         // ...and an earlier shift-up DOES move it into in-process.
         assert_eq!(
             w.handle_key(shift_up(), &mut stats),
-            Some(Action::MoveModuleStage("term".to_string(), "inprocess".to_string()))
+            Some(Action::MoveModuleStage("term".to_string(), StageDirection::Earlier))
         );
 
-        // An input adapter is not moved at all, either direction.
+        // An input adapter is emitted too; the resolver refuses it.
         let mut stats2 = stats_with(&[("discord", "input")]);
         let mut w2 = super::ModulesWindow::new();
-        w2.handle_key(down(), &mut stats2); // [ADAPTERS] header
-        w2.handle_key(down(), &mut stats2); // discord
-        assert_eq!(w2.handle_key(shift_down(), &mut stats2), Some(Action::Noop));
-        assert_eq!(w2.handle_key(shift_up(), &mut stats2), Some(Action::Noop));
+        w2.handle_key(down(), &mut stats2); // discord (headers are skipped)
+        assert_eq!(
+            w2.handle_key(shift_down(), &mut stats2),
+            Some(Action::MoveModuleStage("discord".to_string(), StageDirection::Later))
+        );
+        assert_eq!(
+            w2.handle_key(shift_up(), &mut stats2),
+            Some(Action::MoveModuleStage("discord".to_string(), StageDirection::Earlier))
+        );
     }
 
     /// Headers and the engine row name no module, so a Shift+arrow there is a
-    /// no-op too — but the key is still consumed, so it does not fall through
-    /// to navigation or any other binding.
+    /// no-op — but the key is still consumed, so it does not fall through to
+    /// navigation or any other binding.
     #[test]
     fn shift_on_a_header_or_the_engine_row_is_a_noop() {
         let mut w = super::ModulesWindow::new();
@@ -3781,8 +3830,10 @@ mod engine_row_tests {
         // Engine row.
         assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
         assert_eq!(w.handle_key(shift_up(), &mut stats), Some(Action::Noop));
-        // The [ADAPTERS] header.
-        w.handle_key(down(), &mut stats);
+        // A group header — reached by direct assignment, since navigation skips
+        // it — is a no-op too.
+        let adapters = row_index(&grouped_rows(&stats), Group::Adapters, EntryKind::Header).expect("[ADAPTERS]");
+        w.selected = adapters;
         assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
     }
 
