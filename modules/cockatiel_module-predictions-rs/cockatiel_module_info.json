@@ -13,5 +13,6 @@
   "autostart": false,
   "terminal": false,
   "price": 0,
-  "min_rank": 0
+  "min_rank": 0,
+  "authority": 0
 }

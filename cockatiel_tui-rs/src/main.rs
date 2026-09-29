@@ -3536,6 +3536,8 @@ mod tests {
                     last_seen: 0,
                     avg_ms: None,
                     autostart: false,
+
+                    authority: 0,
                 })
                 .collect();
             s
@@ -3616,6 +3618,7 @@ mod tests {
                     build_flags: Vec::new(),
                     price: 0,
                     min_rank: 0,
+                    authority: crate::plugins::default_authority(),
                 },
                 directory: dir,
             }
@@ -3678,6 +3681,8 @@ mod tests {
                 last_seen: 0,
                 avg_ms: None,
                 autostart: false,
+
+                authority: 0,
             }];
 
             // Filled in by `fill_window_action` for a real keypress. With the
@@ -3983,6 +3988,8 @@ mod engine_lifecycle_tests {
             last_seen: 0,
             avg_ms: None,
             autostart: false,
+
+            authority: 0,
         }];
         s.stats.connection = db::ConnectionInfo { ip: "127.0.0.1".into(), port: 9734, pin: 4242 };
         s

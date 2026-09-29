@@ -1903,6 +1903,7 @@ mod tests {
             build_flags: vec!["build".into(), "--release".into()],
             price: 0,
             min_rank: 0,
+            authority: crate::plugins::default_authority(),
         };
         (Plugin { manifest, directory: dir }, bin_path)
     }
@@ -1964,6 +1965,7 @@ mod tests {
             build_flags: vec![],
             price: 0,
             min_rank: 0,
+            authority: crate::plugins::default_authority(),
         };
         let p = Plugin {
             manifest,
@@ -2274,6 +2276,7 @@ mod tests {
             build_flags: vec![],
             price: 0,
             min_rank: 0,
+            authority: crate::plugins::default_authority(),
         };
         let plugin = Plugin {
             manifest,
@@ -2344,6 +2347,7 @@ mod tests {
             build_flags: vec![],
             price: 0,
             min_rank: 0,
+            authority: crate::plugins::default_authority(),
         };
         let plugin = Plugin {
             manifest,
@@ -2804,6 +2808,8 @@ mod tests {
             last_seen: 0,
             avg_ms: None,
             autostart: false,
+
+            authority: 0,
         };
         // Simulate the stale pre-poll state: alpha was moved to the head of the
         // chain by a Shift+up, but the local entries still show the old order.

@@ -37,6 +37,9 @@ pub struct ModuleStatus {
     pub avg_ms: Option<f64>,
     /// Whether the module is set to start automatically (from its manifest).
     pub autostart: bool,
+    /// The module's authority gate level (0=user, 1=mod, 2=admin, 3=owner),
+    /// from its manifest.
+    pub authority: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -480,6 +483,7 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                         let last_seen = row.get("last_seen").and_then(|v| v.as_i64()).unwrap_or(0);
                         let avg_ms = row.get("avg_ms").and_then(|v| v.as_f64());
                         let autostart = row.get("autostart").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let authority = row.get("authority").and_then(|v| v.as_u64()).unwrap_or(1);
 
                         stats.module_entries.push(ModuleStatus {
                             name: name.to_string(),
@@ -494,6 +498,7 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                             last_seen,
                             avg_ms,
                             autostart,
+                            authority,
                         });
                     }
                 }
@@ -922,6 +927,8 @@ mod tests {
                 last_seen: 1,
                 avg_ms: None,
                 autostart: false,
+
+                authority: 0,
             }],
             connection: ConnectionInfo { ip: "10.0.0.1".into(), port: 9734, pin: 123456 },
             pipeline_paused: false,

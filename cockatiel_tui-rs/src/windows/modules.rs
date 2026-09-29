@@ -332,6 +332,11 @@ const STATUS_TEXT_COL: usize = 12;
 /// way.
 const AUTOSTART_COL: usize = 2;
 
+/// The fixed width of the authority-gate tag (`user`/`mod`/`admin`/`owner`)
+/// shown on every module row after the status. The engine row pads to the same
+/// width so the ms column stays aligned across rows.
+const AUTHORITY_TAG_COL: usize = 8;
+
 /// The fixed width of the ms column, right-aligned within it so `7.3ms` and
 /// `157.3ms` share a right edge.
 const MS_COL: usize = 9;
@@ -1731,9 +1736,10 @@ impl Window for ModulesWindow {
                                 format_ms(Some(sum_ms))
                             };
                             // Blank fill to the ms column, whose start includes
-                            // the same 2-space row indent a module row has (the
-                            // header label carries that indent too).
-                            let ms_start = 2 + STATUS_COL + STATUS_TEXT_COL + AUTOSTART_COL;
+                            // the same 2-space row indent + the authority tag a
+                            // module row has (the header label carries the
+                            // indent too).
+                            let ms_start = 2 + STATUS_COL + STATUS_TEXT_COL + AUTHORITY_TAG_COL + 1 + AUTOSTART_COL;
                             let pad = ms_start.saturating_sub(header_name.len());
                             let header_style = if is_selected {
                                 row_style
@@ -1797,6 +1803,12 @@ impl Window for ModulesWindow {
                                     row_style
                                         .fg(if is_selected { Color::Black } else { engine_status_color }),
                                 ),
+                                // The engine has no authority tag of its own;
+                                // pad to the same width so the ms column aligns.
+                                Span::styled(
+                                    format!("{:<width$}", "", width = AUTHORITY_TAG_COL + 1),
+                                    row_style,
+                                ),
                             ];
                             // Flashing PAUSED, placed in the space where the
                             // autostart marker would sit on a module row (the
@@ -1825,7 +1837,9 @@ impl Window for ModulesWindow {
                                 + group_total_ms(stats, Group::PostProcess);
                             let total_text = format_ms(Some(total_ms));
                             let indent = 2;
-                            let ms_start = indent + STATUS_COL + STATUS_TEXT_COL + AUTOSTART_COL;
+                            // Matches the module rows: name + status + authority
+                            // tag (+leading space) + autostart, then the ms col.
+                            let ms_start = indent + STATUS_COL + STATUS_TEXT_COL + AUTHORITY_TAG_COL + 1 + AUTOSTART_COL;
                             let ms_right = ms_start + MS_COL;
                             // Everything rendered so far: name + status. The
                             // badge (if any) then the ms must end at `ms_right`.
@@ -1900,6 +1914,23 @@ impl Window for ModulesWindow {
                                     row_style.fg(status_color),
                                 ),
                             ];
+                            // Authority gate tag (from the manifest): user/mod/
+                            // admin/owner. Shown after the status so the operator
+                            // sees the module's permission gate at a glance.
+                            let authority_tag = match module.authority {
+                                3 => "owner",
+                                2 => "admin",
+                                1 => "mod",
+                                _ => "user",
+                            };
+                            spans.push(Span::styled(
+                                format!(" {:<width$}", authority_tag, width = AUTHORITY_TAG_COL),
+                                row_style.fg(if is_selected {
+                                    Color::Black
+                                } else {
+                                    Color::Magenta
+                                }),
+                            ));
                             // Autostart marker: `A` for a module set to start
                             // automatically, blank otherwise — a fixed column
                             // so the ms never shifts.
@@ -2347,6 +2378,8 @@ mod tests {
             last_seen: 0,
             avg_ms: None,
             autostart: false,
+
+            authority: 0,
         }
     }
 
@@ -4262,6 +4295,39 @@ mod engine_row_tests {
         assert_eq!(format_throughput(32.7), "1835/min");
     }
 
+    /// Each module row shows its authority gate tag (user/mod/admin/owner)
+    /// after the status, so the operator sees the permission gate at a glance.
+    #[test]
+    fn the_authority_tag_is_rendered_after_the_status() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with(&[
+            ("banned-words", "preprocess"),
+            ("language-constrainer", "inprocess"),
+            ("tts-service", "postprocess"),
+        ]);
+        stats.engine_status = "connected".to_string();
+        stats.module_entries.iter_mut().for_each(|m| match m.name.as_str() {
+            "banned-words" => { m.authority = 0; m.avg_ms = Some(15.7); }
+            "language-constrainer" => { m.authority = 2; m.avg_ms = Some(7.3); }
+            "tts-service" => { m.authority = 1; m.avg_ms = Some(4.5); }
+            _ => {}
+        });
+        let screen = super::tests::render(&mut w, &stats, 110, 30);
+        let line = |needle: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"))
+        };
+        assert!(line("banned-words").contains(" user"), "authority 0 -> user tag");
+        assert!(line("language-constrainer").contains(" admin"), "authority 2 -> admin tag");
+        assert!(line("tts-service").contains(" mod"), "authority 1 -> mod tag");
+        // The tag is inside the fixed authority column, so the ms still lines up on
+        // the SAME module row (not the group header's sum).
+        let l = line("banned-words");
+        assert!(l.contains(" user") && l.contains("15.7ms"), "tag + ms on the module row: {l}");
+    }
+
     /// The ms column doubles as a heat gauge: an if/else tree colours the value
     /// by latency band, so a slowing module turns visibly alarming at the
     /// thresholds before the operator has to read the number.
@@ -4571,6 +4637,7 @@ mod engine_row_tests {
             original: original.to_string(),
         }
     }
+
 
 
 
