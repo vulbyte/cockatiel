@@ -3478,9 +3478,9 @@ mod tests {
         assert!(is_dispatchable(&Action::ToggleAutoStart));
 
         // A module row is a module again, so every one of them is allowed. With two
-        // pre-process modules the first one sits at row 3 ([ENGINE] header,
-        // engine, [PRE-PROCESS] header, m0).
-        let module = state_with(3);
+        // pre-process modules and every group header always present, the first one
+        // sits at row 4 ([ENGINE] header, engine, [ADAPTERS], [PRE-PROCESS], m0).
+        let module = state_with(4);
         assert!(focused_selection_is_module(&module));
         assert!(!is_module_scoped(&Action::StopModule(String::new()))
             || focused_selection_is_module(&module));

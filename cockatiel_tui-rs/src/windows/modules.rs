@@ -152,14 +152,13 @@ impl GroupedRow {
 }
 
 /// The ordered selectable rows for the current stats: the `[ENGINE]` header
-/// and the engine row, then — in pipeline order — each non-empty group's
-/// header followed by its modules.
+/// and the engine row, then — in pipeline order — every group's header (even
+/// when the group is empty) followed by its modules.
 ///
-/// A group with no modules gets NO header at all: an empty `[ADAPTERS]` title
-/// with nothing under it is noise, not information, and skipping it keeps the
-/// window tight when the operator only uses two of the four stages. The engine
-/// header and row are unconditional, so the list is never empty — there is
-/// always the engine to sit on and look at.
+/// Every group header is ALWAYS present, empty or not, so the operator sees
+/// the full pipeline shape at a glance and knows a stage exists even when no
+/// module sits in it yet. The engine header and row are unconditional, so the
+/// list is never empty — there is always the engine to sit on and look at.
 pub fn grouped_rows(stats: &GlobalStats) -> Vec<GroupedRow> {
     let mut rows = Vec::new();
     rows.push(GroupedRow {
@@ -178,9 +177,6 @@ pub fn grouped_rows(stats: &GlobalStats) -> Vec<GroupedRow> {
             .filter(|(_, m)| group_for_position(&m.position) == group)
             .map(|(i, _)| i)
             .collect();
-        if members.is_empty() {
-            continue;
-        }
         rows.push(GroupedRow {
             group,
             kind: EntryKind::Header,
@@ -236,10 +232,10 @@ fn grouped_selected_line(lines: &[GroupedLine], selected: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// The display label for a group header, with the indentation the mock draws:
-/// top-level groups (`[ENGINE]`, `[ADAPTERS]`) sit at the same 2-space base as
-/// the module rows, the nested pipeline stages (`[PRE-PROCESS]`, …) sit four
-/// in, so the nesting reads at a glance.
+/// The display label for a group header. Every header sits at the SAME 2-space
+/// base as the module rows beneath it — the mock's extra indent on the nested
+/// pipeline stages was dropped once the status column aligned, so a header and
+/// its modules read as one column, not two.
 fn header_label(group: Group) -> String {
     let name = match group {
         Group::Engine => "ENGINE",
@@ -248,11 +244,7 @@ fn header_label(group: Group) -> String {
         Group::InProcess => "IN-PROCESS",
         Group::PostProcess => "POST-PROCESS",
     };
-    let indent = match group {
-        Group::PreProcess | Group::InProcess | Group::PostProcess => "    ",
-        Group::Engine | Group::Adapters => "  ",
-    };
-    format!("{indent}[{name}]")
+    format!("  [{name}]")
 }
 
 /// The direction a Shift+arrow moves a module through the pipeline stages.
@@ -2114,7 +2106,10 @@ mod tests {
         }
     }
 
-    /// Stats with `n` connected modules, so the unified list has 1 + n rows.
+    /// Stats with `n` connected modules, all pre-process, so the grouped view
+    /// has `n + 6` rows: the [ENGINE] header + engine row, the [ADAPTERS]
+    /// header, the [PRE-PROCESS] header + `n` modules, and the [IN-PROCESS]
+    /// and [POST-PROCESS] headers (always present, even when empty).
     pub(super) fn stats_with_modules(n: usize) -> crate::db::GlobalStats {
         crate::db::GlobalStats {
             module_entries: (0..n).map(|i| module(&format!("m{}", i))).collect(),
@@ -2256,10 +2251,10 @@ SECRET=s3
 
         let render_to_string = |w: u16, h: u16| -> String {
             let mut win = ModulesWindow::new();
-            // The first module row: index 3 in the grouped view
-            // ([ENGINE] header, engine, [PRE-PROCESS] header, m0), so the
+            // The first module row: index 4 in the grouped view
+            // ([ENGINE] header, engine, [ADAPTERS], [PRE-PROCESS], m0), so the
             // per-module hint set is on show.
-            win.selected = 3;
+            win.selected = 4;
             let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
             let colors = crate::colors::load_colors(&std::path::PathBuf::from(""));
             let stats = stats_with_modules(2);
@@ -2990,6 +2985,14 @@ mod engine_row_tests {
         KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)
     }
 
+    /// The row index of the first row matching `group` + `kind`, so a test
+    /// can name the row it means instead of hardcoding where a header sits.
+    /// `kind` matches exactly, so a module row is located by its
+    /// `module_entries` index (`EntryKind::Module(0)` for `m0`).
+    fn row_index(rows: &[GroupedRow], group: Group, kind: EntryKind) -> Option<usize> {
+        rows.iter().position(|r| r.group == group && r.kind == kind)
+    }
+
     /// Stats whose modules carry explicit positions, so a test can build a
     /// group layout other than the all-pre-process one `stats_with_modules`
     /// makes.
@@ -3058,14 +3061,36 @@ mod engine_row_tests {
     }
 
     #[test]
-    fn empty_groups_get_no_header() {
-        // No adapters: the [ADAPTERS] header would be a title with nothing
-        // under it, so it is left out of the view entirely.
+    fn every_group_header_is_always_present_even_when_empty() {
+        // All four stage headers must show regardless of whether any module
+        // sits in them — the operator sees the full pipeline shape at a glance
+        // and knows a stage exists even before any module is added to it.
         let stats = stats_with(&[("clip", "preprocess"), ("term", "postprocess")]);
         let rows = grouped_rows(&stats);
-        assert!(!rows.iter().any(|r| r.group == Group::Adapters));
-        assert!(rows.iter().any(|r| r.group == Group::PreProcess && r.kind == EntryKind::Header));
-        assert!(rows.iter().any(|r| r.group == Group::PostProcess && r.kind == EntryKind::Header));
+        for group in [Group::Adapters, Group::PreProcess, Group::InProcess, Group::PostProcess] {
+            assert!(
+                rows.iter().any(|r| r.group == group && r.kind == EntryKind::Header),
+                "{group:?} header must be present even with no modules in it"
+            );
+        }
+        // The empty IN-PROCESS group has its header but no module rows.
+        assert!(!rows.iter().any(|r| r.group == Group::InProcess && matches!(r.kind, EntryKind::Module(_))));
+    }
+
+    #[test]
+    fn all_group_headers_share_the_same_indent() {
+        // The status column is aligned, so headers sit at the same 2-space base
+        // as the module rows — no extra indent on the pipeline stages.
+        for group in [Group::Engine, Group::Adapters, Group::PreProcess, Group::InProcess, Group::PostProcess] {
+            let name = match group {
+                Group::Engine => "ENGINE",
+                Group::Adapters => "ADAPTERS",
+                Group::PreProcess => "PRE-PROCESS",
+                Group::InProcess => "IN-PROCESS",
+                Group::PostProcess => "POST-PROCESS",
+            };
+            assert_eq!(header_label(group), format!("  [{name}]"));
+        }
     }
 
     #[test]
@@ -3080,21 +3105,38 @@ mod engine_row_tests {
         assert_eq!(engine.module_name(&stats), None);
         assert_eq!(rows[0].module_index(), None, "the [ENGINE] header is not a module");
         assert_eq!(rows[0].module_name(&stats), None);
-        // The [PRE-PROCESS] header (rows[2] with two preprocess modules).
-        assert_eq!(rows[2].module_index(), None);
-        assert_eq!(rows[2].module_name(&stats), None);
-        assert_eq!(rows[3].module_name(&stats), Some("m0".to_string()));
+        // The [PRE-PROCESS] header — after [ENGINE], the engine row and the
+        // [ADAPTERS] header (row 3) — found by lookup, not hardcoded.
+        let pre = row_index(&rows, Group::PreProcess, EntryKind::Header).expect("[PRE-PROCESS] header");
+        assert_eq!(rows[pre].module_index(), None);
+        assert_eq!(rows[pre].module_name(&stats), None);
+        // The row right after it is the first module, m0.
+        let m0 = row_index(&rows, Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        assert_eq!(rows[m0].module_name(&stats), Some("m0".to_string()));
     }
 
     #[test]
     fn the_row_count_is_never_zero() {
-        // The [ENGINE] header + engine row exist even with no modules, so an
-        // empty list still has something selectable (and the old "nothing to
-        // navigate" early return is gone).
+        // The [ENGINE] header + engine row exist even with no modules, and
+        // every stage header is present too, so an empty list still has
+        // something selectable (and the old "nothing to navigate" early return
+        // is gone).
         let rows = grouped_rows(&GlobalStats::default());
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows[0], GroupedRow { group: Group::Engine, kind: EntryKind::Header });
         assert_eq!(rows[1], GroupedRow { group: Group::Engine, kind: EntryKind::Engine });
+        // The four stage headers show the full pipeline shape even with no
+        // modules in them.
+        for (i, group) in [Group::Adapters, Group::PreProcess, Group::InProcess, Group::PostProcess]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                rows[2 + i],
+                GroupedRow { group, kind: EntryKind::Header },
+                "an empty group must still get a header"
+            );
+        }
     }
 
     #[test]
@@ -3106,13 +3148,17 @@ mod engine_row_tests {
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
 
-        // rows[3] is the first module (after [ENGINE], engine, [PRE-PROCESS]).
-        w.selected = 3;
+        // The first module is found by lookup, not a magic number: after [ENGINE],
+        // the engine row, [ADAPTERS] and [PRE-PROCESS] it sits at row 4 with
+        // two pre-process modules.
+        let m0 = row_index(&grouped_rows(&stats), Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        w.selected = m0;
         assert!(w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), Some("m0".to_string()));
 
         // A group header is selectable but names no module.
-        w.selected = 2;
+        let adapters = row_index(&grouped_rows(&stats), Group::Adapters, EntryKind::Header).expect("[ADAPTERS]");
+        w.selected = adapters;
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
     }
@@ -3123,8 +3169,10 @@ mod engine_row_tests {
     fn navigation_clamps_at_both_ends_of_the_grouped_list() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(2);
-        // rows = [ENGINE header, engine, PRE-PROCESS header, m0, m1].
-        assert_eq!(grouped_rows(&stats).len(), 5);
+        // rows = [ENGINE], engine, [ADAPTERS], [PRE-PROCESS], m0, m1,
+        // [IN-PROCESS], [POST-PROCESS] → 8 rows.
+        let rows = grouped_rows(&stats);
+        assert_eq!(rows.len(), 8);
         assert_eq!(w.selected, ENGINE_ROW);
 
         // Up from the engine row lands on the [ENGINE] header; further up is
@@ -3134,19 +3182,26 @@ mod engine_row_tests {
         w.handle_key(up(), &mut stats);
         assert_eq!(w.selected, 0);
 
-        // Down to the last MODULE; down must not wrap.
+        // Down to the bottom; down must not wrap. The last row is now the
+        // [POST-PROCESS] header, not a module — every header is always there.
         for _ in 0..10 {
             w.handle_key(down(), &mut stats);
         }
-        assert_eq!(w.selected, 4, "the last row is m1 (module_entries[1])");
+        assert_eq!(w.selected, rows.len() - 1, "down must not wrap");
 
-        // ...and back up, crossing the header boundary exactly once.
-        w.handle_key(up(), &mut stats);
-        assert_eq!(w.selected, 3);
+        // ...and back up: past the trailing [IN-PROCESS] header to the last
+        // module, then across the [PRE-PROCESS] header to the engine row.
+        w.handle_key(up(), &mut stats); // [IN-PROCESS]
+        w.handle_key(up(), &mut stats); // m1
+        w.handle_key(up(), &mut stats); // m0
+        let m0 = row_index(&rows, Group::PreProcess, EntryKind::Module(0)).expect("m0");
+        assert_eq!(w.selected, m0);
         assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
-        w.handle_key(up(), &mut stats);
-        assert_eq!(w.selected, 2, "the [PRE-PROCESS] header is selectable");
-        w.handle_key(up(), &mut stats);
+        w.handle_key(up(), &mut stats); // [PRE-PROCESS]
+        let pre = row_index(&rows, Group::PreProcess, EntryKind::Header).expect("[PRE-PROCESS]");
+        assert_eq!(w.selected, pre, "the [PRE-PROCESS] header is selectable");
+        w.handle_key(up(), &mut stats); // [ADAPTERS]
+        w.handle_key(up(), &mut stats); // engine
         assert_eq!(w.selected, ENGINE_ROW);
         assert_eq!(w.selected_module_name(&stats), None);
     }
@@ -3155,22 +3210,33 @@ mod engine_row_tests {
     fn a_shrunken_module_list_pulls_the_selection_back_into_range() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
-        for _ in 0..5 {
+        // Walk to the last MODULE (m2), not just the last row — the shrink
+        // test is about a stale selection, so land somewhere meaningful.
+        let m2 = row_index(&grouped_rows(&stats), Group::PreProcess, EntryKind::Module(2)).expect("m2");
+        while w.selected < m2 {
             w.handle_key(down(), &mut stats);
         }
-        assert_eq!(w.selected, 5, "the last of [header, engine, header, m0, m1, m2]");
+        assert!(w.selection_is_module(&stats));
+        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m2"));
+
         // The engine drops two of its modules (a module removed itself).
         stats.module_entries.truncate(1);
         w.handle_key(key('j'), &mut stats);
-        // 1 module + headers = 4 rows, so the selection clamps to row 3 = m0
-        // and the next press cannot walk off the end.
-        assert_eq!(w.selected, 3);
+        // 1 module + 5 headers = 7 rows: the stale selection is still inside,
+        // so it holds, and the next press cannot walk off the end.
+        assert_eq!(w.selected, grouped_rows(&stats).len() - 1);
         w.handle_key(down(), &mut stats);
-        assert_eq!(w.selected, 3);
-        // With NO modules at all the engine row is still reachable.
+        assert_eq!(w.selected, grouped_rows(&stats).len() - 1);
+
+        // With NO modules at all the list is the headers + the engine row, and
+        // the stale selection is pulled back into range — never wrapped.
         stats.module_entries.clear();
         w.handle_key(down(), &mut stats);
-        assert_eq!(w.selected, 1);
+        assert_eq!(w.selected, grouped_rows(&stats).len() - 1, "clamped, not wrapped");
+        // ...and the engine row is still reachable.
+        while w.selected > ENGINE_ROW {
+            w.handle_key(up(), &mut stats);
+        }
         assert_eq!(w.selected, ENGINE_ROW);
     }
 
@@ -3380,26 +3446,27 @@ mod engine_row_tests {
         let before = stats_with_modules(3);
         let mut after = before.clone();
         after.forget_engine();
-        // `forget_engine` clears the module list, so the view is just the
-        // [ENGINE] header + the engine row — and the engine is still its row,
-        // not gone, and not demoted to a module.
-        assert_eq!(grouped_rows(&before).len(), 6);
-        assert_eq!(grouped_rows(&after).len(), 2);
+        // `forget_engine` clears the module list, so the view shrinks to the
+        // headers + the engine row — the engine is still its row, not gone,
+        // and not demoted to a module.
+        assert_eq!(grouped_rows(&before).len(), 9);
+        assert_eq!(grouped_rows(&after).len(), 6);
         assert_eq!(grouped_rows(&after)[0], GroupedRow { group: Group::Engine, kind: EntryKind::Header });
         assert_eq!(grouped_rows(&after)[1], GroupedRow { group: Group::Engine, kind: EntryKind::Engine });
         assert_eq!(
-            clamp_selected(5, grouped_rows(&after).len()),
-            1,
-            "a stale selection lands on the engine row, not on a module"
+            clamp_selected(8, grouped_rows(&after).len()),
+            5,
+            "a stale selection is pulled into range, and it lands on a header, not a module"
         );
         assert_eq!(scroll_for(0, 3, 2, grouped_lines(&grouped_rows(&after)).len()), 0);
 
-        // And the window agrees: the engine row is still selected, still not a
-        // module, and still the engine — so the per-module actions stay refused
-        // and the engine-only ones are refused by the ACTION, not by the row
+        // And the window agrees: a selection left pointing past the end of the
+        // shrunken list resolves to the ENGINE row — the one row that always
+        // exists — not to a module, so the per-module actions stay refused and
+        // the engine-only ones are refused by the ACTION, not by the row
         // vanishing under it.
         let mut w = super::ModulesWindow::new();
-        w.selected = 5;
+        w.selected = 8;
         assert!(!w.selection_is_module(&after));
         assert!(w.selection_is_engine(&after));
         assert_eq!(w.selected_module_name(&after), None);
@@ -3414,12 +3481,16 @@ mod engine_row_tests {
         let mut stats = stats_with_modules(2);
         assert!(w.selection_is_engine(&stats), "row ENGINE_ROW is the engine");
         assert!(!w.selection_is_module(&stats), "…and it is not a module");
-        // One down lands on the [PRE-PROCESS] header: still not the engine,
-        // and not a module either.
+        // One down lands on the [ADAPTERS] header: still not the engine, and
+        // not a module either.
         w.handle_key(down(), &mut stats);
         assert!(!w.selection_is_engine(&stats));
         assert!(!w.selection_is_module(&stats), "a group header is not a module");
-        // The row after it IS a module.
+        // The row after it is the [PRE-PROCESS] header (also not a module),
+        // and the one after that IS a module.
+        w.handle_key(down(), &mut stats);
+        assert!(!w.selection_is_engine(&stats));
+        assert!(!w.selection_is_module(&stats), "a group header is not a module");
         w.handle_key(down(), &mut stats);
         assert!(!w.selection_is_engine(&stats));
         assert!(w.selection_is_module(&stats));
@@ -3464,19 +3535,24 @@ mod engine_row_tests {
     fn a_module_action_has_no_target_on_the_engine_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
-        // One down lands on the [PRE-PROCESS] header, which also names no
-        // module — so the "first known module" fallback must not fire there
-        // either.
+        // One down lands on the [ADAPTERS] header, which also names no module
+        // — so the "first known module" fallback must not fire there either.
         w.handle_key(down(), &mut stats);
         assert!(!w.selection_is_module(&stats));
         assert_eq!(w.selected_module_name(&stats), None);
 
+        // The next row is the [PRE-PROCESS] header (still not a module) and
+        // the one after it is m0.
+        w.handle_key(down(), &mut stats);
+        assert!(!w.selection_is_module(&stats));
         w.handle_key(down(), &mut stats);
         assert!(w.selection_is_module(&stats));
         let first = w.selected_module_name(&stats);
         // The fallback the app would otherwise use: the FIRST known module.
         assert_eq!(first.as_deref(), Some("m0"));
 
+        // Up three times crosses both headers back to the engine row.
+        w.handle_key(up(), &mut stats);
         w.handle_key(up(), &mut stats);
         w.handle_key(up(), &mut stats);
         assert!(!w.selection_is_module(&stats));
@@ -3547,8 +3623,9 @@ mod engine_row_tests {
     fn the_hint_bar_offers_the_module_actions_on_a_module_row() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3);
-        // Down to the first module: [ENGINE] header → engine row →
-        // [PRE-PROCESS] header → m0.
+        // Down to the first module: [ENGINE] header → engine row → [ADAPTERS]
+        // → [PRE-PROCESS] header → m0.
+        w.handle_key(down(), &mut stats);
         w.handle_key(down(), &mut stats);
         w.handle_key(down(), &mut stats);
         assert!(w.selection_is_module(&stats));
@@ -3637,6 +3714,7 @@ mod engine_row_tests {
     fn shift_down_moves_a_pre_module_to_inprocess_and_shift_up_back() {
         let mut w = super::ModulesWindow::new();
         let mut stats = stats_with_modules(3); // all pre-process
+        w.handle_key(down(), &mut stats); // [ADAPTERS] header
         w.handle_key(down(), &mut stats); // [PRE-PROCESS] header
         w.handle_key(down(), &mut stats); // m0
         assert!(w.selection_is_module(&stats));
@@ -3672,6 +3750,9 @@ mod engine_row_tests {
         // A post-process module shifted down is already last.
         let mut stats = stats_with(&[("term", "postprocess")]);
         let mut w = super::ModulesWindow::new();
+        w.handle_key(down(), &mut stats); // [ADAPTERS] header
+        w.handle_key(down(), &mut stats); // [PRE-PROCESS] header
+        w.handle_key(down(), &mut stats); // [IN-PROCESS] header
         w.handle_key(down(), &mut stats); // [POST-PROCESS] header
         w.handle_key(down(), &mut stats); // term
         assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
@@ -3700,7 +3781,7 @@ mod engine_row_tests {
         // Engine row.
         assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
         assert_eq!(w.handle_key(shift_up(), &mut stats), Some(Action::Noop));
-        // The [PRE-PROCESS] header.
+        // The [ADAPTERS] header.
         w.handle_key(down(), &mut stats);
         assert_eq!(w.handle_key(shift_down(), &mut stats), Some(Action::Noop));
     }
@@ -3758,7 +3839,7 @@ mod engine_row_tests {
         // A module row defers to the plugin manifest, which is where a module's
         // directory is known — the window must not guess it.
         let mut stats2 = stats.clone();
-        w.selected = 3; // rows[3] is the first module (m0).
+        w.selected = 4; // rows[4] is the first module (m0): [ENGINE], engine, [ADAPTERS], [PRE-PROCESS], m0.
         assert_eq!(w.config_editor_target(&stats2), None);
         // A header row names a stage, so it has no config either.
         w.selected = 2;
