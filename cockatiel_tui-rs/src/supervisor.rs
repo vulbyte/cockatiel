@@ -449,6 +449,27 @@ pub fn launch_user_db() -> Result<Child, String> {
 fn build_module_command(p: &Plugin, port: u16, pin: u32) -> Vec<String> {
     let m = &p.manifest;
     let mut parts: Vec<String> = m.launch_command.split_whitespace().map(String::from).collect();
+    // A Python module launched from a Rosetta (x86_64-translated) parent would
+    // inherit the translated interpreter, but its pip packages were installed
+    // for the NATIVE arch (arm64 on Apple Silicon). The interpreter then fails
+    // to dlopen any compiled extension ("mach-o file, but is an incompatible
+    // architecture") and every worker crashes. Prefix the launch with `arch
+    // -arm64` so the module always runs under the interpreter that matches its
+    // packages, regardless of how the TUI itself is running.
+    if cfg!(target_os = "macos") {
+        if let Some(first) = parts.first().map(String::as_str) {
+            if first.starts_with("python") {
+                let native = if std::env::consts::ARCH == "aarch64" {
+                    "arm64"
+                } else {
+                    "x86_64"
+                };
+                let mut arch_parts = vec!["arch".to_string(), format!("-{native}")];
+                arch_parts.append(&mut parts);
+                parts = arch_parts;
+            }
+        }
+    }
     for flag in &m.command_flags {
         parts.push(flag.clone());
     }
@@ -1916,6 +1937,44 @@ mod tests {
         let (cmd, _args) = resolve_launch(&p, 9734, 603936, LaunchMode::Rebuild).await.unwrap();
         assert_eq!(cmd, bin_path.to_string_lossy());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn python_modules_are_launched_under_the_native_arch() {
+        // A python module launched from a Rosetta (translated) parent inherits
+        // the x86_64 interpreter, but its pip packages are native arm64 — the
+        // interpreter then fails to dlopen any compiled extension and every
+        // worker crashes. The launch command must be prefixed with `arch
+        // -<native>` so the module always runs under the interpreter that
+        // matches its packages.
+        let manifest = crate::plugins::ModuleManifest {
+            name: "tts-service".into(),
+            description: String::new(),
+            version: String::new(),
+            capabilities: "output".into(),
+            root_file: "./tts_service.py".into(),
+            launch_command: "python3".into(),
+            command_flags: vec!["./tts_service.py".into()],
+            terminal: false,
+            credentials: vec![],
+            binary: crate::plugins::BinaryRoutes(std::collections::HashMap::new()),
+            build_command: None,
+            build_flags: vec![],
+        };
+        let p = Plugin {
+            manifest,
+            directory: std::path::PathBuf::from("/tmp/tts-service"),
+        };
+        let parts = build_module_command(&p, 9734, 603936);
+        let expected_arch = if std::env::consts::ARCH == "aarch64" {
+            "arm64"
+        } else {
+            "x86_64"
+        };
+        assert_eq!(parts[0], "arch", "python launch must be arch-prefixed: {parts:?}");
+        assert_eq!(parts[1], format!("-{expected_arch}"), "native arch: {parts:?}");
+        assert_eq!(parts[2], "python3", "the interpreter follows the arch prefix: {parts:?}");
+        assert!(parts.contains(&"./tts_service.py".to_string()));
     }
 
     #[test]
