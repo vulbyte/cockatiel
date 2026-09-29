@@ -262,6 +262,20 @@ fn format_ms(avg_ms: Option<f64>) -> String {
     }
 }
 
+/// The colour for a processing time, so the ms column doubles as a heat gauge.
+/// A simple if/else tree: the higher the latency, the more alarming the
+/// colour. The thresholds are deliberately coarse — they mark the round-trip
+/// cost bands the operator cares about, not a subtle gradient.
+fn ms_color(avg_ms: Option<f64>) -> Color {
+    match avg_ms {
+        None => Color::DarkGray,
+        Some(v) if v < 6.0 => Color::Blue,
+        Some(v) if v < 15.0 => Color::Green,
+        Some(v) if v < 100.0 => Color::Yellow,
+        Some(_) => Color::Red,
+    }
+}
+
 /// The sum of the rolling averages of the modules in `group` — what the group
 /// header reports as its "category average MS" and what the engine row reports
 /// as the total pipeline time. A module with no timing yet contributes 0.
@@ -1683,20 +1697,26 @@ impl Window for ModulesWindow {
                             // header label carries that indent too).
                             let ms_start = 2 + STATUS_COL + STATUS_TEXT_COL + AUTOSTART_COL;
                             let pad = ms_start.saturating_sub(header_name.len());
+                            let header_style = if is_selected {
+                                row_style
+                            } else {
+                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                            };
                             (
-                                Line::from(Span::styled(
-                                    format!(
-                                        "{header_name}{}{:>width$}",
-                                        " ".repeat(pad),
-                                        ms_text,
-                                        width = MS_COL
+                                Line::from(vec![
+                                    Span::styled(
+                                        format!("{header_name}{}", " ".repeat(pad)),
+                                        header_style,
                                     ),
-                                    if is_selected {
-                                        row_style
-                                    } else {
-                                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                                    },
-                                )),
+                                    Span::styled(
+                                        format!("{:>width$}", ms_text, width = MS_COL),
+                                        if is_selected {
+                                            row_style
+                                        } else {
+                                            Style::default().fg(ms_color(Some(sum_ms)))
+                                        },
+                                    ),
+                                ]),
                                 None,
                             )
                         }
@@ -1792,7 +1812,7 @@ impl Window for ModulesWindow {
                                 .max(1);
                             spans.push(Span::styled(
                                 format!("{}{}", " ".repeat(before_ms), total_text),
-                                row_style.fg(if is_selected { Color::Black } else { Color::Yellow }),
+                                row_style.fg(if is_selected { Color::Black } else { ms_color(Some(total_ms)) }),
                             ));
                             (Line::from(spans), None)
                         }
@@ -1840,15 +1860,15 @@ impl Window for ModulesWindow {
                                     Color::DarkGray
                                 }),
                             ));
-                            // The rolling average ms, right-aligned in its fixed
-                            // column.
+                            // The rolling average ms, right-aligned in its fixed column, coloured by
+                            // latency band.
                             let ms_text = format_ms(module.avg_ms);
                             spans.push(Span::styled(
                                 format!("{:>width$}", ms_text, width = MS_COL),
                                 row_style.fg(if is_selected {
                                     Color::Black
                                 } else {
-                                    Color::Yellow
+                                    ms_color(module.avg_ms)
                                 }),
                             ));
                             (
@@ -3127,7 +3147,7 @@ mod engine_row_tests {
         clamp_selected, scroll_for, next_selectable, grouped_rows, grouped_lines,
         grouped_selected_line, GroupedLine, GroupedRow, Group, EntryKind, header_label,
         StageDirection, ENGINE_REMOVED_STATUS, ENGINE_ROW, ENGINE_ROW_LABEL, STATUS_COL, Reload,
-        ENGINE_CONFIG_KEYS,
+        ENGINE_CONFIG_KEYS, ms_color,
     };
     use crate::app::{ConfigTarget, Window};
     use crate::db::GlobalStats;
@@ -4138,6 +4158,23 @@ mod engine_row_tests {
         );
     }
 
+    /// The ms column doubles as a heat gauge: an if/else tree colours the value
+    /// by latency band, so a slowing module turns visibly alarming at the
+    /// thresholds before the operator has to read the number.
+    #[test]
+    fn the_ms_color_bands_are_a_simple_if_else_tree() {
+        use ratatui::style::Color;
+        assert_eq!(ms_color(None), Color::DarkGray, "no timing is neutral");
+        assert_eq!(ms_color(Some(0.0)), Color::Blue, "<6ms is dark blue");
+        assert_eq!(ms_color(Some(5.9)), Color::Blue, "just under 6ms is still dark blue");
+        assert_eq!(ms_color(Some(6.0)), Color::Green, ">=6ms flips to dark green");
+        assert_eq!(ms_color(Some(14.9)), Color::Green, "just under 15ms is dark green");
+        assert_eq!(ms_color(Some(15.0)), Color::Yellow, ">=15ms flips to dark yellow");
+        assert_eq!(ms_color(Some(99.9)), Color::Yellow, "just under 100ms is dark yellow");
+        assert_eq!(ms_color(Some(100.0)), Color::Red, ">=100ms is dark red");
+        assert_eq!(ms_color(Some(1000.0)), Color::Red, "well over 100ms stays dark red");
+    }
+
     // ── E: the engine's own config ───────────────────────────────────────
 
     #[test]
@@ -4430,6 +4467,7 @@ mod engine_row_tests {
             original: original.to_string(),
         }
     }
+
 
 
 
