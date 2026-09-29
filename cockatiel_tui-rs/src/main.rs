@@ -3465,6 +3465,8 @@ mod tests {
                     config_complete: true,
                     alive: true,
                     last_seen: 0,
+                    avg_ms: None,
+                    autostart: false,
                 })
                 .collect();
             s
@@ -3605,6 +3607,8 @@ mod tests {
                 config_complete: true,
                 alive: true,
                 last_seen: 0,
+                avg_ms: None,
+                autostart: false,
             }];
 
             // Filled in by `fill_window_action` for a real keypress. With the
@@ -3908,6 +3912,8 @@ mod engine_lifecycle_tests {
             config_complete: true,
             alive: true,
             last_seen: 0,
+            avg_ms: None,
+            autostart: false,
         }];
         s.stats.connection = db::ConnectionInfo { ip: "127.0.0.1".into(), port: 9734, pin: 4242 };
         s

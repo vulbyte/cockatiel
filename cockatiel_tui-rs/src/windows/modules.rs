@@ -248,6 +248,32 @@ fn header_label(group: Group) -> String {
     format!("  [{name}]")
 }
 
+/// Format a rolling average (ms) for the right-aligned ms column.
+///
+/// Sub-millisecond values read as `<1ms` (a blank tick means "under a
+/// millisecond", which is the resolution the engine reports at); everything
+/// else is one decimal with a unit, e.g. `15.7ms`. `None` (a module that has
+/// not completed a message yet) renders as a blank.
+fn format_ms(avg_ms: Option<f64>) -> String {
+    match avg_ms {
+        None => String::new(),
+        Some(v) if v < 1.0 => "<1ms".to_string(),
+        Some(v) => format!("{v:.1}ms"),
+    }
+}
+
+/// The sum of the rolling averages of the modules in `group` — what the group
+/// header reports as its "category average MS" and what the engine row reports
+/// as the total pipeline time. A module with no timing yet contributes 0.
+fn group_total_ms(stats: &GlobalStats, group: Group) -> f64 {
+    stats
+        .module_entries
+        .iter()
+        .filter(|m| group_for_position(&m.position) == group)
+        .map(|m| m.avg_ms.unwrap_or(0.0))
+        .sum()
+}
+
 /// The direction a Shift+arrow moves a module through the pipeline stages.
 ///
 /// Named for the pipeline, not the key: "earlier" (toward pre-process) is what
@@ -1623,9 +1649,34 @@ impl Window for ModulesWindow {
                             } else {
                                 Style::default()
                             };
+                            // The right side of a group header shows the
+                            // category average MS (sum of its modules' rolling
+                            // averages); the engine header carries the label
+                            // for the total the engine row shows. Adapters are
+                            // feeds, not processors — their header shows the
+                            // same label but the row values are absent, so a
+                            // blank is right.
+                            let header_name = header_label(row.group);
+                            let right = match row.group {
+                                Group::Engine => "  total average time".to_string(),
+                                Group::Adapters => "  category average MS".to_string(),
+                                Group::PreProcess
+                                | Group::InProcess
+                                | Group::PostProcess => {
+                                    format!(
+                                        "  category average MS  {:>8}",
+                                        format_ms(Some(group_total_ms(stats, row.group)))
+                                    )
+                                }
+                            };
+                            let pad = (inner.width as usize).saturating_sub(header_name.len() + right.len());
+                            let header_text = format!(
+                                "{header_name}{}{right}",
+                                " ".repeat(pad)
+                            );
                             (
                                 Line::from(Span::styled(
-                                    header_label(row.group),
+                                    header_text,
                                     if is_selected {
                                         row_style
                                     } else {
@@ -1693,6 +1744,21 @@ impl Window for ModulesWindow {
                                         .add_modifier(Modifier::BOLD),
                                 ));
                             }
+                            // Total pipeline time: the sum of every module's
+                            // rolling average, right-aligned — the number the
+                            // `[ENGINE]` header's "total average time" label
+                            // points at.
+                            let total_ms = group_total_ms(stats, Group::Adapters)
+                                + group_total_ms(stats, Group::PreProcess)
+                                + group_total_ms(stats, Group::InProcess)
+                                + group_total_ms(stats, Group::PostProcess);
+                            let total_text = format_ms(Some(total_ms));
+                            let left_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                            let gap = (inner.width as usize).saturating_sub(left_len + total_text.len() + 1);
+                            spans.push(Span::styled(
+                                format!("{}{}", " ".repeat(gap), total_text),
+                                row_style.fg(if is_selected { Color::Black } else { Color::Yellow }),
+                            ));
                             (Line::from(spans), None)
                         }
                         EntryKind::Module(mi) => {
@@ -1713,17 +1779,47 @@ impl Window for ModulesWindow {
                             } else {
                                 Style::default()
                             };
+                            // Left: name + status. The autostart marker (`A`)
+                            // sits right after the status, then the rolling
+                            // average ms is pushed to the right edge so every
+                            // row's timing lines up in one column.
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!("  {:<width$}", module.name, width = STATUS_COL),
+                                    row_style
+                                        .fg(if is_selected { Color::Black } else { Color::White }),
+                                ),
+                                Span::styled(status_text, row_style.fg(status_color)),
+                            ];
+                            if module.autostart {
+                                spans.push(Span::styled(
+                                    " A",
+                                    row_style.fg(if is_selected {
+                                        Color::Black
+                                    } else {
+                                        Color::DarkGray
+                                    }),
+                                ));
+                            }
+                            // Right-align the ms to the window's right edge.
+                            let ms_text = format_ms(module.avg_ms);
+                            if !ms_text.is_empty() {
+                                let left_len: usize = spans
+                                    .iter()
+                                    .map(|s| s.content.chars().count())
+                                    .sum();
+                                let gap = (inner.width as usize).saturating_sub(left_len + ms_text.len() + 1);
+                                spans.push(Span::styled(
+                                    format!("{}{}", " ".repeat(gap), ms_text),
+                                    row_style.fg(if is_selected {
+                                        Color::Black
+                                    } else {
+                                        Color::Yellow
+                                    }),
+                                ));
+                            }
                             (
-                                // No `[position]` tag: the group header above the
-                                // row already says which stage it is in.
-                                Line::from(vec![
-                                    Span::styled(
-                                        format!("  {:<width$}", module.name, width = STATUS_COL),
-                                        row_style
-                                            .fg(if is_selected { Color::Black } else { Color::White }),
-                                    ),
-                                    Span::styled(status_text, row_style.fg(status_color)),
-                                ]),
+                                Line::from(spans),
                                 Some(module.name.clone()),
                             )
                         }
@@ -2143,6 +2239,8 @@ mod tests {
             config_complete: true,
             alive: true,
             last_seen: 0,
+            avg_ms: None,
+            autostart: false,
         }
     }
 
@@ -3943,6 +4041,51 @@ mod engine_row_tests {
         }
     }
 
+    #[test]
+    fn the_ms_column_shows_rolling_averages_category_sums_and_autostart() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with(&[
+            ("banned-words", "preprocess"),
+            ("language-constrainer", "inprocess"),
+            ("reprimand", "inprocess"),
+            ("twitch-adapter", "input"),
+        ]);
+        // Rolling averages (ms). banned-words is sub-ms; the two in-process
+        // modules sum to the category total; the adapter has none yet.
+        stats.module_entries.iter_mut().for_each(|m| match m.name.as_str() {
+            "banned-words" => m.avg_ms = Some(0.4),
+            "language-constrainer" => m.avg_ms = Some(7.3),
+            "reprimand" => m.avg_ms = Some(5.2),
+            "twitch-adapter" => m.avg_ms = None,
+            _ => {}
+        });
+        // `A` is the autostart marker.
+        stats
+            .module_entries
+            .iter_mut()
+            .find(|m| m.name == "language-constrainer")
+            .unwrap()
+            .autostart = true;
+        let screen = super::tests::render(&mut w, &stats, 120, 30);
+
+        let line = |needle: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"))
+        };
+        assert!(line("banned-words").contains("<1ms"), "sub-ms must render as <1ms");
+        assert!(line("language-constrainer").contains("7.3ms"), "avg must render with one decimal");
+        assert!(line("language-constrainer").contains(" A "), "autostart marker must show after status");
+        assert!(!line("reprimand").contains(" A"), "non-autostart module must not show A");
+        assert!(!line("twitch-adapter").contains("ms"), "no timing yet renders no ms");
+        // Category sum: 7.3 + 5.2 = 12.5 on the in-process header.
+        assert!(
+            line("[IN-PROCESS]").contains("12.5ms"),
+            "in-process header must show the category sum: {screen}"
+        );
+    }
+
     // ── E: the engine's own config ───────────────────────────────────────
 
     #[test]
@@ -4235,4 +4378,7 @@ mod engine_row_tests {
             original: original.to_string(),
         }
     }
+
+
+
 }

@@ -32,6 +32,11 @@ pub struct ModuleStatus {
     /// Engine-reported last activity (ms epoch).
     #[allow(dead_code)]
     pub last_seen: i64,
+    /// Rolling average processing time (ms) for the module's last 8 messages,
+    /// reported by the engine. `None` until it has completed a message.
+    pub avg_ms: Option<f64>,
+    /// Whether the module is set to start automatically (from its manifest).
+    pub autostart: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -467,6 +472,8 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                         let config_complete = row.get("config_complete").and_then(|v| v.as_bool()).unwrap_or(false);
                         let alive = row.get("alive").and_then(|v| v.as_bool()).unwrap_or(true);
                         let last_seen = row.get("last_seen").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let avg_ms = row.get("avg_ms").and_then(|v| v.as_f64());
+                        let autostart = row.get("autostart").and_then(|v| v.as_bool()).unwrap_or(false);
 
                         stats.module_entries.push(ModuleStatus {
                             name: name.to_string(),
@@ -479,6 +486,8 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                             config_complete,
                             alive,
                             last_seen,
+                            avg_ms,
+                            autostart,
                         });
                     }
                 }
@@ -902,6 +911,8 @@ mod tests {
                 config_complete: true,
                 alive: true,
                 last_seen: 1,
+                avg_ms: None,
+                autostart: false,
             }],
             connection: ConnectionInfo { ip: "10.0.0.1".into(), port: 9734, pin: 123456 },
             pipeline_paused: false,
