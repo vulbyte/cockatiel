@@ -1887,13 +1887,17 @@ impl Window for ModulesWindow {
             // a no-op here — the key is still consumed, so it does not fall
             // through to some other binding.
             //
-            // Both the arrow keys AND the j/k keybinds move with Shift held —
-            // the same pair that navigates without Shift. (The navigation arms
-            // above already exclude SHIFT, so the two never overlap.)
-            KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            // crossterm reports Shift+letter as the UPPERCASE character with
+            // the SHIFT modifier (`Shift+J` arrives as `Char('J') + SHIFT`),
+            // the same model the `E`/`R`/`X` bindings use. So the keybind
+            // moves match the uppercase forms — a lowercase `Char('j') +
+            // SHIFT` never arrives on a terminal. The arrow keys with Shift
+            // stay bound too. (The navigation arms above already exclude
+            // SHIFT, so the two never overlap.)
+            KeyCode::Char('J') | KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.stage_action(stats, StageDirection::Later)
             }
-            KeyCode::Char('k') | KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Char('K') | KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.stage_action(stats, StageDirection::Earlier)
             }
             // `p` is NOT handled here. It is a global (nav) binding, matched
@@ -3848,14 +3852,14 @@ mod engine_row_tests {
         let mut stats = stats_with_modules(2); // all pre-process
         w.handle_key(down(), &mut stats); // m0
 
-        let shift_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SHIFT);
+        let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
         assert_eq!(
             w.handle_key(shift_j, &mut stats),
             Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Later)),
             "Shift+j must move a module later, like Shift+down"
         );
 
-        let shift_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SHIFT);
+        let shift_k = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT);
         assert_eq!(
             w.handle_key(shift_k, &mut stats),
             Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Earlier)),

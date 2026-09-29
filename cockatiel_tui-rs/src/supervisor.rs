@@ -1392,13 +1392,59 @@ fn config_list_key(capabilities: &str) -> &'static str {
 
 /// Insert the plugin into the engine's config.json ordering list (by capability).
 /// Creates the file / key if missing; preserves other fields.
+/// Add a module to the engine's config.json ordering list for `capabilities`.
+/// `path: None` targets the live engine `config.json`; `Some` points at a temp
+/// file so unit tests never touch the real engine.
 pub fn add_to_ordering(name: &str, capabilities: &str, priority: i32) {
-    let path = engine_config_path();
-    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+    add_to_ordering_at(None, name, capabilities, priority);
+}
+
+fn add_to_ordering_at(path_override: Option<&Path>, name: &str, capabilities: &str, priority: i32) {
+    let live_path;
+    let path: &Path = match path_override {
+        Some(p) => p,
+        None => {
+            live_path = engine_config_path();
+            &live_path
+        }
+    };
+    let mut root: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|data| serde_json::from_str(&data).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
+    // The operator's stage moves are the AUTHORITATIVE placement once a module
+    // is in config.json. This is called at TUI startup for every discovered
+    // plugin with the MANIFEST position — and forcing a module back to its
+    // manifest stage would silently revert a move the operator made in a prior
+    // session (the "moves snap back" bug). So a module already sitting in SOME
+    // ordering list keeps its operator-set placement; only priority is updated.
+    let already_placed = ["inputs", "preprocessModules", "inprocessModules", "postprocessModules"]
+        .iter()
+        .any(|key| {
+            root.get(*key)
+                .and_then(|v| v.as_array())
+                .map(|list| list.iter().any(|e| e.get("name").and_then(|v| v.as_str()) == Some(name)))
+                .unwrap_or(false)
+        });
+
+    if already_placed {
+        // Refresh the entry's priority wherever the operator placed it; do not
+        // move it back to the manifest stage.
+        for key in ["inputs", "preprocessModules", "inprocessModules", "postprocessModules"] {
+            if let Some(list) = root.get_mut(key).and_then(|v| v.as_array_mut()) {
+                if let Some(existing) = list.iter_mut().find(|e| e.get("name").and_then(|v| v.as_str()) == Some(name)) {
+                    existing["priority"] = serde_json::json!(priority);
+                }
+            }
+        }
+        if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+            let _ = write_atomic_0600(path, &pretty);
+        }
+        return;
+    }
+
+    // Not placed yet (first registration): add to the manifest stage.
     let key = config_list_key(capabilities);
     let entry = serde_json::json!({ "name": name, "priority": priority });
 
@@ -1406,22 +1452,22 @@ pub fn add_to_ordering(name: &str, capabilities: &str, priority: i32) {
         root[key] = serde_json::json!([]);
     }
     if let Some(list) = root[key].as_array_mut() {
-        if let Some(existing) = list.iter_mut().find(|e| e.get("name").and_then(|v| v.as_str()) == Some(name)) {
-            existing["priority"] = serde_json::json!(priority);
-        } else {
-            list.push(entry);
-        }
+        list.push(entry);
     }
 
     if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-        let _ = write_atomic_0600(&path, &pretty);
+        let _ = write_atomic_0600(path, &pretty);
     }
 }
 
 /// Remove the plugin from the engine's config.json ordering lists.
 pub fn remove_from_ordering(name: &str) {
     let path = engine_config_path();
-    let Ok(data) = std::fs::read_to_string(&path) else { return };
+    remove_from_ordering_at(&path, name);
+}
+
+fn remove_from_ordering_at(path: &Path, name: &str) {
+    let Ok(data) = std::fs::read_to_string(path) else { return };
     let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&data) else { return };
     for key in ["inputs", "preprocessModules", "inprocessModules", "postprocessModules"] {
         if let Some(list) = root.get_mut(key).and_then(|v| v.as_array_mut()) {
@@ -1429,7 +1475,7 @@ pub fn remove_from_ordering(name: &str) {
         }
     }
     if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-        let _ = write_atomic_0600(&path, &pretty);
+        let _ = write_atomic_0600(path, &pretty);
     }
 }
 
@@ -2538,6 +2584,57 @@ mod tests {
         )
         .unwrap();
         assert_eq!(registered_engine_identity_at(&path, "cockatiel-tui"), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn add_to_ordering_does_not_revert_an_operator_stage_move() {
+        // `add_to_ordering` runs at TUI startup for every discovered plugin with
+        // the MANIFEST position. It must NOT drag a module back to its manifest
+        // stage if the operator already moved it (the "moves snap back" bug) —
+        // the operator's config placement is authoritative once it exists.
+        let (tmp, path) = scratch_config(
+            "add-ord-move",
+            r#"{"preprocessModules":[{"name":"clip","priority":100}],"inprocessModules":[]}"#,
+        );
+        // Operator moved clip pre -> in (Shift+down).
+        move_module_by_direction(Some(&path), "clip", "preprocess", StageDirection::Later).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(names(&root["inprocessModules"]), vec!["clip"]);
+        assert_eq!(names(&root["preprocessModules"]), Vec::<String>::new());
+
+        // TUI restarts; clip's manifest capability is pre-process. This must not
+        // move it back.
+        add_to_ordering_at(Some(&path), "clip", "preprocess", 100);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            names(&root["inprocessModules"]),
+            vec!["clip"],
+            "a startup add_to_ordering must not revert the operator's stage move"
+        );
+        assert_eq!(
+            names(&root["preprocessModules"]),
+            Vec::<String>::new(),
+            "a startup add_to_ordering must not re-add the module to its manifest stage"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn add_to_ordering_first_registration_uses_the_manifest_stage() {
+        // A brand-new module (not yet in any list) IS placed by its manifest.
+        let (tmp, path) = scratch_config(
+            "add-ord-first",
+            r#"{"preprocessModules":[],"inprocessModules":[]}"#,
+        );
+        add_to_ordering_at(Some(&path), "clip", "preprocess", 100);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(names(&root["preprocessModules"]), vec!["clip"]);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
