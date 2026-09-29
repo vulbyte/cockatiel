@@ -48,10 +48,6 @@ pub enum Action {
     /// module-scoped), so it is bound in the `nav` section and dispatched with
     /// the negation of the currently-known state.
     TogglePipelinePause,
-    /// Toggle one-click start: whether autostart-tagged modules launch (and
-    /// the paused pipeline resumes) automatically on the next engine connect.
-    /// Global, bound in the `nav` section, persisted to the TUI's config.json.
-    ToggleAutoStart,
     /// Forget the engine: ask it to shut down (it decides whether to obey), then
     /// drop the connection and everything the TUI learned from it.
     ///
@@ -185,7 +181,6 @@ fn parse_action(s: &str) -> Action {
         "ClearModuleConfig" => Action::ClearModuleConfig(String::new()),
         "RunTests" => Action::RunTests,
         "TogglePipelinePause" => Action::TogglePipelinePause,
-        "ToggleAutoStart" => Action::ToggleAutoStart,
         "RemoveEngine" => Action::RemoveEngine,
         "RestartEngine" => Action::RestartEngine,
         _ => Action::Noop,
@@ -260,7 +255,6 @@ pub fn action_label(action: &Action) -> &'static str {
         Action::PopOut(_) => "popout",
         Action::UserQuery(_, _) => "userdb",
         Action::TogglePipelinePause => "pause",
-        Action::ToggleAutoStart => "autostart",
         // `detach`, not `remove`: the row it acts on is a connection, not a
         // directory, and a hint bar that says "remove" next to `del:[d]` reads
         // as "delete the engine's files". Nothing is deleted here.
@@ -490,13 +484,9 @@ pub fn default_hotkeys() -> HotkeyConfig {
     // internal key handling (which uses hjkl, arrows, w and 1-5) — so it
     // collides with no existing binding.
     global.insert(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()), Action::TogglePipelinePause);
-    // `A` (shift+a) → toggle one-click start. Global like pause, because a
-    // streamer wants to flip it once and have the whole stack come up. `a` is
-    // per-module autostart; the capital is the session-level autostart, the
-    // same capital-for-different-kind convention `E`/`R`/`X` use. Collides with
-    // nothing (checked by `the_capital_keys_collide_with_nothing`).
-    global.insert(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT), Action::ToggleAutoStart);
-
+    // `a` toggles per-module autostart (the `A` marker in the modules window);
+    // autostart modules launch automatically on engine connect, so there is no
+    // session-level toggle to bind.
     let mut module_actions = HashMap::new();
     module_actions.insert(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::empty()), Action::StartModule(String::new()));
     module_actions.insert(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()), Action::StopModule(String::new()));
@@ -741,19 +731,6 @@ mod tests {
         // record protects.
         assert_eq!(cfg.global.get(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty())), Some(&Action::TogglePipelinePause));
         assert_eq!(cfg.global.get(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty())), Some(&Action::Quit));
-        // `A` (shift+a) → one-click start: global (like pause), and not bound in
-        // the editor or any window section, so it collides with nothing else.
-        let a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
-        assert_eq!(cfg.global.get(&a), Some(&Action::ToggleAutoStart));
-        assert_eq!(cfg.editor_actions.get(&a), None, "A must not be in the editor");
-        for (window, map) in &cfg.window_actions {
-            assert!(
-                !map.contains_key(&a),
-                "A is bound in the {} window section: {:?}",
-                window,
-                map.get(&a)
-            );
-        }
     }
 
     /// `edit` has two bindings, so the bar has to choose. It prints `E` — the

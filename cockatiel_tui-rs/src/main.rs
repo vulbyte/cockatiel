@@ -220,10 +220,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // engine). Resolved ONCE, here, so the flag's effect is a value the launch
     // site reads rather than a second launch site.
     let should_launch = should_launch_engine(cli.engine_launch, config_launch_engine);
-    // One-click start for a streamer: when `auto_start` is on, the TUI launches
-    // every autostart-tagged module and resumes the pipeline the moment it
-    // connects to the engine — the whole stack comes up on launch.
-    let auto_start = supervisor::read_auto_start(&tui_config_path).unwrap_or(false);
 
     let hotkeys = load_hotkeys(&config_dir.join("hotkey_config.json"));
     let colors = load_colors(&config_dir.join("color_config.json"));
@@ -398,7 +394,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = AppState::new(colors, hotkeys);
-    state.auto_start = auto_start;
 
     // Auto-rebuild channel: a crashed module's name is sent here and the main
     // loop rebuilds + relaunches it (capped to avoid infinite loops).
@@ -570,9 +565,9 @@ async fn run_app(
     // the whole stats struct) cannot rewind the phase mid-blink.
     let mut pause_flash_tick: u64 = 0;
 
-    // One-click start: fires ONCE on the first engine connect (when auto_start
-    // is on), launching autostart-tagged modules and resuming the paused
-    // pipeline. A reconnect does not re-fire it.
+    // Autostart: fires ONCE on the first engine connect, launching autostart-tagged
+    // modules (the `A` marker) and resuming the paused pipeline. A reconnect
+    // does not re-fire it.
     let mut auto_start_done = false;
 
     // Unresponsive watchdog cadence (only runs when no input is pending).
@@ -630,7 +625,10 @@ async fn run_app(
             }
             maybe_ws = ws_event_rx.recv() => {
                 if let Some(ev) = maybe_ws {
-                    if matches!(ev, WsEvent::Connected) && state.auto_start && !auto_start_done {
+                    // Autostart modules (the `A` marker) always launch on the
+                    // first engine connect — no toggle. The guard is `done`,
+                    // not a setting: fire once per TUI session.
+                    if matches!(ev, WsEvent::Connected) && !auto_start_done {
                         auto_start_done = true;
                         auto_start_once(
                             state,
@@ -1797,7 +1795,6 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::RunTests
             | Action::UserQuery(_, _)
             | Action::TogglePipelinePause
-            | Action::ToggleAutoStart
             | Action::RemoveEngine
             | Action::RestartEngine
             | Action::MoveModuleStage(_, _)
@@ -2026,7 +2023,7 @@ async fn auto_start_once(
     if !autostart.is_empty() {
         supervisor_log(
             state,
-            format!("[supervisor] auto_start: launching {} module(s)", autostart.len()),
+            format!("[supervisor] autostart: launching {} module(s)", autostart.len()),
         );
         for name in &autostart {
             // Skip already-running and already-starting modules; each launch is
@@ -2831,36 +2828,6 @@ async fn dispatch_action(
                 pipeline_pause_toggle_sql(state.stats.pipeline_paused),
             );
         }
-        Action::ToggleAutoStart => {
-            // Flip one-click start: autostart-tagged modules launch (and the
-            // pipeline resumes) on engine connect. Persisted to the TUI's own
-            // config.json so the choice survives a restart.
-            let new_value = !state.auto_start;
-            state.auto_start = new_value;
-            let tui_config_path = std::env::current_dir().unwrap_or_default().join("config.json");
-            if let Some(mut root) = std::fs::read_to_string(&tui_config_path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            {
-                if let Some(obj) = root.as_object_mut() {
-                    obj.insert(
-                        supervisor::AUTO_START_KEY.to_string(),
-                        serde_json::json!(new_value),
-                    );
-                    if let Ok(pretty) = serde_json::to_string_pretty(&root) {
-                        let _ = std::fs::write(&tui_config_path, pretty);
-                    }
-                }
-            }
-            supervisor_log(
-                state,
-                format!(
-                    "[supervisor] auto_start {} — autostart modules {}launch on connect",
-                    if new_value { "ON" } else { "OFF" },
-                    if new_value { "will " } else { "will NOT " },
-                ),
-            );
-        }
         // The two engine-only actions, guarded HERE rather than at the key
         // site, so no path into dispatch can skip the check. `is_engine_scoped`
         // keeps the list and the guard in one place; the arm before them turns
@@ -3501,10 +3468,8 @@ mod tests {
         // and the global pause toggle (it is engine-scoped, not module-scoped).
         assert!(!is_module_scoped(&Action::EditConfig(String::new())));
         assert!(!is_module_scoped(&Action::TogglePipelinePause));
-        assert!(!is_module_scoped(&Action::ToggleAutoStart), "one-click start is global, not a module action");
         assert!(is_dispatchable(&Action::EditConfig(String::new())));
         assert!(is_dispatchable(&Action::TogglePipelinePause));
-        assert!(is_dispatchable(&Action::ToggleAutoStart));
 
         // A module row is a module again, so every one of them is allowed. With two
         // pre-process modules and every group header always present, the first one

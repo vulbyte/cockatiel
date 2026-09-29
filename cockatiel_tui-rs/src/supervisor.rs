@@ -93,9 +93,10 @@ pub fn engine_config_path() -> PathBuf {
 /// file reads as a setting and not as a mirror of one command-line switch.
 pub const LAUNCH_ENGINE_KEY: &str = "launch_engine";
 
-/// The TUI's `auto_start` setting: whether autostart-tagged modules are
-/// launched automatically (and the paused pipeline resumed) once the TUI
-/// connects to the engine — a one-click start for a streamer.
+/// Legacy TUI config key: autostart-tagged modules ALWAYS launch when the TUI
+/// connects to the engine, so there is no runtime toggle anymore. The key is
+/// still backfilled into the TUI's config.json for forward/backward
+/// compatibility (an old config that set it must not break).
 pub const AUTO_START_KEY: &str = "auto_start";
 
 /// The TUI's `launch_engine` setting, or `None` when the file is missing, is not
@@ -108,15 +109,6 @@ pub fn read_launch_engine_default(path: &Path) -> Option<bool> {
     let content = std::fs::read_to_string(path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
     config.get(LAUNCH_ENGINE_KEY).and_then(|v| v.as_bool())
-}
-
-/// The TUI's `auto_start` setting, or `None` when the file is missing, is not
-/// an object, or has no usable value. `None` means "nothing said" and the
-/// caller uses the built-in default (off — autostart modules stay manual).
-pub fn read_auto_start(path: &Path) -> Option<bool> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-    config.get(AUTO_START_KEY).and_then(|v| v.as_bool())
 }
 
 /// Make sure the TUI's `config.json` exists and carries every default key.
