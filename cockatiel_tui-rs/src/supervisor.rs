@@ -1618,6 +1618,12 @@ fn apply_stage_jump(root: &mut serde_json::Value, name: &str, from: &str, to: &s
                 Some(i) => list.insert(i, entry),
                 None => list.push(entry),
             }
+        } else if from == "preprocess" {
+            // Moving INTO in-process from pre-process: the module is earlier in
+            // the pipeline, so it joins the chain at the HEAD — it runs first,
+            // right after pre-process hands off. (A post->in move appends at the
+            // tail: it was later, so it runs last, just before post-process.)
+            list.insert(0, entry);
         } else {
             list.push(entry);
         }
@@ -2012,7 +2018,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pre_module_shifted_later_jumps_into_inprocess_at_the_end() {
+    fn a_pre_module_shifted_later_jumps_into_inprocess_at_the_head() {
         let (tmp, path) = scratch_config(
             "pre-later",
             r#"{"preprocessModules":[{"name":"clip","priority":100},{"name":"polling","priority":50}],"inprocessModules":[{"name":"banned-words","priority":100}]}"#,
@@ -2025,10 +2031,10 @@ mod tests {
         assert_eq!(names(&root["preprocessModules"]), vec!["clip"]);
         assert_eq!(
             names(&root["inprocessModules"]),
-            vec!["banned-words", "polling"],
-            "an unordered stage's jump into in-process must be APPENDED at the end"
+            vec!["polling", "banned-words"],
+            "a pre->in jump must land at the HEAD of the chain — the module is earlier in the pipeline, so it runs first, right after pre-process hands off"
         );
-        assert_eq!(root["inprocessModules"][1]["priority"], 50, "a tuned priority must survive the jump");
+        assert_eq!(root["inprocessModules"][0]["priority"], 50, "a tuned priority must survive the jump");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
