@@ -134,6 +134,11 @@ pub trait Window {
     /// the engine row" must not read as "the engine row is selected" any more
     /// than it reads as "a module is selected".
     fn selection_is_engine(&self, _stats: &GlobalStats) -> bool { false }
+    /// Re-anchor the selection onto a module by name, so the cursor follows a
+    /// module that was moved to another group (Shift+up/down stage moves).
+    /// Default no-op; only the modules window tracks a module selection it can
+    /// move.
+    fn select_module_name(&mut self, _name: &str, _stats: &GlobalStats) {}
     /// A clickable link rendered by this window (e.g. a prompt's link), if any.
     fn pending_link(&self) -> Option<(Rect, String)> { None }
     /// Append a log entry to this window (the log window displays them).

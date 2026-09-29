@@ -2912,6 +2912,14 @@ async fn dispatch_action(
                     if let Some(m) = state.stats.module_entries.iter_mut().find(|m| m.name == name) {
                         m.position = new_pos.clone();
                     }
+                    // The cursor follows the moved module to its new row, so the
+                    // operator is not left looking at whatever row the old
+                    // index now names.
+                    let name_for_select = name.clone();
+                    let stats_snapshot = state.stats.clone();
+                    if let Some(win) = state.get_window_mut(WindowId::Modules) {
+                        win.select_module_name(&name_for_select, &stats_snapshot);
+                    }
                     supervisor_log(
                         state,
                         format!(

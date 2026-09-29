@@ -1457,6 +1457,21 @@ impl Window for ModulesWindow {
         self.selected_row(stats).module_name(stats)
     }
 
+    fn select_module_name(&mut self, name: &str, stats: &GlobalStats) {
+        // The cursor follows a module that was moved (Shift+up/down): re-anchor
+        // the selection onto its NEW row so the operator is not left staring at
+        // whatever row the old index now names (another module, or a header).
+        if let Some(idx) = grouped_rows(stats)
+            .iter()
+            .position(|r| r.module_name(stats).as_deref() == Some(name))
+        {
+            self.selected = idx;
+            let rows = grouped_rows(stats);
+            let lines = grouped_lines(&rows);
+            self.scroll = grouped_selected_line(&lines, idx);
+        }
+    }
+
     fn selection_is_module(&self, stats: &GlobalStats) -> bool {
         // The engine row AND every group header are real selections that are
         // deliberately not a module, and the app's fallback (act on the first
@@ -1871,10 +1886,14 @@ impl Window for ModulesWindow {
             // stage edge). A header or the engine names no module, so those are
             // a no-op here — the key is still consumed, so it does not fall
             // through to some other binding.
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            //
+            // Both the arrow keys AND the j/k keybinds move with Shift held —
+            // the same pair that navigates without Shift. (The navigation arms
+            // above already exclude SHIFT, so the two never overlap.)
+            KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.stage_action(stats, StageDirection::Later)
             }
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Char('k') | KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.stage_action(stats, StageDirection::Earlier)
             }
             // `p` is NOT handled here. It is a global (nav) binding, matched
@@ -3818,6 +3837,54 @@ mod engine_row_tests {
             w2.handle_key(shift_up(), &mut stats2),
             Some(Action::MoveModuleStage("discord".to_string(), StageDirection::Earlier))
         );
+    }
+
+    /// The Shift-move works with the j/k KEYBINDS, not only the arrow keys —
+    /// the same pair that navigates without Shift. Shift+j moves later (down),
+    /// Shift+k earlier (up).
+    #[test]
+    fn shift_j_and_shift_k_move_through_the_pipeline() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with_modules(2); // all pre-process
+        w.handle_key(down(), &mut stats); // m0
+
+        let shift_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SHIFT);
+        assert_eq!(
+            w.handle_key(shift_j, &mut stats),
+            Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Later)),
+            "Shift+j must move a module later, like Shift+down"
+        );
+
+        let shift_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SHIFT);
+        assert_eq!(
+            w.handle_key(shift_k, &mut stats),
+            Some(Action::MoveModuleStage("m0".to_string(), StageDirection::Earlier)),
+            "Shift+k must move a module earlier, like Shift+up"
+        );
+    }
+
+    /// After a stage move the cursor re-anchors onto the moved module's NEW row,
+    /// so the operator is not left looking at whatever the old index now names.
+    #[test]
+    fn select_module_name_reanchors_the_cursor_onto_the_moved_module() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with_modules(2); // m0, m1 both pre-process
+        // Select m0 (row 4: [ENGINE], engine, [ADAPTERS], [PRE-PROCESS], m0).
+        w.select_module_name("m0", &stats);
+        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
+
+        // Move m0 to in-process (the dispatch rewrites its position), then the
+        // cursor must follow it to the in-process group.
+        stats.module_entries[0].position = "inprocess".to_string();
+        w.select_module_name("m0", &stats);
+        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
+        // Its row now sits inside the [IN-PROCESS] group, not pre-process.
+        let row = w.selected_row(&stats);
+        assert_eq!(row.group, Group::InProcess);
+
+        // An unknown name leaves the selection alone.
+        w.select_module_name("does-not-exist", &stats);
+        assert_eq!(w.selected_module_name(&stats).as_deref(), Some("m0"));
     }
 
     /// Headers and the engine row name no module, so a Shift+arrow there is a
