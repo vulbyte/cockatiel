@@ -887,6 +887,26 @@ async fn run_app(
             }
         }
 
+        // Startup-deadline overlay: a module stuck in "starting" past the generous
+        // window — the engine never reported it connected — is surfaced as a
+        // terminal "startup failed" with the last error line as the reason,
+        // instead of an eternal spinner. DISPLAY ONLY: the process is left
+        // running, so a module that eventually connects still clears it.
+        {
+            let started = state.module_started_at.lock().unwrap();
+            let errors = state.module_last_error.lock().unwrap();
+            for entry in &mut state.stats.module_entries {
+                if entry.status != "starting" {
+                    continue;
+                }
+                let reason = errors.get(&entry.name).map(String::as_str).unwrap_or("");
+                let at = started.get(&entry.name).copied();
+                if let Some(failed) = startup_failed_status(at, reason) {
+                    entry.status = failed;
+                }
+            }
+        }
+
         // Error overlay: a still-connected module that recently emitted an
         // error line shows "error" instead of "connected". The module keeps
         // running; it only clears once it stops erroring for a while.
@@ -1912,11 +1932,15 @@ fn sync_module_runs(state: &mut AppState) {
     // 1. Promote starting → connected once the engine reports the session.
     {
         let mut runs = state.module_runs.lock().unwrap();
+        let mut started = state.module_started_at.lock().unwrap();
         for entry in &state.stats.module_entries {
             if entry.status == "connected" {
                 if let Some(cur) = runs.get(&entry.name) {
                     if cur == "starting" {
                         runs.insert(entry.name.clone(), "connected".to_string());
+                        // A successful start clears the startup deadline so a
+                        // later restart gets a fresh window.
+                        started.remove(&entry.name);
                     }
                 }
             }
@@ -2115,6 +2139,11 @@ async fn handle_launch_result(
         .lock()
         .unwrap()
         .insert(name.to_string(), "starting".to_string());
+    state
+        .module_started_at
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), Instant::now());
 
     let restart_tx = state.restart_tx.clone().unwrap_or_else(|| {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -2135,6 +2164,7 @@ async fn handle_launch_result(
         spawn_log_reader(
             state.module_logs.clone(),
             state.module_errors.clone(),
+            state.module_last_error.clone(),
             ws_command_tx.clone(),
             name.to_string(),
             1,
@@ -2145,6 +2175,7 @@ async fn handle_launch_result(
         spawn_log_reader(
             state.module_logs.clone(),
             state.module_errors.clone(),
+            state.module_last_error.clone(),
             ws_command_tx.clone(),
             name.to_string(),
             3,
@@ -2364,6 +2395,7 @@ fn strip_ansi(s: &str) -> String {
 fn spawn_log_reader(
     logs: Arc<Mutex<VecDeque<crate::windows::log::LogEntry>>>,
     errors: Arc<Mutex<HashMap<String, Instant>>>,
+    last_error: Arc<Mutex<HashMap<String, String>>>,
     ws_tx: mpsc::UnboundedSender<WsCommand>,
     source: String,
     event_type: i32,
@@ -2391,9 +2423,14 @@ fn spawn_log_reader(
                 }
             }
             // Error-level lines (tracing "ERROR", error: / failed / panic ...)
-            // mark the module as currently erroring.
+            // mark the module as currently erroring AND remember the line so a
+            // "startup failed" status can show WHY.
             if line_indicates_error(&line) {
                 errors.lock().unwrap().insert(source.clone(), Instant::now());
+                last_error
+                    .lock()
+                    .unwrap()
+                    .insert(source.clone(), line.clone());
             }
             let _ = ws_tx.send(WsCommand::SendLog {
                 source: source.clone(),
@@ -2954,6 +2991,32 @@ const ENGINE_SHUTDOWN_QUERY: &str = "engine_shutdown";
 /// there) — the same job the `Disconnected` handler does for the usual way a
 /// socket dies, and this covers the ways it does not.
 const ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a module may sit in "starting" before the TUI surfaces a terminal
+/// "startup failed" status instead of an eternal spinner. Generous enough for a
+/// legitimately slow warm-up (a TTS module fetching a ~70MB model, a cold cargo
+/// build) while still catching a module that launched but will never connect.
+/// This is a DISPLAY state only: the process is not killed, so a module that
+/// eventually connects still promotes to "connected" and clears the failure.
+pub const STARTUP_FAILED_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// Decide whether a module stuck in "starting" has exceeded its startup
+/// window, and what failure status to show. Pure so it is unit-testable: a
+/// module that started before the deadline and is still not connected gets a
+/// terminal "startup failed: <reason>" status (the reason is the last error
+/// line, or a default), while one within the window stays "starting".
+fn startup_failed_status(started_at: Option<Instant>, last_error: &str) -> Option<String> {
+    let at = started_at?;
+    if Instant::now().duration_since(at) < STARTUP_FAILED_AFTER {
+        return None;
+    }
+    let reason = if last_error.trim().is_empty() {
+        "did not connect to the engine in time"
+    } else {
+        last_error
+    };
+    Some(format!("startup failed: {reason}"))
+}
 
 /// The `sql` payload for the shutdown request.
 ///
@@ -4775,5 +4838,42 @@ mod engine_lifecycle_tests {
         // The gate is the decision function, not a bare boolean: a later edit
         // cannot quietly drop the "already running" half of the condition.
         assert!(src.contains("engine_start_decision(engine_up, should_launch)"));
+    }
+}
+
+#[cfg(test)]
+mod startup_failed_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn within_the_window_stays_starting() {
+        let fresh = Instant::now();
+        assert_eq!(
+            startup_failed_status(Some(fresh), "some error"),
+            None,
+            "a just-started module is still legitimately starting"
+        );
+    }
+
+    #[test]
+    fn past_the_window_with_an_error_reports_the_reason() {
+        let long_ago = Instant::now() - (STARTUP_FAILED_AFTER + Duration::from_secs(1));
+        let status = startup_failed_status(Some(long_ago), "download failed: network down")
+            .expect("must fail");
+        assert!(status.starts_with("startup failed: "), "{status}");
+        assert!(status.contains("network down"), "{status}");
+    }
+
+    #[test]
+    fn past_the_window_without_an_error_uses_the_default() {
+        let long_ago = Instant::now() - (STARTUP_FAILED_AFTER + Duration::from_secs(1));
+        let status = startup_failed_status(Some(long_ago), "").expect("must fail");
+        assert!(status.contains("did not connect"), "{status}");
+    }
+
+    #[test]
+    fn never_started_is_not_a_failure() {
+        assert_eq!(startup_failed_status(None, ""), None);
     }
 }

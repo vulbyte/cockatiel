@@ -265,6 +265,15 @@ pub struct AppState {
     /// When each module last produced an error line (module -> Instant). Used
     /// to surface an "error" status for a still-connected module.
     pub module_errors: Arc<Mutex<HashMap<String, Instant>>>,
+    /// When each module was last told to start ("starting"). A module stuck in
+    /// "starting" past [`crate::main::STARTUP_FAILED_AFTER`] — without the
+    /// engine ever reporting it connected — is surfaced as a terminal
+    /// "startup failed" instead of an eternal spinner.
+    pub module_started_at: Arc<Mutex<HashMap<String, Instant>>>,
+    /// The last error line each module emitted, kept so a "startup failed"
+    /// status can explain WHY (the reason a user can act on, instead of
+    /// "starting" forever).
+    pub module_last_error: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Per-module recovery state for the crash ladder. A module that survives long
@@ -335,6 +344,8 @@ impl AppState {
             last_esc_press: None,
             module_logs: Arc::new(Mutex::new(VecDeque::new())),
             module_errors: Arc::new(Mutex::new(HashMap::new())),
+            module_started_at: Arc::new(Mutex::new(HashMap::new())),
+            module_last_error: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
