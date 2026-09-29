@@ -2741,18 +2741,38 @@ async fn dispatch_action(
             supervisor_log(state, format!("[supervisor] delete requested for {} — awaiting confirmation", name));
         }
         Action::ToggleAutostart(name) => {
-            // Flip autostart in the plugin's manifest file directly.
+            // Flip autostart in the plugin's manifest file directly, AND in the
+            // in-memory view so the `A` marker updates immediately (the engine's
+            // module_list only reports the manifest value on the next poll, and
+            // even then it reflects a rediscovery, so the toggle would otherwise
+            // look like it did nothing on screen).
+            let mut flipped = false;
             if let Some(plugin) = plugins.iter().find(|p| p.manifest.name == name) {
                 let manifest_path = plugin.directory.join(crate::plugins::MANIFEST_FILENAME);
                 if let Ok(data) = std::fs::read_to_string(&manifest_path) {
                     if let Ok(mut manifest) = serde_json::from_str::<serde_json::Value>(&data) {
                         let cur = manifest.get("autostart").and_then(|v| v.as_bool()).unwrap_or(false);
-                        manifest["autostart"] = serde_json::json!(!cur);
+                        let next = !cur;
+                        manifest["autostart"] = serde_json::json!(next);
                         if let Ok(pretty) = serde_json::to_string_pretty(&manifest) {
                             let _ = std::fs::write(&manifest_path, pretty);
+                            flipped = true;
+                        }
+                        // Reflect the new state in the in-memory view NOW so the
+                        // rendered `A` marker tracks the press.
+                        for m in &mut state.stats.module_entries {
+                            if m.name == name {
+                                m.autostart = next;
+                            }
                         }
                     }
                 }
+            }
+            if flipped {
+                supervisor_log(
+                    state,
+                    format!("[supervisor] {} autostart toggled", name),
+                );
             }
         }
         Action::EditCredentials(name) => {
