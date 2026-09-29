@@ -262,6 +262,18 @@ fn format_ms(avg_ms: Option<f64>) -> String {
     }
 }
 
+/// How many messages/minute the engine could sustain at `total_ms` average
+/// end-to-end latency before the queue starts filling (the inverse of the
+/// per-message latency: `1000/ms` messages/sec, × 60 = `60000/ms`/min). Blank
+/// when there's no latency data yet.
+fn format_throughput(total_ms: f64) -> String {
+    if total_ms <= 0.0 {
+        return String::new();
+    }
+    let per_min = 60_000.0 / total_ms;
+    format!("{:.0}/min", per_min)
+}
+
 /// The colour for a processing time, so the ms column doubles as a heat gauge.
 /// A simple if/else tree: the higher the latency, the more alarming the
 /// colour. The thresholds are deliberately coarse — they mark the round-trip
@@ -323,6 +335,11 @@ const AUTOSTART_COL: usize = 2;
 /// The fixed width of the ms column, right-aligned within it so `7.3ms` and
 /// `157.3ms` share a right edge.
 const MS_COL: usize = 9;
+
+/// The fixed width of the engine row's throughput column ("messages/minute"
+/// the engine could sustain without the queue filling). Engine-only: modules
+/// don't have a throughput number.
+const THROUGHPUT_COL: usize = 10;
 
 /// Clamp a stored selection into a list of `total` rows.
 pub fn clamp_selected(selected: usize, total: usize) -> usize {
@@ -1683,15 +1700,25 @@ impl Window for ModulesWindow {
                             // header and its modules line up. No label — the ms
                             // column is self-explanatory next to the row
                             // values.
+                            //
+                            // The `[ENGINE]` header shows NOTHING there: the
+                            // engine's end-to-end total (and now the messages/
+                            // minute throughput) live on the ENGINE ROW, the
+                            // one place the engine actually displays its own
+                            // numbers. Showing the total twice (header + row)
+                            // is redundant.
                             let header_name = header_label(row.group);
                             let sum_ms = match row.group {
-                                Group::Engine => group_total_ms(stats, Group::Adapters)
-                                    + group_total_ms(stats, Group::PreProcess)
-                                    + group_total_ms(stats, Group::InProcess)
-                                    + group_total_ms(stats, Group::PostProcess),
+                                Group::Engine => 0.0,
                                 _ => group_total_ms(stats, row.group),
                             };
-                            let ms_text = format_ms(Some(sum_ms));
+                            // The engine header stays blank in the ms column
+                            // (the engine row shows its own total + throughput).
+                            let ms_text = if row.group == Group::Engine {
+                                String::new()
+                            } else {
+                                format_ms(Some(sum_ms))
+                            };
                             // Blank fill to the ms column, whose start includes
                             // the same 2-space row indent a module row has (the
                             // header label carries that indent too).
@@ -1814,6 +1841,20 @@ impl Window for ModulesWindow {
                                 format!("{}{}", " ".repeat(before_ms), total_text),
                                 row_style.fg(if is_selected { Color::Black } else { ms_color(Some(total_ms)) }),
                             ));
+                            // Messages/minute the engine could sustain at this
+                            // latency before the queue fills — the inverse of
+                            // the total ms, in its own fixed column beside it.
+                            let throughput = format_throughput(total_ms);
+                            if !throughput.is_empty() {
+                                spans.push(Span::styled(
+                                    format!("{:>width$}", throughput, width = THROUGHPUT_COL),
+                                    row_style.fg(if is_selected {
+                                        Color::Black
+                                    } else {
+                                        Color::Cyan
+                                    }),
+                                ));
+                            }
                             (Line::from(spans), None)
                         }
                         EntryKind::Module(mi) => {
@@ -3147,7 +3188,7 @@ mod engine_row_tests {
         clamp_selected, scroll_for, next_selectable, grouped_rows, grouped_lines,
         grouped_selected_line, GroupedLine, GroupedRow, Group, EntryKind, header_label,
         StageDirection, ENGINE_REMOVED_STATUS, ENGINE_ROW, ENGINE_ROW_LABEL, STATUS_COL, Reload,
-        ENGINE_CONFIG_KEYS, ms_color,
+        ENGINE_CONFIG_KEYS, ms_color, format_throughput,
     };
     use crate::app::{ConfigTarget, Window};
     use crate::db::GlobalStats;
@@ -4158,6 +4199,57 @@ mod engine_row_tests {
         );
     }
 
+    /// The engine's end-to-end latency is shown in ONE place (the engine row,
+    /// with the throughput it sustains), not also on the `[ENGINE]` header.
+    #[test]
+    fn the_engine_latency_and_throughput_live_only_on_the_engine_row() {
+        let mut w = super::ModulesWindow::new();
+        let mut stats = stats_with(&[
+            ("banned-words", "preprocess"),
+            ("language-constrainer", "inprocess"),
+            ("reprimand", "inprocess"),
+            ("tts-service", "postprocess"),
+        ]);
+        stats.engine_status = "connected".to_string();
+        // 15.7 + 7.3 + 5.2 + 4.5 = 32.7ms total -> 60000/32.7 = 1834.8 -> 1835/min.
+        stats.module_entries.iter_mut().for_each(|m| match m.name.as_str() {
+            "banned-words" => m.avg_ms = Some(15.7),
+            "language-constrainer" => m.avg_ms = Some(7.3),
+            "reprimand" => m.avg_ms = Some(5.2),
+            "tts-service" => m.avg_ms = Some(4.5),
+            _ => {}
+        });
+        let screen = super::tests::render(&mut w, &stats, 120, 30);
+        let line = |needle: &str| {
+            screen
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing:\n{screen}"))
+        };
+
+        // The engine row shows the total ms AND the messages/minute it could
+        // sustain without the queue filling.
+        let engine = line("cockatiel-engine");
+        assert!(engine.contains("32.7ms"), "engine row must show total latency: {engine}");
+        assert!(engine.contains("1835/min"), "engine row must show throughput: {engine}");
+
+        // The [ENGINE] header shows NOTHING in the ms column (no duplicate).
+        let header = line("[ENGINE]");
+        assert!(
+            !header.contains("ms"),
+            "the engine header must not duplicate the total latency: {header}"
+        );
+    }
+
+    #[test]
+    fn throughput_is_the_inverse_of_total_latency() {
+        assert_eq!(format_throughput(0.0), "", "no latency data -> no throughput");
+        assert_eq!(format_throughput(1000.0), "60/min", "1s/message -> 60/min");
+        assert_eq!(format_throughput(100.0), "600/min");
+        assert_eq!(format_throughput(50.0), "1200/min");
+        assert_eq!(format_throughput(32.7), "1835/min");
+    }
+
     /// The ms column doubles as a heat gauge: an if/else tree colours the value
     /// by latency band, so a slowing module turns visibly alarming at the
     /// thresholds before the operator has to read the number.
@@ -4467,6 +4559,7 @@ mod engine_row_tests {
             original: original.to_string(),
         }
     }
+
 
 
 
