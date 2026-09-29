@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::proto::{ChannelRef, User};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// History of commend/reprimand events (giver → recipient), the source of the
 /// 24h reprimand cooldown. All user rating data lives here — centralized and
@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS users (
     reprimands INTEGER NOT NULL DEFAULT 0,
     flags TEXT NOT NULL DEFAULT '{}',
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    total_score INTEGER NOT NULL DEFAULT 0,
+    messages_sent INTEGER NOT NULL DEFAULT 0
 )";
 
 const CREATE_CHANNELS: &str = "
@@ -64,6 +66,64 @@ CREATE TABLE IF NOT EXISTS user_values (
 pub struct UserDatabase {
     local: Arc<Mutex<Option<turso::Connection>>>,
     path: Arc<Mutex<Option<PathBuf>>>,
+    /// The rank formula's tunable parameters, loaded from this db's own
+    /// config.json (the db is self-contained and never reads another module's
+    /// config). Re-read live on a ticker so tuning applies without a restart.
+    rank_config: Arc<std::sync::Mutex<RankConfig>>,
+}
+
+/// The rank formula's tunable parameters. Lives in the user database's own
+/// `config.json`; a streamer edits them there (via the TUI's user-db config
+/// editor) and the db re-reads the file on a short ticker.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RankConfig {
+    /// Age (in days) at which each decay weight kicks in. Must be sorted
+    /// ascending and match `decay_weights` length. An event older than the
+    /// last boundary counts as 0 (fully decayed/"inked").
+    pub decay_boundaries_days: Vec<u64>,
+    /// The weight applied to events in each age bucket. `decay_weights[0]` for
+    /// events younger than `decay_boundaries_days[0]`, etc.
+    pub decay_weights: Vec<f64>,
+    /// The divisor in the score term: `score / max(account_years, floor) / this`.
+    pub score_divisor: f64,
+    /// Minimum account years used in the score term (floors an account younger
+    /// than this so a brand-new user isn't divided by ~0).
+    pub account_year_floor: f64,
+}
+
+impl Default for RankConfig {
+    fn default() -> Self {
+        Self {
+            // 0-1y → 1.0, 1-2y → 0.5, 2-3y → 0.25, 3y+ → 0 (past the last).
+            decay_boundaries_days: vec![365, 730, 1095],
+            decay_weights: vec![1.0, 0.5, 0.25],
+            score_divisor: 100000.0,
+            account_year_floor: 1.0,
+        }
+    }
+}
+
+impl RankConfig {
+    /// The decay weight for an event `age_days` old.
+    pub fn weight_for_age(&self, age_days: u64) -> f64 {
+        for (i, boundary) in self.decay_boundaries_days.iter().enumerate() {
+            if age_days < *boundary {
+                return self.decay_weights.get(i).copied().unwrap_or(0.0);
+            }
+        }
+        // Older than the last boundary → fully decayed.
+        0.0
+    }
+
+    /// Load from `config.json` in the given directory, or defaults if absent.
+    pub fn load(dir: &std::path::Path) -> Self {
+        let path = dir.join("config.json");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<RankConfig>(&data).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// Result of a rating (commend/reprimand) attempt.
@@ -77,7 +137,36 @@ impl UserDatabase {
         Self {
             local: Arc::new(Mutex::new(None)),
             path: Arc::new(Mutex::new(None)),
+            rank_config: Arc::new(std::sync::Mutex::new(RankConfig::default())),
         }
+    }
+
+    /// Load (or create-with-defaults) this db's own config.json and cache it.
+    /// Returns the config dir. `config.json` is this db's single source of
+    /// truth for its tunable numbers — it never reads another module's config.
+    pub fn load_config(&self, dir: &PathBuf) -> Result<RankConfig, Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("config.json");
+        if !path.exists() {
+            // Create with defaults so every value is present and editable.
+            let cfg = RankConfig::default();
+            std::fs::write(&path, serde_json::to_string_pretty(&cfg)?)?;
+        }
+        let cfg = RankConfig::load(dir);
+        *self.rank_config.lock().unwrap() = cfg.clone();
+        Ok(cfg)
+    }
+
+    /// Re-read config.json from disk (the TUI may have edited it). Called on a
+    /// short ticker so decay tuning applies live without a restart.
+    pub fn reload_config(&self, dir: &std::path::Path) {
+        let cfg = RankConfig::load(dir);
+        *self.rank_config.lock().unwrap() = cfg;
+    }
+
+    /// The currently-loaded rank config.
+    pub async fn rank_config(&self) -> RankConfig {
+        self.rank_config.lock().unwrap().clone()
     }
 
     pub async fn initialize(&self, path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -90,6 +179,25 @@ impl UserDatabase {
         conn.execute(CREATE_CHANNELS, ()).await?;
         conn.execute(CREATE_USER_VALUES, ()).await?;
         conn.execute(CREATE_RATING_HISTORY, ()).await?;
+
+        // Migration to schema v2: add `total_score` + `messages_sent`. On an
+        // existing v1 database the columns are absent, so `CREATE TABLE IF NOT
+        // EXISTS` above won't add them. ALTER TABLE ADD COLUMN is idempotent
+        // only across runs that never had the column; the column-exists check
+        // keeps a repeat start (or a fresh DB that already has them) from
+        // erroring. `total_score` is backfilled to the current `score` so a
+        // user's lifetime-earned baseline is where their net stood at the
+        // migration (future spending never reduces it).
+        let cols = self.column_names(&conn).await?;
+        if !cols.contains(&"total_score".to_string()) {
+            conn.execute("ALTER TABLE users ADD COLUMN total_score INTEGER NOT NULL DEFAULT 0", ())
+                .await?;
+            conn.execute("UPDATE users SET total_score = score", ()).await?;
+        }
+        if !cols.contains(&"messages_sent".to_string()) {
+            conn.execute("ALTER TABLE users ADD COLUMN messages_sent INTEGER NOT NULL DEFAULT 0", ())
+                .await?;
+        }
 
         {
             let mut local = self.local.lock().await;
@@ -114,6 +222,17 @@ impl UserDatabase {
     async fn conn(&self) -> Result<turso::Connection, Box<dyn std::error::Error>> {
         let guard = self.local.lock().await;
         guard.as_ref().cloned().ok_or("User database not initialized".into())
+    }
+
+    /// Column names of the `users` table (for idempotent migrations).
+    async fn column_names(&self, conn: &turso::Connection) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let mut rows = conn.query("PRAGMA table_info(users)", ()).await?;
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1).unwrap_or_default();
+            names.push(name);
+        }
+        Ok(names)
     }
 
 /// Create a consistent snapshot of the DB at `path` by checkpointing the WAL
@@ -230,7 +349,7 @@ impl UserDatabase {
         let conn = self.conn().await?;
 
         let mut rows = conn.query(
-            "SELECT uuid7, username, is_sponsor, is_moderator, is_admin, is_owner, score, commendations, reprimands, flags, created_at, updated_at
+            "SELECT uuid7, username, is_sponsor, is_moderator, is_admin, is_owner, score, commendations, reprimands, flags, created_at, updated_at, total_score, messages_sent
              FROM users WHERE uuid7 = ?1",
             turso::params![uuid7],
         ).await?;
@@ -248,8 +367,11 @@ impl UserDatabase {
             let flags: String = row.get(9)?;
             let created_at: i64 = row.get(10)?;
             let updated_at: i64 = row.get(11)?;
+            let total_score: i64 = row.get(12)?;
+            let messages_sent: i64 = row.get(13)?;
 
             let channels = self.get_channels(&user_uuid).await?;
+            let rank = self.compute_rank(&user_uuid, score, total_score, commendations, reprimands, messages_sent, created_at).await;
 
             Ok(Some(User {
                 uuid7: user_uuid,
@@ -265,6 +387,9 @@ impl UserDatabase {
                 flags,
                 created_at,
                 updated_at,
+                total_score,
+                messages_sent,
+                rank,
             }))
         } else {
             Ok(None)
@@ -316,15 +441,25 @@ impl UserDatabase {
     ) -> Result<Option<User>, Box<dyn std::error::Error>> {
         let conn = self.conn().await?;
         let now = Self::now_ms();
-        let field = if is_commendation { "commendations" } else { "reprimands" };
 
-        conn.execute(
-            &format!(
-                "UPDATE users SET score = score + ?1, {} = {} + 1, updated_at = ?3 WHERE uuid7 = ?2",
-                field, field
-            ),
-            turso::params![delta, uuid7, now],
-        ).await?;
+        if is_commendation {
+            // A commendation earns score: it bumps the spendable score, the
+            // lifetime total, and the commendations counter.
+            conn.execute(
+                "UPDATE users SET score = score + ?1, total_score = total_score + ?1,
+                        commendations = commendations + 1, updated_at = ?3 WHERE uuid7 = ?2",
+                turso::params![delta, uuid7, now],
+            ).await?;
+        } else {
+            // A reprimand is a slap on the wrist: it records the reprimand
+            // counter and the history event (which feeds the user's rank) but
+            // NEVER touches score or total_score — a user's standing is
+            // reflected in rank, not in their spendable balance.
+            conn.execute(
+                "UPDATE users SET reprimands = reprimands + 1, updated_at = ?3 WHERE uuid7 = ?2",
+                turso::params![delta, uuid7, now],
+            ).await?;
+        }
 
         self.get_user_by_uuid(uuid7).await
     }
@@ -341,12 +476,168 @@ impl UserDatabase {
         let conn = self.conn().await?;
         let now = Self::now_ms();
 
-        conn.execute(
-            "UPDATE users SET score = score + ?1, updated_at = ?2 WHERE uuid7 = ?3",
-            turso::params![delta, now, uuid7],
-        ).await?;
+        // Positive deltas are EARNED — they bump both the spendable score and
+        // the lifetime total. Negative deltas (penalties) only reduce the
+        // spendable balance; the lifetime total records what was earned, never
+        // what was spent or penalized.
+        if delta >= 0 {
+            conn.execute(
+                "UPDATE users SET score = score + ?1, total_score = total_score + ?1, updated_at = ?2 WHERE uuid7 = ?3",
+                turso::params![delta, now, uuid7],
+            ).await?;
+        } else {
+            conn.execute(
+                "UPDATE users SET score = score + ?1, updated_at = ?2 WHERE uuid7 = ?3",
+                turso::params![delta, now, uuid7],
+            ).await?;
+        }
 
         self.get_user_by_uuid(uuid7).await
+    }
+
+    /// Increment a user's `messages_sent` counter by 1 (the engine calls this
+    /// on every chat message it ingests for that user). A rank factor.
+    pub async fn increment_messages_sent(&self, uuid7: &str) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET messages_sent = messages_sent + 1, updated_at = ?2 WHERE uuid7 = ?1",
+            turso::params![uuid7, Self::now_ms()],
+        ).await?;
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    /// Charge a module's price: deduct `amount` from the user's CURRENT score,
+    /// but only if they have at least that much (guarded — score never goes
+    /// negative). The lifetime `total_score` is untouched. Returns the updated
+    /// user on success, or `None` when the user is missing or lacks the funds.
+    ///
+    /// turso's `execute` returns a scan counter rather than rows-affected, so
+    /// the guard is verified by the pre-read (we only attempt when score >=
+    /// amount) and the single-statement `WHERE score >= ?amount` makes the
+    /// deduct atomic under concurrency.
+    pub async fn deduct_score(&self, uuid7: &str, amount: i64) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        if amount <= 0 {
+            return self.get_user_by_uuid(uuid7).await;
+        }
+        let current = self.get_user_by_uuid(uuid7).await?;
+        let Some(user) = current else {
+            return Ok(None);
+        };
+        if user.score < amount {
+            return Ok(None);
+        }
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE users SET score = score - ?1, updated_at = ?2 WHERE uuid7 = ?3 AND score >= ?1",
+            turso::params![amount, Self::now_ms(), uuid7],
+        ).await?;
+        self.get_user_by_uuid(uuid7).await
+    }
+
+    /// The user's rank: `Σ weight(age)` over commendation events minus
+    /// `Σ weight(age)` over reprimand events, plus a normalized score term.
+    ///
+    /// Events are read from `rating_history` (each carries a `created_at`), and
+    /// each is weighted by its age against the configurable decay
+    /// (`decay_boundaries_days` / `decay_weights`, e.g. 1.0 at 0-1y, 0.5 at
+    /// 1-2y, 0.25 at 2-3y, 0 past 3y). The score term is
+    /// `score / max(account_years, floor) / score_divisor` so spending doesn't
+    /// dominate standing. Rank is computed server-side and returned on every
+    /// user fetch — callers never make a second trip for it.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn compute_rank(
+        &self,
+        uuid7: &str,
+        score: i64,
+        _total_score: i64,
+        _commendations: i64,
+        _reprimands: i64,
+        _messages_sent: i64,
+        created_at: i64,
+    ) -> i64 {
+        let cfg = self.rank_config().await;
+        let now = Self::now_ms();
+        let age_days = |ts: i64| -> u64 {
+            let ms = now.saturating_sub(ts).max(0);
+            (ms / 86_400_000) as u64
+        };
+
+        // Decayed event counts from rating_history. `.ok()` drops the non-Send
+        // error type immediately so this future stays Send (the connection
+        // itself is Send).
+        let mut commend_weighted = 0.0_f64;
+        let mut reprimand_weighted = 0.0_f64;
+        let conn = self.conn().await.ok();
+        if let Some(conn) = conn {
+            if let Ok(mut rows) = conn
+                .query(
+                    "SELECT kind, created_at FROM rating_history WHERE recipient_uuid7 = ?1",
+                    turso::params![uuid7],
+                )
+                .await
+            {
+                while let Ok(Some(row)) = rows.next().await {
+                    let kind: String = row.get(0).unwrap_or_default();
+                    let ts: i64 = row.get(1).unwrap_or(0);
+                    let w = cfg.weight_for_age(age_days(ts));
+                    match kind.as_str() {
+                        "commend" => commend_weighted += w,
+                        "reprimand" => reprimand_weighted += w,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Score term: score / max(account_years, floor) / divisor.
+        let account_ms = now.saturating_sub(created_at).max(0);
+        let account_years = (account_ms as f64) / (86_400_000.0_f64 * 365.0);
+        let account_years = account_years.max(cfg.account_year_floor);
+        let score_term = (score as f64) / account_years / cfg.score_divisor;
+
+        (commend_weighted - reprimand_weighted + score_term).round() as i64
+    }
+
+    /// A user's rating history: every commend/reprimand event with giver, date
+    /// and reason. Returns EVERYTHING on record (the caller decides how much to
+    /// show); only the rank calculation restricts itself to the decay window.
+    pub async fn get_rating_history(
+        &self,
+        recipient_uuid7: &str,
+        kind_filter: &str,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<crate::proto::RatingHistoryEntry>, Box<dyn std::error::Error>> {
+        let conn = self.conn().await?;
+        let limit = if limit <= 0 { 100 } else { limit };
+        let offset = if offset < 0 { 0 } else { offset };
+
+        let sql = if kind_filter.is_empty() {
+            "SELECT uuid7, giver_uuid7, kind, platform, handle, reason, created_at
+             FROM rating_history WHERE recipient_uuid7 = ?1
+             ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
+        } else {
+            "SELECT uuid7, giver_uuid7, kind, platform, handle, reason, created_at
+             FROM rating_history WHERE recipient_uuid7 = ?1 AND kind = ?4
+             ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
+        };
+        let mut rows = conn
+            .query(sql, turso::params![recipient_uuid7, limit, offset, kind_filter])
+            .await?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(crate::proto::RatingHistoryEntry {
+                uuid7: row.get(0).unwrap_or_default(),
+                giver_uuid7: row.get(1).unwrap_or_default(),
+                kind: row.get(2).unwrap_or_default(),
+                platform: row.get(3).unwrap_or_default(),
+                handle: row.get(4).unwrap_or_default(),
+                reason: row.get(5).unwrap_or_default(),
+                created_at: row.get(6).unwrap_or_default(),
+            });
+        }
+        Ok(out)
     }
 
     /// Commend or reprimand a user. For a REPRIMAND the 24h cooldown is
@@ -406,26 +697,12 @@ impl UserDatabase {
             .await?;
         }
 
-        self.adjust_score(recipient_uuid7, if is_commendation { 1 } else { -1 }, is_commendation)
+        self.adjust_score(recipient_uuid7, 1, is_commendation)
             .await?;
         Ok(RatingOutcome {
             applied: true,
             message: format!("{} applied", kind),
         })
-    }
-
-    /// Retention cleanup: rating_history is append-only and only the last 24h
-    /// is ever consulted (the reprimand cooldown), so prune rows older than
-    /// `cutoff_ms` to stop unbounded growth. (turso's execute returns a scan
-    /// counter rather than rows deleted, so no count is returned.)
-    pub async fn prune_old_ratings(&self, cutoff_ms: i64) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = self.conn().await?;
-        conn.execute(
-            "DELETE FROM rating_history WHERE created_at < ?1",
-            turso::params![cutoff_ms],
-        )
-        .await?;
-        Ok(())
     }
 
     pub async fn add_channel(
@@ -662,10 +939,140 @@ mod tests {
         let comm2 = db.rate_user(&giver, &target, true, "test", "target", "nice again").await.unwrap();
         assert!(comm2.applied, "commend is unlimited");
 
-        // Score/counters reflect it: -2 (reprimands) + 2 (commends) = 0.
+        // Counters reflect it: 2 reprimands (no score change) + 2 commends (each
+        // +1 score AND +1 total_score).
         let t = db.get_user_by_uuid(&target).await.unwrap().unwrap();
-        assert_eq!(t.score, 0);
+        assert_eq!(t.score, 2, "reprimands must not reduce score; 2 commends earn +2");
+        assert_eq!(t.total_score, 2, "commends also bump lifetime total");
         assert_eq!(t.reprimands, 2);
         assert_eq!(t.commendations, 2);
+    }
+
+    #[tokio::test]
+    async fn migration_adds_total_score_and_backfills_from_score() {
+        // Simulate a v1 database (no total_score/messages_sent columns) and
+        // verify initialize() migrates it: the columns appear and total_score
+        // is backfilled from the existing score.
+        let dir = std::env::temp_dir().join(format!("cok_udb_mig_{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+
+        {
+            let db = UserDatabase::new();
+            db.initialize(&path).await.unwrap();
+            let chan = ChannelRef { platform: "test".into(), channel_id: "c1".into(), handle: "u".into() };
+            let u = db.add_user("u", Some(&chan)).await.unwrap();
+            // Give the user some score via the pre-migration path (adjust_score_only).
+            db.adjust_score_only(&u.uuid7, 42).await.unwrap();
+            assert_eq!(db.get_user_by_uuid(&u.uuid7).await.unwrap().unwrap().score, 42);
+        }
+
+        // "Downgrade" to v1: drop the new columns the way a v1 schema would
+        // have them (create a fresh v1 table) — actually simpler: build a v1
+        // table directly and insert a row, then let initialize() migrate.
+        {
+            let raw = turso::Builder::new_local(path.to_string_lossy().as_ref()).build().await.unwrap();
+            let conn = raw.connect().unwrap();
+            conn.execute(
+                "DROP TABLE users",
+                (),
+            ).await.unwrap();
+            conn.execute(
+                "CREATE TABLE users (
+                    uuid7 TEXT PRIMARY KEY, schema_version INTEGER NOT NULL DEFAULT 1,
+                    username TEXT NOT NULL, is_sponsor INTEGER NOT NULL DEFAULT 0,
+                    is_moderator INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_owner INTEGER NOT NULL DEFAULT 0, score INTEGER NOT NULL DEFAULT 0,
+                    commendations INTEGER NOT NULL DEFAULT 0, reprimands INTEGER NOT NULL DEFAULT 0,
+                    flags TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                )",
+                (),
+            ).await.unwrap();
+            conn.execute(
+                "INSERT INTO users (uuid7, schema_version, username, score, created_at, updated_at)
+                 VALUES ('u1', 1, 'legacy', 77, 1, 1)",
+                turso::params![],
+            ).await.unwrap();
+        }
+
+        let db = UserDatabase::new();
+        db.initialize(&path).await.unwrap();
+        let u = db.get_user_by_uuid("u1").await.unwrap().unwrap();
+        assert_eq!(u.total_score, 77, "total_score backfilled from existing score");
+        assert_eq!(u.messages_sent, 0);
+        assert_eq!(u.score, 77);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn deduct_score_is_guarded_and_never_touches_total() {
+        let db = temp_db().await;
+        let uid = add(&db, "u", "c").await;
+        db.adjust_score_only(&uid, 10).await.unwrap();
+
+        // Over-draw is refused (score stays 10).
+        let over = db.deduct_score(&uid, 20).await.unwrap();
+        assert!(over.is_none(), "insufficient funds must be refused");
+        let u = db.get_user_by_uuid(&uid).await.unwrap().unwrap();
+        assert_eq!(u.score, 10);
+
+        // A within-balance deduct succeeds and does not touch total_score.
+        let ok = db.deduct_score(&uid, 3).await.unwrap().unwrap();
+        assert_eq!(ok.score, 7);
+        assert_eq!(ok.total_score, 10, "spending never reduces lifetime total");
+    }
+
+    #[tokio::test]
+    async fn reprimands_do_not_reduce_score_but_feed_rank() {
+        let db = temp_db().await;
+        let giver = add(&db, "giver", "cg").await;
+        let target = add(&db, "target", "ct").await;
+
+        // A reprimand: counter + history event, NO score change.
+        db.rate_user(&giver, &target, false, "test", "target", "spoilers").await.unwrap();
+        let t = db.get_user_by_uuid(&target).await.unwrap().unwrap();
+        assert_eq!(t.reprimands, 1);
+        assert_eq!(t.score, 0, "reprimand must not reduce score");
+
+        // A commendation: score + total + history.
+        db.rate_user(&giver, &target, true, "test", "target", "nice").await.unwrap();
+        let t = db.get_user_by_uuid(&target).await.unwrap().unwrap();
+        assert_eq!(t.commendations, 1);
+        assert_eq!(t.score, 1);
+        assert_eq!(t.total_score, 1);
+
+        // Rank: +1 commend (weight 1.0) - 1 reprimand (weight 1.0) = 0 (+ score term ~0).
+        assert_eq!(t.rank, 0, "recent commend and reprimand cancel in rank");
+    }
+
+    #[tokio::test]
+    async fn increment_messages_sent_counts_chat_messages() {
+        let db = temp_db().await;
+        let uid = add(&db, "u", "c").await;
+        db.increment_messages_sent(&uid).await.unwrap();
+        db.increment_messages_sent(&uid).await.unwrap();
+        let u = db.get_user_by_uuid(&uid).await.unwrap().unwrap();
+        assert_eq!(u.messages_sent, 2);
+    }
+
+    #[tokio::test]
+    async fn get_rating_history_returns_everything_with_reason() {
+        let db = temp_db().await;
+        let giver = add(&db, "giver", "cg").await;
+        let target = add(&db, "target", "ct").await;
+        db.rate_user(&giver, &target, false, "test", "target", "spoilers").await.unwrap();
+        db.rate_user(&giver, &target, true, "test", "target", "good").await.unwrap();
+
+        let history = db.get_rating_history(&target, "", 100, 0).await.unwrap();
+        assert_eq!(history.len(), 2, "history returns everything, no pruning");
+        let reasons: Vec<String> = history.iter().map(|e| e.reason.clone()).collect();
+        assert!(reasons.contains(&"spoilers".to_string()));
+        assert!(reasons.contains(&"good".to_string()));
+        // Every entry carries its giver + date.
+        for e in &history {
+            assert_eq!(e.giver_uuid7, giver);
+            assert!(e.created_at > 0);
+        }
     }
 }

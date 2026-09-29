@@ -680,6 +680,7 @@ struct EditorRow {
 enum EditorTarget {
     Engine,
     Module,
+    UserDb,
 }
 
 /// The config editor: a tree of the target's `.env` + `config.json` flattened
@@ -1147,6 +1148,16 @@ impl ModulesWindow {
         match ed.target {
             EditorTarget::Module => self.last_saved_module = Some(label),
             EditorTarget::Engine => self.last_saved_engine = Some(engine_restart_notes(&ed.rows)),
+            EditorTarget::UserDb => {
+                // The user-db re-reads its config.json on a short ticker, so a
+                // save applies live without a restart.
+                self.last_saved_engine = Some(vec![
+                    crate::windows::modules::EngineRestartNote {
+                        key: "user-db config".to_string(),
+                        why: "the user-db re-reads config.json on its ticker",
+                    },
+                ]);
+            }
         }
     }
 
@@ -2105,6 +2116,7 @@ impl Window for ModulesWindow {
             target: match target {
                 crate::app::ConfigTarget::Engine => EditorTarget::Engine,
                 crate::app::ConfigTarget::Module => EditorTarget::Module,
+                crate::app::ConfigTarget::UserDb => EditorTarget::UserDb,
             },
             label: label.to_string(),
             dir,

@@ -472,8 +472,12 @@ impl UsersWindow {
             ),
             Span::styled(
                 format!(
-                    "   +{} commended  -{} reprimanded",
-                    selected.commendations, selected.reprimands
+                    "   rank {}   lifetime {}   {} msgs   +{} commended  -{} reprimanded",
+                    selected.rank,
+                    selected.total_score,
+                    selected.messages_sent,
+                    selected.commendations,
+                    selected.reprimands
                 ),
                 Style::default().fg(Color::DarkGray),
             ),
@@ -1008,6 +1012,9 @@ mod tests {
             flags: "{}".to_string(),
             created_at: 0,
             updated_at: 0,
+            total_score: score,
+            messages_sent: 0,
+            rank: 0,
         }
     }
 

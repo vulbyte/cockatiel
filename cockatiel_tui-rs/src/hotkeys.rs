@@ -38,6 +38,9 @@ pub enum Action {
     PopOut(String),
     EditCredentials(String),
     EditConfig(String),
+    /// Open the user database's own config.json editor (its rank decay, score
+    /// divisor, etc.). The user-db is self-contained and reads only this file.
+    EditUserDbConfig,
     /// Confirm then empty a module's `.env` + `config.json` values (keys kept).
     ClearModuleConfig(String),
     RunTests,
@@ -178,6 +181,7 @@ fn parse_action(s: &str) -> Action {
         "TogglePlatform" => Action::TogglePlatform,
         "EditCredentials" => Action::EditCredentials(String::new()),
         "EditConfig" => Action::EditConfig(String::new()),
+        "EditUserDbConfig" => Action::EditUserDbConfig,
         "ClearModuleConfig" => Action::ClearModuleConfig(String::new()),
         "RunTests" => Action::RunTests,
         "TogglePipelinePause" => Action::TogglePipelinePause,
@@ -246,6 +250,7 @@ pub fn action_label(action: &Action) -> &'static str {
         Action::DuplicateModule(_) => "copy",
         Action::EditCredentials(_) => "creds",
         Action::EditConfig(_) => "edit",
+        Action::EditUserDbConfig => "userdb-cfg",
         Action::ClearModuleConfig(_) => "clear",
         Action::RunTests => "test",
         Action::SelectModule => "select",
@@ -484,6 +489,10 @@ pub fn default_hotkeys() -> HotkeyConfig {
     // internal key handling (which uses hjkl, arrows, w and 1-5) — so it
     // collides with no existing binding.
     global.insert(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()), Action::TogglePipelinePause);
+    // `U` opens the user database's own config editor (its rank decay / score
+    // divisor). Global, like the pause toggle, so it works from any window; `U`
+    // is free (not bound elsewhere) and reads as "User DB".
+    global.insert(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT), Action::EditUserDbConfig);
     // `a` toggles per-module autostart (the `A` marker in the modules window);
     // autostart modules launch automatically on engine connect, so there is no
     // session-level toggle to bind.

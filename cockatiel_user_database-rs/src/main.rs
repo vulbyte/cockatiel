@@ -147,30 +147,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(format!("{}:{}", bind, port)).await?;
     println!("[UserDB] Listening on {}:{} (engine-only access)", bind, port);
 
-    // Rating-history retention: prune rows older than 7 days (the table is
-    // append-only and only the last 24h is ever read for the cooldown).
+    // This db's own config.json is its single source of truth for tunable
+    // numbers (the rank decay, score divisor, etc.) — it never reads another
+    // module's config. Create with defaults if missing; re-read on a short
+    // ticker so a streamer's edits apply live without a restart.
+    let config_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let _ = db.load_config(&config_dir)?;
     {
         let db = Arc::clone(&db);
+        let dir = config_dir.clone();
         tokio::spawn(async move {
-            let retention_ms: i64 = 7 * 24 * 3600 * 1000;
-            let now_ms = || {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0)
-            };
-            // Once at startup…
-            match db.prune_old_ratings(now_ms() - retention_ms).await {
-                Ok(()) => println!("[UserDB] pruned ratings older than 7 days"),
-                Err(e) => eprintln!("[UserDB] rating prune failed: {}", e),
-            }
-            // …and hourly.
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                if let Err(e) = db.prune_old_ratings(now_ms() - retention_ms).await {
-                    eprintln!("[UserDB] rating prune failed: {}", e);
-                }
+                db.reload_config(&dir);
             }
         });
     }
@@ -415,6 +405,32 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                 Err(e) => fail("List values failed", &e.to_string()),
             }
         }
+        user_db_request::Op::DeductScore(d) => {
+            match db.deduct_score(&d.uuid7, d.amount).await {
+                Ok(Some(user)) => ok(Some(user), "Score deducted".to_string()),
+                Ok(None) => fail("Deduct failed", "User not found or insufficient score"),
+                Err(e) => fail("Deduct failed", &e.to_string()),
+            }
+        }
+        user_db_request::Op::GetRatingHistory(g) => {
+            match db.get_rating_history(&g.uuid7, &g.kind, g.limit, g.offset).await {
+                Ok(entries) => ok_history(entries, "Rating history listed".to_string()),
+                Err(e) => fail("Get rating history failed", &e.to_string()),
+            }
+        }
+        user_db_request::Op::SetRankConfig(_) => {
+            // The db owns its config.json; this just asks it to re-read now.
+            let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            db.reload_config(&dir);
+            ok(None, "Rank config refreshed".to_string())
+        }
+        user_db_request::Op::IncrementMessagesSent(m) => {
+            match db.increment_messages_sent(&m.uuid7).await {
+                Ok(Some(user)) => ok(Some(user), "Messages sent incremented".to_string()),
+                Ok(None) => fail("Increment failed", "User not found"),
+                Err(e) => fail("Increment failed", &e.to_string()),
+            }
+        }
     }
 }
 
@@ -427,6 +443,7 @@ fn ok(user: Option<User>, message: impl Into<String>) -> UserDbResponse {
         message: message.into(),
         value: None,
         values: Vec::new(),
+        rating_history: Vec::new(),
     }
 }
 
@@ -439,6 +456,7 @@ fn ok_many(users: Vec<User>, message: impl Into<String>) -> UserDbResponse {
         message: message.into(),
         value: None,
         values: Vec::new(),
+        rating_history: Vec::new(),
     }
 }
 
@@ -451,6 +469,7 @@ fn ok_value(value: proto::UserValueResult, message: impl Into<String>) -> UserDb
         message: message.into(),
         value: Some(value),
         values: Vec::new(),
+        rating_history: Vec::new(),
     }
 }
 
@@ -463,6 +482,20 @@ fn ok_values(values: Vec<proto::UserValueResult>, message: impl Into<String>) ->
         message: message.into(),
         value: None,
         values,
+        rating_history: Vec::new(),
+    }
+}
+
+fn ok_history(entries: Vec<proto::RatingHistoryEntry>, message: impl Into<String>) -> UserDbResponse {
+    UserDbResponse {
+        success: true,
+        error: String::new(),
+        user: None,
+        users: Vec::new(),
+        message: message.into(),
+        value: None,
+        values: Vec::new(),
+        rating_history: entries,
     }
 }
 
@@ -475,6 +508,7 @@ fn fail(error: impl Into<String>, detail: impl Into<String>) -> UserDbResponse {
         message: String::new(),
         value: None,
         values: Vec::new(),
+        rating_history: Vec::new(),
     }
 }
 

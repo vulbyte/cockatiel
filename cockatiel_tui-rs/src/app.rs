@@ -109,6 +109,9 @@ pub struct CredentialSession {
 pub enum ConfigTarget {
     Engine,
     Module,
+    /// The user database's own config.json (its rank decay, score divisor,
+    /// etc.). The user-db is self-contained and reads only this file.
+    UserDb,
 }
 
 pub trait Window {

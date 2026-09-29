@@ -1811,6 +1811,7 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::DuplicateModule(_)
             | Action::EditCredentials(_)
             | Action::EditConfig(_)
+            | Action::EditUserDbConfig
             | Action::ClearModuleConfig(_)
             | Action::RunTests
             | Action::UserQuery(_, _)
@@ -2789,6 +2790,24 @@ async fn dispatch_action(
                 }
             }
         }
+        Action::EditUserDbConfig => {
+            // Open the user database's own config.json (rank decay / score
+            // divisor). The user-db is self-contained and reads only this file;
+            // the editor writes it back and the db re-reads on its ticker.
+            let dir = supervisor::user_db_dir();
+            if let Some(window) = state.get_window_mut(WindowId::Modules) {
+                window.start_config_editor(
+                    crate::app::ConfigTarget::UserDb,
+                    "user-db",
+                    dir,
+                );
+                state.active_window = WindowId::Modules;
+                supervisor_log(
+                    state,
+                    "[supervisor] editing user-db config (j/k move, type to edit, Esc save+exit)",
+                );
+            }
+        }
         Action::EditConfig(name) => {
             // The EDIT key against the SELECTED row, and the two rows are
             // different things: a module row opens that module's `.env` +
@@ -3595,6 +3614,8 @@ mod tests {
                     binary: Default::default(),
                     build_command: None,
                     build_flags: Vec::new(),
+                    price: 0,
+                    min_rank: 0,
                 },
                 directory: dir,
             }

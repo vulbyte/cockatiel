@@ -1901,6 +1901,8 @@ mod tests {
             binary: crate::plugins::BinaryRoutes(routes),
             build_command: Some("cargo".into()),
             build_flags: vec!["build".into(), "--release".into()],
+            price: 0,
+            min_rank: 0,
         };
         (Plugin { manifest, directory: dir }, bin_path)
     }
@@ -1960,6 +1962,8 @@ mod tests {
             binary: crate::plugins::BinaryRoutes(std::collections::HashMap::new()),
             build_command: None,
             build_flags: vec![],
+            price: 0,
+            min_rank: 0,
         };
         let p = Plugin {
             manifest,
@@ -2268,6 +2272,8 @@ mod tests {
             binary: Default::default(),
             build_command: None,
             build_flags: vec![],
+            price: 0,
+            min_rank: 0,
         };
         let plugin = Plugin {
             manifest,
@@ -2336,6 +2342,8 @@ mod tests {
             binary: Default::default(),
             build_command: None,
             build_flags: vec![],
+            price: 0,
+            min_rank: 0,
         };
         let plugin = Plugin {
             manifest,

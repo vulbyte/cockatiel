@@ -104,6 +104,17 @@ pub struct ModuleManifest {
 
     #[serde(default)]
     pub build_flags: Vec<String>,
+
+    /// How much score a user must spend for the module to run on their
+    /// message. 0 = free. Mirrors the engine's manifest field; kept here so
+    /// the TUI's config editor (which rewrites manifests) round-trips it.
+    #[serde(default)]
+    pub price: u64,
+
+    /// The minimum numeric rank a user needs for the module to run on their
+    /// message. 0 = no rank requirement.
+    #[serde(default)]
+    pub min_rank: i64,
 }
 
 #[derive(Debug, Clone)]

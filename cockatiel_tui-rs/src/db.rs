@@ -64,6 +64,12 @@ pub struct UserSummary {
     pub created_at: i64,
     #[allow(dead_code)]
     pub updated_at: i64,
+    /// Lifetime score earned (never reduced by spending).
+    pub total_score: i64,
+    /// Chat messages this user has sent.
+    pub messages_sent: i64,
+    /// The user's current numeric rank (computed server-side by the user db).
+    pub rank: i64,
 }
 
 impl UserSummary {
@@ -588,6 +594,9 @@ fn parse_user(v: &serde_json::Value) -> Option<UserSummary> {
         flags: v.get("flags").and_then(|x| x.as_str()).unwrap_or("{}").to_string(),
         created_at: v.get("created_at").and_then(|x| x.as_i64()).unwrap_or(0),
         updated_at: v.get("updated_at").and_then(|x| x.as_i64()).unwrap_or(0),
+        total_score: v.get("total_score").and_then(|x| x.as_i64()).unwrap_or(0),
+        messages_sent: v.get("messages_sent").and_then(|x| x.as_i64()).unwrap_or(0),
+        rank: v.get("rank").and_then(|x| x.as_i64()).unwrap_or(0),
     })
 }
 
