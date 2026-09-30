@@ -715,11 +715,29 @@ pub fn spawn_in_new_terminal(
     match std::env::consts::OS {
         "macos" => {
             // The configured emulator is an app name (e.g. "iTerm", "Kitty",
-            // "Alacritty"). Empty = the system default (Terminal.app).
-            let app = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
+            // "Alacritty", "WezTerm.app", or a fuzzy partial like "wez"). Empty
+            // = the system default (Terminal.app). Fuzzy-resolved to the
+            // installed app's bundle id so a slightly-off name still works.
+            let configured = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
+            let resolved = macos_resolve_terminal_emulator(configured, None);
+            // A bundle id always looks like "com.apple.Terminal" (has a dot, no
+            // spaces). Anything else (a display-name stem, or the literal
+            // configured value) uses the plain `tell application "Name"` form.
+            let looks_like_bundle_id = |s: &str| -> bool {
+                s.contains('.') && !s.contains(' ') && !s.contains('/') && !s.contains('~')
+            };
+            let (app_clause, app_display) = match &resolved {
+                Some(id) if looks_like_bundle_id(id) => {
+                    (format!("id \"{}\"", apple_quote(id)), id.clone())
+                }
+                _ => (
+                    format!("\"{}\"", apple_quote(configured)),
+                    configured.to_string(),
+                ),
+            };
             let script = format!(
-                "tell application \"{}\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\ndo script \"{}\" in w\nend if\nend tell",
-                apple_quote(app),
+                "tell application {}\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\ndo script \"{}\" in w\nend if\nend tell",
+                app_clause,
                 apple_quote(&marker),
                 apple_quote(&run),
                 apple_quote(&run),
@@ -736,7 +754,7 @@ pub fn spawn_in_new_terminal(
             }
             cmd.spawn()
                 .map(|_| ())
-                .map_err(|e| format!("Failed to open a {} window for '{}': {}", app, title, e))
+                .map_err(|e| format!("Failed to open a {} window for '{}': {}", app_display, title, e))
         }
         "windows" => Command::new("cmd")
             .args(["/C", "start", "", "cmd", "/K"])
@@ -796,6 +814,153 @@ fn terminal_candidates_for(emu: &str) -> Vec<(&str, &[&str])> {
         "st" => vec![("st", &["-e", "sh", "-c"])],
         _ => vec![(emu, &["-e", "sh", "-c"])],
     }
+}
+
+/// Fuzzy match a query against a candidate: `query` must appear as a
+/// case-insensitive subsequence of `candidate`. E.g. "iterm" matches
+/// "iTerm.app", "wez" matches "WezTerm.app". Returns the match score
+/// (0 = no match, higher = better), biased toward fewer skipped characters.
+fn fuzzy_subsequence(query: &str, candidate: &str) -> usize {
+    let q: Vec<char> = query.trim().chars().filter(|c| !c.is_whitespace()).collect();
+    let c: Vec<char> = candidate.chars().collect();
+    if q.is_empty() {
+        return 0;
+    }
+    let mut qi = 0;
+    let mut skipped = 0usize;
+    for ch in &c {
+        if qi < q.len() && ch.eq_ignore_ascii_case(&q[qi]) {
+            qi += 1;
+        } else if qi > 0 {
+            skipped += 1;
+        }
+    }
+    if qi != q.len() {
+        return 0;
+    }
+    // Fewer trailing skipped chars = a better match. Exact (case-insensitive)
+    // prefix matches score highest.
+    let exact_prefix = c
+        .iter()
+        .take(q.len())
+        .zip(q.iter())
+        .all(|(a, b)| a.eq_ignore_ascii_case(b));
+    if exact_prefix {
+        1000 - skipped
+    } else {
+        500 - skipped
+    }
+}
+
+/// The directories a macOS app can live in, searched in order for
+/// `*.app` bundles.
+fn macos_app_search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(std::path::PathBuf::from(&home).join("Applications"));
+    }
+    dirs.push(std::path::PathBuf::from("/Applications"));
+    dirs.push(std::path::PathBuf::from("/System/Applications"));
+    dirs.push(std::path::PathBuf::from("/System/Applications/Utilities"));
+    dirs
+}
+
+/// Resolve a configured macOS terminal emulator to the most likely installed
+/// app. The configured value may be an app name ("iTerm", "kitty"), a bundle
+/// name ("iTerm.app", "WezTerm.app"), or a partial/fuzzy match — anything that
+/// can be matched to an installed `*.app`. The winner is resolved to its
+/// bundle identifier so the AppleScript can use the reliable
+/// `tell application id "..."` form.
+///
+/// `search_dirs` is injectable for tests; `None` uses the real system dirs.
+/// Returns `None` when nothing in the search dirs fuzzy-matches, meaning the
+/// caller should fall back to the literal configured name.
+fn macos_resolve_terminal_emulator(
+    configured: &str,
+    search_dirs: Option<&[std::path::PathBuf]>,
+) -> Option<String> {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    // Normalise: strip a trailing ".app" and whitespace for matching, but keep
+    // the full configured value for the fallback.
+    let query = configured
+        .strip_suffix(".app")
+        .or_else(|| configured.strip_suffix(".APP"))
+        .unwrap_or(configured);
+
+    let dirs: Vec<std::path::PathBuf> = match search_dirs {
+        Some(d) => d.to_vec(),
+        None => macos_app_search_dirs(),
+    };
+
+    // Collect (score, bundle_path) across all search dirs.
+    let mut best: Option<(usize, std::path::PathBuf)> = None;
+    for dir in &dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !name.ends_with(".app") {
+                continue;
+            }
+            let stem = name.strip_suffix(".app").unwrap_or(name);
+            let score = fuzzy_subsequence(query, stem);
+            if score == 0 {
+                continue;
+            }
+            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, path));
+            }
+        }
+    }
+
+    let path = best?.1;
+    let bundle_id = macos_bundle_identifier(&path);
+    // Prefer the resolved bundle id; fall back to the app's display name
+    // (bundle filename stem) so AppleScript can still `tell application`.
+    Some(bundle_id.unwrap_or_else(|| {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.strip_suffix(".app").unwrap_or(n).to_string())
+            .unwrap_or_else(|| configured.to_string())
+    }))
+}
+
+/// Read an app bundle's identifier via `mdls kMDItemCFBundleIdentifier`
+/// (fast, Spotlight-indexed) with a `defaults read` fallback.
+fn macos_bundle_identifier(path: &std::path::Path) -> Option<String> {
+    let mdls = std::process::Command::new("mdls")
+        .arg("-name")
+        .arg("kMDItemCFBundleIdentifier")
+        .arg("-raw")
+        .arg(path)
+        .output()
+        .ok()?;
+    if mdls.status.success() {
+        let s = String::from_utf8_lossy(&mdls.stdout).trim().to_string();
+        if !s.is_empty() && s != "(null)" {
+            return Some(s);
+        }
+    }
+    let info = path.join("Contents").join("Info.plist");
+    let defaults = std::process::Command::new("defaults")
+        .arg("read")
+        .arg(&info)
+        .arg("CFBundleIdentifier")
+        .output()
+        .ok()?;
+    if defaults.status.success() {
+        let s = String::from_utf8_lossy(&defaults.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// Build a compiled module: run its `build_command`/`build_flags` (or
@@ -1122,12 +1287,27 @@ pub fn spawn_terminal_from_parts(
             // left stale windows behind. Reusing one window keeps exactly one
             // per module.
             // The configured emulator is an app name (e.g. "iTerm", "Kitty",
-            // "Alacritty"); empty = the system default (Terminal.app).
-            let app = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
+            // "Alacritty", "WezTerm.app", or a fuzzy partial like "wez"); empty
+            // = the system default (Terminal.app). Fuzzy-resolved to the
+            // installed app's bundle id so a slightly-off name still works.
+            let configured = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
+            let resolved = macos_resolve_terminal_emulator(configured, None);
+            let looks_like_bundle_id = |s: &str| -> bool {
+                s.contains('.') && !s.contains(' ') && !s.contains('/') && !s.contains('~')
+            };
+            let (app_clause, app_display) = match &resolved {
+                Some(id) if looks_like_bundle_id(id) => {
+                    (format!("id \"{}\"", apple_quote(id)), id.clone())
+                }
+                _ => (
+                    format!("\"{}\"", apple_quote(configured)),
+                    configured.to_string(),
+                ),
+            };
             kill_stale_terminal_processes(&p.manifest.name);
             let script = format!(
-                "tell application \"{}\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\nrepeat with i from (count of wins) to 2 by -1\nclose (item i of wins) saving no\nend repeat\ndo script \"{}\" in w\nend if\nend tell",
-                apple_quote(app),
+                "tell application {}\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\nrepeat with i from (count of wins) to 2 by -1\nclose (item i of wins) saving no\nend repeat\ndo script \"{}\" in w\nend if\nend tell",
+                app_clause,
                 apple_quote(&marker),
                 apple_quote(&run),
                 apple_quote(&run),
@@ -1143,7 +1323,7 @@ pub fn spawn_terminal_from_parts(
             }
             cmd.spawn()
                 .map(|child| (child, Some(marker), Some(pidfile)))
-                .map_err(|e| format!("Failed to launch '{}' in {}: {}", p.manifest.name, app, e))
+                .map_err(|e| format!("Failed to launch '{}' in {}: {}", p.manifest.name, app_display, e))
         }
         "windows" => {
             Command::new("cmd")
@@ -2780,6 +2960,58 @@ mod tests {
         // Anything else falls back to `-e sh -c`.
         let unknown = terminal_candidates_for("my-custom-emu");
         assert_eq!(unknown, vec![("my-custom-emu", &["-e", "sh", "-c"][..])]);
+    }
+
+    #[test]
+    fn fuzzy_subsequence_matches_names_partially() {
+        // Exact-ish matches score highest.
+        assert!(fuzzy_subsequence("iterm", "iTerm") > fuzzy_subsequence("iterm", "iTermSomethingElse"));
+        // Case-insensitive subsequence.
+        assert_eq!(fuzzy_subsequence("iterm", "iTerm"), 1000 - 0);
+        assert!(fuzzy_subsequence("wez", "WezTerm") > 0);
+        assert!(fuzzy_subsequence("alacr", "Alacritty") > 0);
+        // No match -> 0.
+        assert_eq!(fuzzy_subsequence("zzz", "Terminal"), 0);
+        // Empty query -> 0.
+        assert_eq!(fuzzy_subsequence("", "Terminal"), 0);
+    }
+
+    #[test]
+    fn macos_resolver_fuzzy_matches_installed_apps() {
+        // A scratch "Applications" dir with a few `.app` bundles.
+        let tmp = std::env::temp_dir().join(format!("cockatiel-apps-{}", uuid::Uuid::now_v7()));
+        let apps = tmp.join("Applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::create_dir_all(apps.join("WezTerm.app")).unwrap();
+        std::fs::create_dir_all(apps.join("iTerm.app")).unwrap();
+        std::fs::create_dir_all(apps.join("Terminal.app")).unwrap();
+        std::fs::create_dir_all(apps.join("UnrelatedApp.app")).unwrap();
+
+        let dirs = [apps.clone()];
+
+        // Full name, with and without .app.
+        assert_eq!(
+            macos_resolve_terminal_emulator("WezTerm.app", Some(&dirs)).as_deref(),
+            Some("WezTerm"),
+            "bundle name with .app resolves to the stem (no bundle id readable in tests)"
+        );
+        assert_eq!(
+            macos_resolve_terminal_emulator("iterm", Some(&dirs)).as_deref(),
+            Some("iTerm"),
+            "case-insensitive fuzzy match on the stem"
+        );
+        // Partial fuzzy match.
+        assert_eq!(
+            macos_resolve_terminal_emulator("wez", Some(&dirs)).as_deref(),
+            Some("WezTerm"),
+            "subsequence match"
+        );
+        // No match -> None.
+        assert_eq!(macos_resolve_terminal_emulator("somenonexistentapp", Some(&dirs)), None);
+        // Empty -> None.
+        assert_eq!(macos_resolve_terminal_emulator("", Some(&dirs)), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
     /// probes for an engine address. If that probe answered from a file holding
     /// none of the address keys, every operator would silently get the built-in
