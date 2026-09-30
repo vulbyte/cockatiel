@@ -49,3 +49,6 @@
 [submodule "modules/cockatiel_module-fake_input-rs"]
 	path = modules/cockatiel_module-fake_input-rs
 	url = https://github.com/vulbyte/cockatiel_module-fake_input-rs.git
+[submodule "modules/cockatiel_module-soundboard-rs"]
+	path = modules/cockatiel_module-soundboard-rs
+	url = git@github.com:vulbyte/cockatiel_module-soundboard-rs.git
