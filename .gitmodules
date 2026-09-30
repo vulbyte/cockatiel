@@ -52,3 +52,9 @@
 [submodule "modules/cockatiel_module-soundboard-rs"]
 	path = modules/cockatiel_module-soundboard-rs
 	url = git@github.com:vulbyte/cockatiel_module-soundboard-rs.git
+[submodule "modules/cockatiel_module-events-rs"]
+	path = modules/cockatiel_module-events-rs
+	url = git@github.com:vulbyte/cockatiel_module-events-rs.git
+[submodule "modules/cockatiel_module-clip-rs"]
+	path = modules/cockatiel_module-clip-rs
+	url = git@github.com:vulbyte/cockatiel_module-clip-rs.git

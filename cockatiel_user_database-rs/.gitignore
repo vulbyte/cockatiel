@@ -1,4 +1,5 @@
 # User database runtime files — contains user data. Never commit.
+config.json
 user_data.db
 user_data_backup.db
 *.db-wal

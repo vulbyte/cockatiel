@@ -1,7 +1,0 @@
-/target
-
-# The repo-root .gitignore has a `[Bb]in/` rule (for C#/.NET build output) that
-# would also swallow Rust's `src/bin/`. The prediction brain + display live
-# there and MUST be tracked, so un-ignore that path.
-!src/bin/
-!src/bin/*.rs
