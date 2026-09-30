@@ -41,6 +41,9 @@ pub enum Action {
     /// Open the user database's own config.json editor (its rank decay, score
     /// divisor, etc.). The user-db is self-contained and reads only this file.
     EditUserDbConfig,
+    /// Open the TUI's own config.json editor (`launch_engine`, `auto_start`,
+    /// `terminal_emulator`, ...). Missing keys are backfilled before editing.
+    EditTuiConfig,
     /// Confirm then empty a module's `.env` + `config.json` values (keys kept).
     ClearModuleConfig(String),
     RunTests,
@@ -182,6 +185,7 @@ fn parse_action(s: &str) -> Action {
         "EditCredentials" => Action::EditCredentials(String::new()),
         "EditConfig" => Action::EditConfig(String::new()),
         "EditUserDbConfig" => Action::EditUserDbConfig,
+        "EditTuiConfig" => Action::EditTuiConfig,
         "ClearModuleConfig" => Action::ClearModuleConfig(String::new()),
         "RunTests" => Action::RunTests,
         "TogglePipelinePause" => Action::TogglePipelinePause,
@@ -251,6 +255,7 @@ pub fn action_label(action: &Action) -> &'static str {
         Action::EditCredentials(_) => "creds",
         Action::EditConfig(_) => "edit",
         Action::EditUserDbConfig => "userdb-cfg",
+        Action::EditTuiConfig => "tui-cfg",
         Action::ClearModuleConfig(_) => "clear",
         Action::RunTests => "test",
         Action::SelectModule => "select",
@@ -493,6 +498,10 @@ pub fn default_hotkeys() -> HotkeyConfig {
     // divisor). Global, like the pause toggle, so it works from any window; `U`
     // is free (not bound elsewhere) and reads as "User DB".
     global.insert(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::SHIFT), Action::EditUserDbConfig);
+    // `T` opens the TUI's own config editor (launch_engine / auto_start /
+    // terminal_emulator). Global like `U`, so it works from any window; `T`
+    // is free (not bound elsewhere) and reads as "TUI config".
+    global.insert(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT), Action::EditTuiConfig);
     // `a` toggles per-module autostart (the `A` marker in the modules window);
     // autostart modules launch automatically on engine connect, so there is no
     // session-level toggle to bind.
@@ -695,6 +704,8 @@ mod tests {
         // The names round-trip, so the file entries are real bindings and not
         // silent `Noop`s.
         assert_eq!(parse_action("EditConfig"), Action::EditConfig(String::new()));
+        assert_eq!(parse_action("EditUserDbConfig"), Action::EditUserDbConfig);
+        assert_eq!(parse_action("EditTuiConfig"), Action::EditTuiConfig);
         assert_eq!(parse_action("RestartEngine"), Action::RestartEngine);
         assert_eq!(parse_action("RemoveEngine"), Action::RemoveEngine);
         // The labels the hint bar prints.

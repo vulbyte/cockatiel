@@ -112,6 +112,10 @@ pub enum ConfigTarget {
     /// The user database's own config.json (its rank decay, score divisor,
     /// etc.). The user-db is self-contained and reads only this file.
     UserDb,
+    /// The TUI's own config.json (`launch_engine`, `auto_start`,
+    /// `terminal_emulator`, ...). Settings here take effect on the next TUI
+    /// launch.
+    Tui,
 }
 
 pub trait Window {

@@ -686,6 +686,7 @@ enum EditorTarget {
     Engine,
     Module,
     UserDb,
+    Tui,
 }
 
 /// The config editor: a tree of the target's `.env` + `config.json` flattened
@@ -1160,6 +1161,16 @@ impl ModulesWindow {
                     crate::windows::modules::EngineRestartNote {
                         key: "user-db config".to_string(),
                         why: "the user-db re-reads config.json on its ticker",
+                    },
+                ]);
+            }
+            EditorTarget::Tui => {
+                // The TUI reads its config.json at startup, so a save applies
+                // on the next launch.
+                self.last_saved_engine = Some(vec![
+                    crate::windows::modules::EngineRestartNote {
+                        key: "TUI config".to_string(),
+                        why: "the TUI reads config.json at startup — restart it to apply",
                     },
                 ]);
             }
@@ -2148,6 +2159,7 @@ impl Window for ModulesWindow {
                 crate::app::ConfigTarget::Engine => EditorTarget::Engine,
                 crate::app::ConfigTarget::Module => EditorTarget::Module,
                 crate::app::ConfigTarget::UserDb => EditorTarget::UserDb,
+                crate::app::ConfigTarget::Tui => EditorTarget::Tui,
             },
             label: label.to_string(),
             dir,
@@ -2511,6 +2523,40 @@ SECRET=s3
             "cfg: {}",
             cfg
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn editor_loads_tui_style_top_level_config() {
+        // The TUI's own config.json has top-level keys (launch_engine,
+        // auto_start, terminal_emulator) with no module_specific wrapper. The
+        // editor must show them as editable rows and save them back in place.
+        let tmp = std::env::temp_dir().join(format!("cockatiel-tuicfg-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("config.json"),
+            r#"{"launch_engine": true, "auto_start": false, "terminal_emulator": ""}"#,
+        )
+        .unwrap();
+
+        let mut w = ModulesWindow::new();
+        w.start_config_editor(ConfigTarget::Tui, "tui", tmp.clone());
+        assert!(w.in_editor());
+
+        // Every top-level key is an editable scalar row.
+        let rows = w.editing.as_ref().unwrap().rows.clone();
+        let keys: Vec<String> = rows
+            .iter()
+            .filter(|r| r.kind == super::RowKind::Scalar && r.source == "json")
+            .filter_map(|r| match r.path.last() {
+                Some(super::Seg::Key(k)) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(keys.contains(&"launch_engine".to_string()), "keys: {:?}", keys);
+        assert!(keys.contains(&"auto_start".to_string()), "keys: {:?}", keys);
+        assert!(keys.contains(&"terminal_emulator".to_string()), "keys: {:?}", keys);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

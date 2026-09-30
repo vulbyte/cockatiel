@@ -1815,6 +1815,7 @@ fn is_dispatchable(action: &Action) -> bool {
             | Action::EditCredentials(_)
             | Action::EditConfig(_)
             | Action::EditUserDbConfig
+            | Action::EditTuiConfig
             | Action::ClearModuleConfig(_)
             | Action::RunTests
             | Action::UserQuery(_, _)
@@ -2817,6 +2818,26 @@ async fn dispatch_action(
                 supervisor_log(
                     state,
                     "[supervisor] editing user-db config (j/k move, type to edit, Esc save+exit)",
+                );
+            }
+        }
+        Action::EditTuiConfig => {
+            // Open the TUI's own config.json (launch_engine / auto_start /
+            // terminal_emulator, ...). Missing keys are backfilled by
+            // ensure_tui_config first, so the option the operator wants is
+            // always present to edit.
+            let dir = std::env::current_dir().unwrap_or_default();
+            supervisor::ensure_tui_config(&dir.join("config.json"));
+            if let Some(window) = state.get_window_mut(WindowId::Modules) {
+                window.start_config_editor(
+                    crate::app::ConfigTarget::Tui,
+                    "tui",
+                    dir,
+                );
+                state.active_window = WindowId::Modules;
+                supervisor_log(
+                    state,
+                    "[supervisor] editing TUI config (j/k move, type to edit, Esc save+exit)",
                 );
             }
         }
