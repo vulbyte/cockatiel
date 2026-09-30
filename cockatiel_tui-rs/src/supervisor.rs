@@ -275,8 +275,27 @@ pub fn discover_terminal_emulators() -> Vec<String> {
     }
 }
 
+/// Parse a boolean from a config value, accepting the loose forms a normal
+/// user might type in the config editor: real booleans, numbers (0/1), and
+/// strings "true"/"t"/"yes"/"1"/"on" (true) or "false"/"f"/"no"/"0"/"off"
+/// (false). Anything else is `None` (treated as not set).
+fn parse_bool_like(v: &serde_json::Value) -> Option<bool> {
+    match v {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::Number(n) => n.as_i64().map(|n| n != 0),
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "yes" | "y" | "1" | "on" => Some(true),
+            "false" | "f" | "no" | "n" | "0" | "off" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Read the `terminal_emulators` toggle map (name -> bool) from a config.json
-/// root (either the TUI's top-level or a module's `module_specific`).
+/// root (either the TUI's top-level or a module's `module_specific`). Values
+/// are parsed loosely (`true`/`false`/`t`/`f`/`1`/`0`/`yes`/`no`/...) so a
+/// normal user's hand-edited config works.
 fn read_terminal_emulators_from(root: &serde_json::Value) -> std::collections::HashMap<String, bool> {
     let mut out = std::collections::HashMap::new();
     let map = root
@@ -286,7 +305,7 @@ fn read_terminal_emulators_from(root: &serde_json::Value) -> std::collections::H
         .and_then(|v| v.as_object());
     if let Some(map) = map {
         for (k, v) in map {
-            if let Some(b) = v.as_bool() {
+            if let Some(b) = parse_bool_like(v) {
                 out.insert(k.clone(), b);
             }
         }
@@ -294,10 +313,15 @@ fn read_terminal_emulators_from(root: &serde_json::Value) -> std::collections::H
     out
 }
 
-/// The first enabled terminal emulator in discovery order from a config.json
-/// root (module config preferred, then TUI config). `None` when nothing is
-/// enabled or nothing is discovered — the caller then falls back to the system
-/// default (or the legacy `terminal_emulator` string).
+/// The first enabled terminal emulator from a config.json root (module config
+/// preferred, then TUI config).
+///
+/// Resolution order: (1) the first emulator that is both DISCOVERED on this
+/// system and enabled; (2) failing that, any enabled emulator in the map (a
+/// hand-added name like `kitty` still counts even if this machine's scan
+/// didn't list it) — deterministic by sorted name. `None` when nothing is
+/// enabled; the caller then falls back to the system default (or the legacy
+/// `terminal_emulator` string).
 pub fn first_enabled_terminal_emulator(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let root: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -305,9 +329,21 @@ pub fn first_enabled_terminal_emulator(path: &Path) -> Option<String> {
     if toggles.is_empty() {
         return None;
     }
-    discover_terminal_emulators()
+    // 1. A discovered + enabled emulator wins (system-aware, priority order).
+    let discovered = discover_terminal_emulators();
+    for name in &discovered {
+        if toggles.get(name).copied().unwrap_or(false) {
+            return Some(name.clone());
+        }
+    }
+    // 2. Otherwise, any enabled emulator (hand-added names included).
+    let mut enabled: Vec<String> = toggles
         .into_iter()
-        .find(|name| toggles.get(name).copied().unwrap_or(false))
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| name)
+        .collect();
+    enabled.sort();
+    enabled.first().cloned()
 }
 
 /// Crawl the system and merge every discovered terminal emulator into the
@@ -3387,6 +3423,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first_enabled_terminal_emulator(&path), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn loose_string_toggles_and_hand_added_names_work() {
+        // A normal user might type "f"/"t" or "false"/"true" in the config
+        // editor instead of real booleans, and may hand-add a name the scan
+        // didn't discover. The map must still resolve correctly.
+        let tmp = std::env::temp_dir().join(format!("cockatiel-emuloose-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("config.json");
+
+        // parse_bool_like accepts the loose forms.
+        assert_eq!(parse_bool_like(&serde_json::json!(true)), Some(true));
+        assert_eq!(parse_bool_like(&serde_json::json!(false)), Some(false));
+        assert_eq!(parse_bool_like(&serde_json::json!("t")), Some(true));
+        assert_eq!(parse_bool_like(&serde_json::json!("f")), Some(false));
+        assert_eq!(parse_bool_like(&serde_json::json!("false")), Some(false));
+        assert_eq!(parse_bool_like(&serde_json::json!("TRUE")), Some(true));
+        assert_eq!(parse_bool_like(&serde_json::json!("yes")), Some(true));
+        assert_eq!(parse_bool_like(&serde_json::json!("no")), Some(false));
+        assert_eq!(parse_bool_like(&serde_json::json!("0")), Some(false));
+        assert_eq!(parse_bool_like(&serde_json::json!("1")), Some(true));
+        assert_eq!(parse_bool_like(&serde_json::json!("maybe")), None);
+
+        // The user's exact hand-edited config: string "f" for the discovered
+        // emulators (all off), and a hand-added `kitty: true` that the scan
+        // may not have discovered. Resolution must pick kitty.
+        std::fs::write(
+            &path,
+            r#"{
+              "module_specific": {
+                "terminal_emulators": {
+                  "Ghostty": false,
+                  "Terminal": false,
+                  "WezTerm": "f",
+                  "cool-retro-term": "f",
+                  "kitty": true
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            first_enabled_terminal_emulator(&path).as_deref(),
+            Some("kitty"),
+            "a hand-added enabled emulator resolves even when not in the discovery list"
+        );
+
+        // When a discovered emulator is enabled too, it wins (priority order).
+        let mut map = serde_json::Map::new();
+        map.insert("Terminal".to_string(), serde_json::json!(true));
+        map.insert("kitty".to_string(), serde_json::json!("t"));
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({ "terminal_emulators": map })).unwrap(),
+        )
+        .unwrap();
+        // If Terminal is discovered here, it wins over kitty; otherwise the
+        // enabled hand-added name is used. Both are acceptable — just confirm a
+        // name resolves.
+        let resolved = first_enabled_terminal_emulator(&path);
+        assert!(resolved.is_some(), "some enabled emulator must resolve");
+        assert!(
+            resolved.as_deref() == Some("Terminal") || resolved.as_deref() == Some("kitty"),
+            "unexpected resolved emulator: {:?}",
+            resolved
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
