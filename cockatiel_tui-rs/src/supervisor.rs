@@ -114,26 +114,77 @@ pub const TERMINAL_EMULATOR_KEY: &str = "terminal_emulator";
 /// FIRST in discovery order.
 pub const TERMINAL_EMULATORS_KEY: &str = "terminal_emulators";
 
-/// Terminal emulators the discovery scan recognises, in the priority order the
-/// launch prefers. macOS entries are app names; Linux entries are executables.
-const KNOWN_TERMINAL_EMULATORS: &[&str] = &[
-    "Terminal",
-    "iTerm",
-    "WezTerm",
-    "Ghostty",
-    "cool-retro-term",
-    "Alacritty",
-    "Kitty",
-    "Warp",
-    "Hyper",
-    "Tabby",
-    "Konsole",
+/// Substrings that mark a name as a terminal emulator (case-insensitive).
+/// Broad enough to catch common emulators (Terminal, iTerm, WezTerm, Ghostty,
+/// cool-retro-term, Alacritty, Kitty, Warp, Hyper, Tabby, Konsole, xterm,
+/// gnome-terminal, foot, ...) without listing every one. Matched against the
+/// app bundle stem (macOS) or executable name (Linux).
+const TERMINAL_EMULATOR_HINTS: &[&str] = &[
+    "terminal",
+    "iterm",
+    "wezterm",
+    "ghostty",
+    "retro-term",
+    "alacritty",
+    "kitty",
+    "warp",
+    "hyper",
+    "tabby",
+    "konsole",
     "xterm",
     "x-terminal-emulator",
     "gnome-terminal",
     "foot",
     "st",
+    "rio",
+    "contour",
+    "tilix",
+    "termite",
+    "urxvt",
+    "rxvt",
+    "eterm",
+    "mlterm",
+    "pterm",
+    "qterminal",
+    "yakuake",
+    "terminator",
 ];
+
+/// Names that contain a [`TERMINAL_EMULATOR_HINTS`] substring but are NOT
+/// terminal emulators. The classifier refuses these outright.
+const TERMINAL_EMULATOR_BLOCKLIST: &[&str] = &[
+    "steam",     // "st" hint; it's a game store
+    "start",     // Windows "start.exe" / "Start" menu binaries
+    "dist",      // "st" hint inside "dist"
+    "history",   // bash/zsh history files are not terminals
+    "terminal-server",
+    "terminal.appex", // an extension host, not a terminal
+];
+
+/// Classify a name as a terminal emulator. A name is one when it contains a
+/// [`TERMINAL_EMULATOR_HINTS`] substring (case-insensitive) and is not on the
+/// blocklist. Short hints ("st") are only trusted as an exact stem/word to
+/// avoid matching "steam" / "dist" / "start".
+fn classify_terminal_emulator(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let blocked = TERMINAL_EMULATOR_BLOCKLIST
+        .iter()
+        .any(|b| lower.contains(b));
+    if blocked {
+        return false;
+    }
+    TERMINAL_EMULATOR_HINTS.iter().any(|hint| {
+        let hint = hint.to_ascii_lowercase();
+        if hint.len() <= 2 {
+            // Very short hints match only as a whole word/stem.
+            lower == hint
+                || lower.starts_with(&format!("{hint} "))
+                || lower.ends_with(&format!(" {hint}"))
+        } else {
+            lower.contains(&hint)
+        }
+    })
+}
 
 /// The TUI's configured terminal emulator, or `None` when the setting is
 /// absent/empty (meaning "use the system default").
@@ -168,52 +219,58 @@ pub fn read_module_terminal_emulator(dir: &Path) -> Option<String> {
 /// Discover the terminal emulators installed on this system, in priority order
 /// (the order the launch prefers when several are enabled).
 ///
-/// macOS: every known terminal app whose bundle stem matches its known name
-/// (case-insensitive) in the app search dirs, ordered by
-/// [`KNOWN_TERMINAL_EMULATORS`]. Linux: every known emulator executable on
-/// PATH, in the same order. Returns the canonical display name (app bundle
-/// stem on macOS, executable name on Linux).
+/// macOS: every installed app bundle in the search dirs that
+/// [`classify_terminal_emulator`] accepts. Linux: every executable on PATH
+/// that the classifier accepts, in PATH order. Returns the display name (app
+/// bundle stem on macOS, executable name on Linux).
 ///
-/// Discovery is deliberately STRICT (exact-ish stem match) — unlike the launch
-/// path, which fuzzy-matches a user-typed name. A fuzzy scan would pull in
-/// unrelated apps whose bundle happens to contain a terminal substring
-/// (e.g. "steam.sh" for "st").
+/// This is a dynamic scan of the CURRENT system, re-run on every startup — not
+/// a fixed per-machine list — so a newly installed emulator is picked up
+/// without editing code.
 pub fn discover_terminal_emulators() -> Vec<String> {
     match std::env::consts::OS {
         "macos" => {
             let dirs = macos_app_search_dirs();
-            let stems: Vec<String> = dirs
+            let mut found: Vec<String> = dirs
                 .iter()
                 .filter_map(|dir| std::fs::read_dir(dir).ok())
                 .flat_map(|rd| rd.filter_map(|e| e.ok()))
                 .filter_map(|entry| {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    name.strip_suffix(".app").map(|s| s.to_string())
+                    let stem = name.strip_suffix(".app").unwrap_or(&name).to_string();
+                    if classify_terminal_emulator(&stem) {
+                        Some(stem)
+                    } else {
+                        None
+                    }
                 })
                 .collect();
-            KNOWN_TERMINAL_EMULATORS
-                .iter()
-                .filter(|known| {
-                    stems
-                        .iter()
-                        .any(|stem| stem.eq_ignore_ascii_case(known))
-                })
-                .map(|s| s.to_string())
-                .collect()
+            found.sort();
+            found.dedup();
+            found
         }
-        "linux" => KNOWN_TERMINAL_EMULATORS
-            .iter()
-            .filter(|name| {
-                std::process::Command::new("which")
-                    .arg(name)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            })
-            .map(|s| s.to_string())
-            .collect(),
+        "linux" => {
+            let mut found: Vec<String> = Vec::new();
+            if let Ok(path) = std::env::var("PATH") {
+                for dir in path.split(':') {
+                    let Ok(rd) = std::fs::read_dir(dir) else { continue };
+                    for entry in rd.filter_map(|e| e.ok()) {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if classify_terminal_emulator(&name) && !found.contains(&name) {
+                            found.push(name);
+                        }
+                    }
+                }
+            }
+            found.sort();
+            found
+        }
+        "windows" => {
+            // Windows uses a plain console for terminal modules, so there is
+            // nothing to pick — report none (the launcher falls back to a new
+            // console).
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }
@@ -374,20 +431,32 @@ pub fn ensure_tui_config(path: &Path) {
         map.insert(TERMINAL_EMULATOR_KEY.to_string(), serde_json::Value::String(String::new()));
         changed = true;
     }
-    if !map.contains_key(TERMINAL_EMULATORS_KEY) {
-        // Pre-link every discovered terminal emulator (name -> enabled) so the
-        // operator can toggle flags in the editor instead of typing a name.
+    // Re-run the emulator crawl on EVERY startup: merge whatever is currently
+    // installed into the toggle map (a newly installed emulator appears even if
+    // the key already exists; an operator's existing true/false choices are
+    // preserved).
+    {
         let discovered = discover_terminal_emulators();
         if !discovered.is_empty() {
-            let mut emus = serde_json::Map::new();
+            let existing = map
+                .get(TERMINAL_EMULATORS_KEY)
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let mut emus = existing.clone();
             for name in &discovered {
-                emus.insert(name.clone(), serde_json::Value::Bool(true));
+                if !emus.contains_key(name) {
+                    emus.insert(name.clone(), serde_json::Value::Bool(true));
+                    changed = true;
+                }
             }
-            map.insert(
-                TERMINAL_EMULATORS_KEY.to_string(),
-                serde_json::Value::Object(emus),
-            );
-            changed = true;
+            if existing != emus {
+                map.insert(
+                    TERMINAL_EMULATORS_KEY.to_string(),
+                    serde_json::Value::Object(emus),
+                );
+                changed = true;
+            }
         }
     }
     if !changed {
@@ -3360,6 +3429,60 @@ mod tests {
         assert_eq!(fuzzy_subsequence("zzz", "Terminal"), 0);
         // Empty query -> 0.
         assert_eq!(fuzzy_subsequence("", "Terminal"), 0);
+    }
+
+    #[test]
+    fn startup_crawl_reruns_every_launch_probe() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-startup-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("config.json");
+        // First startup: fresh file, crawl writes all discovered emulators.
+        ensure_tui_config(&path);
+        let c1: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Second startup: idempotent — the same toggle map, operator choices
+        // preserved (a newly installed emulator would be merged in here).
+        std::fs::write(&path, serde_json::to_string_pretty(&c1).unwrap()).unwrap();
+        ensure_tui_config(&path);
+        let c2: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(c1["terminal_emulators"], c2["terminal_emulators"], "toggles preserved across restarts");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn terminal_classifier_accepts_real_emulators() {
+        for name in [
+            "Terminal",
+            "iTerm",
+            "iTerm2",
+            "WezTerm",
+            "Ghostty",
+            "cool-retro-term",
+            "Alacritty",
+            "Kitty",
+            "Warp",
+            "Hyper",
+            "Tabby",
+            "Konsole",
+            "xterm",
+            "x-terminal-emulator",
+            "gnome-terminal",
+            "foot",
+            "st",
+            "rio",
+            "contour",
+            "tilix",
+        ] {
+            assert!(classify_terminal_emulator(name), "{name} should classify as a terminal");
+        }
+    }
+
+    #[test]
+    fn terminal_classifier_rejects_non_terminals() {
+        // Names that CONTAIN a hint substring but are not terminals (the
+        // "st" hint matching "steam"/"dist"/"start" is the classic trap).
+        for name in ["steam.sh", "dist", "start", "Firefox", "History", "start.exe", "mystery"] {
+            assert!(!classify_terminal_emulator(name), "{name} must not classify as a terminal");
+        }
     }
 
     #[test]

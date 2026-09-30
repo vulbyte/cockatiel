@@ -2112,10 +2112,12 @@ async fn handle_launch_result(
     }
 
     let spawned = if plugin.manifest.terminal {
-        // A module can pin its own terminal emulator via the discovered
-        // `terminal_emulators` toggle map in its config.json (first enabled in
-        // discovery order), or the legacy `terminal_emulator` string; fall back
-        // to the TUI-global setting, then the system default.
+        // Re-run the emulator crawl so a newly installed emulator appears in
+        // the module's toggle map even without opening the editor, then pick
+        // the module's own terminal (first enabled in discovery order, or the
+        // legacy `terminal_emulator` string); fall back to the TUI-global
+        // setting, then the system default.
+        let _ = supervisor::ensure_terminal_emulator_config(&plugin.directory);
         let emulator = supervisor::first_enabled_terminal_emulator(&plugin.directory.join("config.json"))
             .or_else(|| supervisor::read_module_terminal_emulator(&plugin.directory))
             .or_else(|| state.terminal_emulator.clone());
