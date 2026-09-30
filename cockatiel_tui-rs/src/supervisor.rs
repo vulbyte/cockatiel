@@ -106,6 +106,35 @@ pub const AUTO_START_KEY: &str = "auto_start";
 /// Linux, a new console on Windows).
 pub const TERMINAL_EMULATOR_KEY: &str = "terminal_emulator";
 
+/// The TUI's `config.json` / module `module_specific` key: a map of discovered
+/// terminal emulators to an enabled flag, e.g.
+/// `{"Terminal": true, "WezTerm": false, "cool-retro-term": true}`. The editor
+/// pre-crawls the system and pre-links every installed emulator here; the
+/// operator toggles each on/off. When several are `true`, the launch uses the
+/// FIRST in discovery order.
+pub const TERMINAL_EMULATORS_KEY: &str = "terminal_emulators";
+
+/// Terminal emulators the discovery scan recognises, in the priority order the
+/// launch prefers. macOS entries are app names; Linux entries are executables.
+const KNOWN_TERMINAL_EMULATORS: &[&str] = &[
+    "Terminal",
+    "iTerm",
+    "WezTerm",
+    "Ghostty",
+    "cool-retro-term",
+    "Alacritty",
+    "Kitty",
+    "Warp",
+    "Hyper",
+    "Tabby",
+    "Konsole",
+    "xterm",
+    "x-terminal-emulator",
+    "gnome-terminal",
+    "foot",
+    "st",
+];
+
 /// The TUI's configured terminal emulator, or `None` when the setting is
 /// absent/empty (meaning "use the system default").
 pub fn read_terminal_emulator(path: &Path) -> Option<String> {
@@ -134,6 +163,156 @@ pub fn read_module_terminal_emulator(dir: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Discover the terminal emulators installed on this system, in priority order
+/// (the order the launch prefers when several are enabled).
+///
+/// macOS: every known terminal app whose bundle stem matches its known name
+/// (case-insensitive) in the app search dirs, ordered by
+/// [`KNOWN_TERMINAL_EMULATORS`]. Linux: every known emulator executable on
+/// PATH, in the same order. Returns the canonical display name (app bundle
+/// stem on macOS, executable name on Linux).
+///
+/// Discovery is deliberately STRICT (exact-ish stem match) — unlike the launch
+/// path, which fuzzy-matches a user-typed name. A fuzzy scan would pull in
+/// unrelated apps whose bundle happens to contain a terminal substring
+/// (e.g. "steam.sh" for "st").
+pub fn discover_terminal_emulators() -> Vec<String> {
+    match std::env::consts::OS {
+        "macos" => {
+            let dirs = macos_app_search_dirs();
+            let stems: Vec<String> = dirs
+                .iter()
+                .filter_map(|dir| std::fs::read_dir(dir).ok())
+                .flat_map(|rd| rd.filter_map(|e| e.ok()))
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    name.strip_suffix(".app").map(|s| s.to_string())
+                })
+                .collect();
+            KNOWN_TERMINAL_EMULATORS
+                .iter()
+                .filter(|known| {
+                    stems
+                        .iter()
+                        .any(|stem| stem.eq_ignore_ascii_case(known))
+                })
+                .map(|s| s.to_string())
+                .collect()
+        }
+        "linux" => KNOWN_TERMINAL_EMULATORS
+            .iter()
+            .filter(|name| {
+                std::process::Command::new("which")
+                    .arg(name)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            })
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Read the `terminal_emulators` toggle map (name -> bool) from a config.json
+/// root (either the TUI's top-level or a module's `module_specific`).
+fn read_terminal_emulators_from(root: &serde_json::Value) -> std::collections::HashMap<String, bool> {
+    let mut out = std::collections::HashMap::new();
+    let map = root
+        .get("module_specific")
+        .and_then(|ms| ms.get(TERMINAL_EMULATORS_KEY))
+        .or_else(|| root.get(TERMINAL_EMULATORS_KEY))
+        .and_then(|v| v.as_object());
+    if let Some(map) = map {
+        for (k, v) in map {
+            if let Some(b) = v.as_bool() {
+                out.insert(k.clone(), b);
+            }
+        }
+    }
+    out
+}
+
+/// The first enabled terminal emulator in discovery order from a config.json
+/// root (module config preferred, then TUI config). `None` when nothing is
+/// enabled or nothing is discovered — the caller then falls back to the system
+/// default (or the legacy `terminal_emulator` string).
+pub fn first_enabled_terminal_emulator(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let toggles = read_terminal_emulators_from(&root);
+    if toggles.is_empty() {
+        return None;
+    }
+    discover_terminal_emulators()
+        .into_iter()
+        .find(|name| toggles.get(name).copied().unwrap_or(false))
+}
+
+/// Crawl the system and merge every discovered terminal emulator into the
+/// `terminal_emulators` toggle map in a config.json (a module's
+/// `module_specific`, or the TUI's top level when `module_specific` is
+/// absent). Existing toggles are preserved; newly discovered emulators are
+/// added enabled (`true`). Returns whether the file changed.
+pub fn ensure_terminal_emulator_config(dir: &Path) -> bool {
+    let path = dir.join("config.json");
+    let mut root: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    let discovered = discover_terminal_emulators();
+    if discovered.is_empty() {
+        return false;
+    }
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    // Ensure a `module_specific` object when the file looks like a module config
+    // (it already carries one) — otherwise write the map at the top level (TUI
+    // config). Modules always nest under module_specific; the TUI config keeps
+    // its settings top-level.
+    let obj = root.as_object_mut().unwrap();
+    let holder = if obj.contains_key("module_specific") {
+        if !obj.get("module_specific").unwrap().is_object() {
+            obj.insert("module_specific".to_string(), serde_json::json!({}));
+        }
+        obj.get_mut("module_specific").unwrap().as_object_mut().unwrap()
+    } else {
+        obj
+    };
+
+    let mut changed = false;
+    match holder.get_mut(TERMINAL_EMULATORS_KEY).and_then(|v| v.as_object_mut()) {
+        Some(map) => {
+            for name in &discovered {
+                if !map.contains_key(name) {
+                    map.insert(name.clone(), serde_json::Value::Bool(true));
+                    changed = true;
+                }
+            }
+        }
+        None => {
+            let mut new_map = serde_json::Map::new();
+            for name in &discovered {
+                new_map.insert(name.clone(), serde_json::Value::Bool(true));
+            }
+            holder.insert(
+                TERMINAL_EMULATORS_KEY.to_string(),
+                serde_json::Value::Object(new_map),
+            );
+            changed = true;
+        }
+    }
+    if changed {
+        if let Ok(pretty) = serde_json::to_string_pretty(&root) {
+            let _ = write_atomic_0600(&path, &pretty);
+        }
+    }
+    changed
 }
 
 /// The TUI's `launch_engine` setting, or `None` when the file is missing, is not
@@ -194,6 +373,22 @@ pub fn ensure_tui_config(path: &Path) {
     if !map.contains_key(TERMINAL_EMULATOR_KEY) {
         map.insert(TERMINAL_EMULATOR_KEY.to_string(), serde_json::Value::String(String::new()));
         changed = true;
+    }
+    if !map.contains_key(TERMINAL_EMULATORS_KEY) {
+        // Pre-link every discovered terminal emulator (name -> enabled) so the
+        // operator can toggle flags in the editor instead of typing a name.
+        let discovered = discover_terminal_emulators();
+        if !discovered.is_empty() {
+            let mut emus = serde_json::Map::new();
+            for name in &discovered {
+                emus.insert(name.clone(), serde_json::Value::Bool(true));
+            }
+            map.insert(
+                TERMINAL_EMULATORS_KEY.to_string(),
+                serde_json::Value::Object(emus),
+            );
+            changed = true;
+        }
     }
     if !changed {
         return;
@@ -3034,6 +3229,95 @@ mod tests {
         // Missing file -> None.
         let empty = tmp.join("nonexistent");
         assert_eq!(read_module_terminal_emulator(&empty), None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn terminal_emulator_toggles_merge_into_module_config() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-emutoggle-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // A module config with one existing (disabled) toggle.
+        std::fs::write(
+            tmp.join("config.json"),
+            r#"{"engine_ip":"127.0.0.1","module_specific":{"terminal_emulators":{"Terminal":false}}}"#,
+        )
+        .unwrap();
+
+        let changed = ensure_terminal_emulator_config(&tmp);
+        let cfg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join("config.json")).unwrap(),
+        )
+        .unwrap();
+        let emus = cfg["module_specific"]["terminal_emulators"].as_object().unwrap();
+        // The existing toggle is preserved.
+        assert_eq!(emus["Terminal"], serde_json::json!(false), "existing toggle preserved");
+        // Discovered emulators were added (enabled by default).
+        assert!(emus.len() >= 2, "discovery added emulators, got: {:?}", emus.keys().collect::<Vec<_>>());
+        assert!(changed, "the file should have been rewritten");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn first_enabled_terminal_emulator_respects_toggles() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-emufirst-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("config.json");
+
+        // A TUI-style config: first discovered emulator enabled, a later one
+        // disabled. The first ENABLED in discovery order wins.
+        let discovered = discover_terminal_emulators();
+        if discovered.is_empty() {
+            // Non-macOS/Linux test environment: nothing to assert meaningfully.
+            std::fs::write(&path, r#"{"terminal_emulators":{}}"#).unwrap();
+            assert_eq!(first_enabled_terminal_emulator(&path), None);
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+        let first = &discovered[0];
+        let second = discovered.get(1).cloned();
+        let mut map = serde_json::Map::new();
+        map.insert(first.clone(), serde_json::json!(true));
+        if let Some(second) = &second {
+            map.insert(second.clone(), serde_json::json!(false));
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({ "terminal_emulators": map })).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            first_enabled_terminal_emulator(&path).as_deref(),
+            Some(first.as_str()),
+            "first enabled in discovery order wins"
+        );
+
+        // Disable the first, enable the second -> the second wins.
+        if let Some(second) = &second {
+            let mut map = serde_json::Map::new();
+            map.insert(first.clone(), serde_json::json!(false));
+            map.insert(second.clone(), serde_json::json!(true));
+            std::fs::write(
+                &path,
+                serde_json::to_string(&serde_json::json!({ "terminal_emulators": map })).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                first_enabled_terminal_emulator(&path).as_deref(),
+                Some(second.as_str())
+            );
+        }
+
+        // Everything disabled -> None.
+        let mut map = serde_json::Map::new();
+        map.insert(first.clone(), serde_json::json!(false));
+        std::fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!({ "terminal_emulators": map })).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first_enabled_terminal_emulator(&path), None);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

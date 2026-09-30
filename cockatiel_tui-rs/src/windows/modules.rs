@@ -2153,6 +2153,13 @@ impl Window for ModulesWindow {
     }
 
     fn start_config_editor(&mut self, target: crate::app::ConfigTarget, label: &str, dir: PathBuf) {
+        // Terminal-module and TUI configs get the emulator crawl first: every
+        // installed terminal emulator is discovered and pre-linked into
+        // `terminal_emulators` (name -> enabled), so the operator toggles flags
+        // instead of typing a name that may not resolve.
+        if matches!(target, crate::app::ConfigTarget::Module | crate::app::ConfigTarget::Tui) {
+            let _ = crate::supervisor::ensure_terminal_emulator_config(&dir);
+        }
         let rows = Self::load_rows(label, &dir);
         self.editing = Some(ConfigEditor {
             target: match target {

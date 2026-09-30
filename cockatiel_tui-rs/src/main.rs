@@ -394,9 +394,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = AppState::new(colors, hotkeys);
-    // The configured terminal emulator (empty = system default), read once from
-    // the TUI's config.json so every terminal module / pop-out uses it.
-    state.terminal_emulator = supervisor::read_terminal_emulator(&tui_config_path);
+    // The configured terminal emulator: prefer the discovered `terminal_emulators`
+    // toggle map (first enabled in discovery order) in the TUI's config.json,
+    // then the legacy `terminal_emulator` string, else the system default.
+    state.terminal_emulator =
+        supervisor::first_enabled_terminal_emulator(&tui_config_path)
+            .or_else(|| supervisor::read_terminal_emulator(&tui_config_path));
 
     // Auto-rebuild channel: a crashed module's name is sent here and the main
     // loop rebuilds + relaunches it (capped to avoid infinite loops).
@@ -2109,10 +2112,12 @@ async fn handle_launch_result(
     }
 
     let spawned = if plugin.manifest.terminal {
-        // A module can pin its own terminal emulator in its config.json
-        // (module_specific.terminal_emulator); fall back to the TUI-global
-        // setting, then the system default.
-        let emulator = supervisor::read_module_terminal_emulator(&plugin.directory)
+        // A module can pin its own terminal emulator via the discovered
+        // `terminal_emulators` toggle map in its config.json (first enabled in
+        // discovery order), or the legacy `terminal_emulator` string; fall back
+        // to the TUI-global setting, then the system default.
+        let emulator = supervisor::first_enabled_terminal_emulator(&plugin.directory.join("config.json"))
+            .or_else(|| supervisor::read_module_terminal_emulator(&plugin.directory))
             .or_else(|| state.terminal_emulator.clone());
         supervisor::spawn_terminal_from_parts(
             plugin,
