@@ -2109,11 +2109,16 @@ async fn handle_launch_result(
     }
 
     let spawned = if plugin.manifest.terminal {
+        // A module can pin its own terminal emulator in its config.json
+        // (module_specific.terminal_emulator); fall back to the TUI-global
+        // setting, then the system default.
+        let emulator = supervisor::read_module_terminal_emulator(&plugin.directory)
+            .or_else(|| state.terminal_emulator.clone());
         supervisor::spawn_terminal_from_parts(
             plugin,
             &cmd,
             &args,
-            state.terminal_emulator.as_deref(),
+            emulator.as_deref(),
         )
     } else {
         supervisor::spawn_from_parts(plugin, &cmd, &args).map(|c| (c, None, None))

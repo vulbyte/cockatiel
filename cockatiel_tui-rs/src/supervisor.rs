@@ -119,6 +119,23 @@ pub fn read_terminal_emulator(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A terminal module's own `terminal_emulator` setting, read from its
+/// `config.json` under `module_specific`. `None` when absent/empty — the
+/// caller then falls back to the TUI-global setting, then the system default.
+/// This lets a single module (e.g. term-chat) pick a specific emulator while
+/// every other terminal module keeps the global one.
+pub fn read_module_terminal_emulator(dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join("config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config
+        .get("module_specific")
+        .and_then(|v| v.get(TERMINAL_EMULATOR_KEY))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// The TUI's `launch_engine` setting, or `None` when the file is missing, is not
 /// an object, or has no usable value for the key.
 ///
@@ -2715,6 +2732,38 @@ mod tests {
         std::fs::write(&path, r#"{"operator_setting": 7}"#).unwrap();
         ensure_tui_config(&path);
         assert_eq!(read_terminal_emulator(&path), None, "backfilled default is empty");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn module_terminal_emulator_is_read_from_module_specific() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-moduleemu-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Nothing said -> None (caller falls back to the TUI global, then default).
+        std::fs::write(tmp.join("config.json"), r#"{"engine_ip":"127.0.0.1"}"#).unwrap();
+        assert_eq!(read_module_terminal_emulator(&tmp), None);
+
+        // A blank value is also "nothing said".
+        std::fs::write(
+            tmp.join("config.json"),
+            r#"{"module_specific":{"terminal_emulator":""}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_module_terminal_emulator(&tmp), None);
+
+        // A real per-module emulator is returned, trimmed.
+        std::fs::write(
+            tmp.join("config.json"),
+            r#"{"module_specific":{"terminal_emulator":"  kitty  "}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_module_terminal_emulator(&tmp).as_deref(), Some("kitty"));
+
+        // Missing file -> None.
+        let empty = tmp.join("nonexistent");
+        assert_eq!(read_module_terminal_emulator(&empty), None);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
