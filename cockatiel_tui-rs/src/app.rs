@@ -194,6 +194,10 @@ pub struct ScreenShape {
 pub struct AppState {
     pub active_window: WindowId,
     pub windows: Vec<Box<dyn Window>>,
+    /// The configured terminal emulator (from the TUI's config.json
+    /// `terminal_emulator` key). Empty/None = the system default. Used to open
+    /// terminal modules and pop-out windows.
+    pub terminal_emulator: Option<String>,
     /// Set by the Ctrl+L escape hatch: repaint every cell on the next frame
     /// instead of diffing, so any visual glitch can be cleared by hand.
     pub force_full_redraw: bool,
@@ -323,6 +327,7 @@ impl AppState {
         Self {
             active_window: WindowId::Logo,
             windows: Vec::new(),
+            terminal_emulator: None,
             force_full_redraw: false,
             stats: GlobalStats::default(),
             colors,

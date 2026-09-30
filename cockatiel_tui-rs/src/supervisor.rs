@@ -99,6 +99,26 @@ pub const LAUNCH_ENGINE_KEY: &str = "launch_engine";
 /// compatibility (an old config that set it must not break).
 pub const AUTO_START_KEY: &str = "auto_start";
 
+/// The TUI's `config.json` key: the terminal emulator used to open terminal
+/// modules (term-chat, the live prediction/poll displays, pop-out windows).
+/// Empty (the default) = the system's default emulator (Terminal.app on macOS,
+/// the first available of x-terminal-emulator/gnome-terminal/konsole/xterm on
+/// Linux, a new console on Windows).
+pub const TERMINAL_EMULATOR_KEY: &str = "terminal_emulator";
+
+/// The TUI's configured terminal emulator, or `None` when the setting is
+/// absent/empty (meaning "use the system default").
+pub fn read_terminal_emulator(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
+    config
+        .get(TERMINAL_EMULATOR_KEY)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// The TUI's `launch_engine` setting, or `None` when the file is missing, is not
 /// an object, or has no usable value for the key.
 ///
@@ -152,6 +172,10 @@ pub fn ensure_tui_config(path: &Path) {
     }
     if !map.contains_key(AUTO_START_KEY) {
         map.insert(AUTO_START_KEY.to_string(), serde_json::Value::Bool(false));
+        changed = true;
+    }
+    if !map.contains_key(TERMINAL_EMULATOR_KEY) {
+        map.insert(TERMINAL_EMULATOR_KEY.to_string(), serde_json::Value::String(String::new()));
         changed = true;
     }
     if !changed {
@@ -646,7 +670,11 @@ fn record_binary_route(p: &Plugin, path: &Path) {
 /// a window, and at the bottom of the screen pushing the layout up. A detached
 /// window must therefore own a terminal of its own, exactly like a terminal
 /// module does.
-pub fn spawn_in_new_terminal(argv: &[String], title: &str) -> Result<(), String> {
+pub fn spawn_in_new_terminal(
+    argv: &[String],
+    title: &str,
+    emulator: Option<&str>,
+) -> Result<(), String> {
     if argv.is_empty() {
         return Err("no command to launch".to_string());
     }
@@ -669,8 +697,12 @@ pub fn spawn_in_new_terminal(argv: &[String], title: &str) -> Result<(), String>
 
     match std::env::consts::OS {
         "macos" => {
+            // The configured emulator is an app name (e.g. "iTerm", "Kitty",
+            // "Alacritty"). Empty = the system default (Terminal.app).
+            let app = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
             let script = format!(
-                "tell application \"Terminal\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\ndo script \"{}\" in w\nend if\nend tell",
+                "tell application \"{}\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\ndo script \"{}\" in w\nend if\nend tell",
+                apple_quote(app),
                 apple_quote(&marker),
                 apple_quote(&run),
                 apple_quote(&run),
@@ -687,7 +719,7 @@ pub fn spawn_in_new_terminal(argv: &[String], title: &str) -> Result<(), String>
             }
             cmd.spawn()
                 .map(|_| ())
-                .map_err(|e| format!("Failed to open a Terminal window for '{}': {}", title, e))
+                .map_err(|e| format!("Failed to open a {} window for '{}': {}", app, title, e))
         }
         "windows" => Command::new("cmd")
             .args(["/C", "start", "", "cmd", "/K"])
@@ -698,17 +730,23 @@ pub fn spawn_in_new_terminal(argv: &[String], title: &str) -> Result<(), String>
             .map(|_| ())
             .map_err(|e| format!("Failed to open a console for '{}': {}", title, e)),
         _ => {
-            let candidates: &[(&str, &[&str])] = &[
-                ("x-terminal-emulator", &["-e", "sh", "-c"]),
-                ("gnome-terminal", &["--", "sh", "-c"]),
-                ("konsole", &["-e", "sh", "-c"]),
-                ("xterm", &["-e", "sh", "-c"]),
-            ];
+            // A configured emulator (an executable name) is tried FIRST with
+            // the arg convention that fits it, then the system defaults.
+            let mut candidates: Vec<(&str, &[&str])> = Vec::new();
+            if let Some(emu) = emulator.filter(|s| !s.trim().is_empty()) {
+                candidates.extend(terminal_candidates_for(emu));
+            }
+            candidates.extend([
+                ("x-terminal-emulator", &["-e", "sh", "-c"][..]),
+                ("gnome-terminal", &["--", "sh", "-c"][..]),
+                ("konsole", &["-e", "sh", "-c"][..]),
+                ("xterm", &["-e", "sh", "-c"][..]),
+            ]);
             let mut last = String::from("no terminal emulator found");
             for (emu, args) in candidates {
                 let res = {
                     let mut cmd = Command::new(emu);
-                    cmd.args(*args)
+                    cmd.args(args)
                         .arg(&run)
                         .stdout(Stdio::null())
                         .stderr(Stdio::null());
@@ -726,6 +764,20 @@ pub fn spawn_in_new_terminal(argv: &[String], title: &str) -> Result<(), String>
             }
             Err(format!("Failed to open a terminal for '{}' ({})", title, last))
         }
+    }
+}
+
+/// The argument convention(s) a named terminal emulator expects for
+/// "run this command line in a new window". Fall back to `-e sh -c` (the most
+/// common) for anything not listed.
+fn terminal_candidates_for(emu: &str) -> Vec<(&str, &[&str])> {
+    match emu {
+        "gnome-terminal" => vec![("gnome-terminal", &["--", "sh", "-c"])],
+        "wezterm" => vec![("wezterm", &["start", "--", "sh", "-c"])],
+        "kitty" => vec![("kitty", &["sh", "-c"])],
+        "foot" => vec![("foot", &["sh", "-c"])],
+        "st" => vec![("st", &["-e", "sh", "-c"])],
+        _ => vec![(emu, &["-e", "sh", "-c"])],
     }
 }
 
@@ -985,6 +1037,7 @@ pub fn spawn_terminal_from_parts(
     p: &Plugin,
     cmd: &str,
     args: &[String],
+    emulator: Option<&str>,
 ) -> Result<(Child, Option<String>, Option<PathBuf>), String> {
     // The PIN must not appear in the shell command line (visible in `ps`);
     // export it in the wrapper script instead.
@@ -1051,9 +1104,13 @@ pub fn spawn_terminal_from_parts(
             // unreliable, so a crash-loop relaunch outpaced the cleanup and
             // left stale windows behind. Reusing one window keeps exactly one
             // per module.
+            // The configured emulator is an app name (e.g. "iTerm", "Kitty",
+            // "Alacritty"); empty = the system default (Terminal.app).
+            let app = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
             kill_stale_terminal_processes(&p.manifest.name);
             let script = format!(
-                "tell application \"Terminal\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\nrepeat with i from (count of wins) to 2 by -1\nclose (item i of wins) saving no\nend repeat\ndo script \"{}\" in w\nend if\nend tell",
+                "tell application \"{}\"\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\nrepeat with i from (count of wins) to 2 by -1\nclose (item i of wins) saving no\nend repeat\ndo script \"{}\" in w\nend if\nend tell",
+                apple_quote(app),
                 apple_quote(&marker),
                 apple_quote(&run),
                 apple_quote(&run),
@@ -1069,7 +1126,7 @@ pub fn spawn_terminal_from_parts(
             }
             cmd.spawn()
                 .map(|child| (child, Some(marker), Some(pidfile)))
-                .map_err(|e| format!("Failed to launch '{}' in Terminal.app: {}", p.manifest.name, e))
+                .map_err(|e| format!("Failed to launch '{}' in {}: {}", p.manifest.name, app, e))
         }
         "windows" => {
             Command::new("cmd")
@@ -1082,17 +1139,22 @@ pub fn spawn_terminal_from_parts(
                 .map_err(|e| format!("Failed to launch '{}' in a new console: {}", p.manifest.name, e))
         }
         "linux" => {
-            // Try common terminal emulators in order of preference.
-            let candidates: &[(&str, &[&str])] = &[
-                ("x-terminal-emulator", &["-e", "sh", "-c"]),
-                ("gnome-terminal", &["--", "sh", "-c"]),
-                ("konsole", &["-e", "sh", "-c"]),
-                ("xterm", &["-e", "sh", "-c"]),
-            ];
+            // A configured emulator (an executable name) is tried FIRST with the arg
+            // convention that fits it, then the system defaults.
+            let mut candidates: Vec<(&str, &[&str])> = Vec::new();
+            if let Some(emu) = emulator.filter(|s| !s.trim().is_empty()) {
+                candidates.extend(terminal_candidates_for(emu));
+            }
+            candidates.extend([
+                ("x-terminal-emulator", &["-e", "sh", "-c"][..]),
+                ("gnome-terminal", &["--", "sh", "-c"][..]),
+                ("konsole", &["-e", "sh", "-c"][..]),
+                ("xterm", &["-e", "sh", "-c"][..]),
+            ]);
             for (emu, args) in candidates {
                 let result = {
                     let mut cmd = Command::new(emu);
-                    cmd.args(*args).arg(&run).stdout(Stdio::null()).stderr(Stdio::null());
+                    cmd.args(args).arg(&run).stdout(Stdio::null()).stderr(Stdio::null());
                     // Own process group (PGID = child PID) so a group TERM/KILL
                     // later reaches the emulator AND the module it spawns.
                     #[cfg(unix)]
@@ -2282,7 +2344,7 @@ mod tests {
             manifest,
             directory: std::path::PathBuf::from("/tmp"),
         };
-        let (child, marker, pidfile) = spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()])
+        let (child, marker, pidfile) = spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()], None)
             .expect("spawn");
         eprintln!("marker={:?} pidfile={:?}", marker, pidfile);
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -2368,7 +2430,7 @@ mod tests {
 
         // First launch: one window.
         let (_child1, marker1, pidfile1) =
-            spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()]).expect("spawn 1");
+            spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()], None).expect("spawn 1");
         std::thread::sleep(std::time::Duration::from_secs(2));
         assert_eq!(count_windows().lines().count(), 1, "first launch must open exactly one window");
         let pid1 = std::fs::read_to_string(pidfile1.as_ref().unwrap())
@@ -2385,7 +2447,7 @@ mod tests {
         // Relaunch (the supervisor's crash ladder path): must reuse the SAME
         // window, not stack a second one.
         let (_child2, marker2, pidfile2) =
-            spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()]).expect("spawn 2");
+            spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()], None).expect("spawn 2");
         std::thread::sleep(std::time::Duration::from_secs(2));
         let windows = count_windows();
         eprintln!("windows after relaunch: {:?}", windows);
@@ -2594,6 +2656,9 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written[LAUNCH_ENGINE_KEY], serde_json::json!(true));
         assert_eq!(read_launch_engine_default(&path), Some(true));
+        // The terminal emulator defaults to empty (system default).
+        assert_eq!(written[TERMINAL_EMULATOR_KEY], serde_json::json!(""));
+        assert_eq!(read_terminal_emulator(&path), None);
 
         // Idempotent, and an operator's own value is never overwritten.
         ensure_tui_config(&path);
@@ -2628,7 +2693,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// The TUI's `config.json` sits in the same directory `find_engine_addr`
+    #[test]
+    fn terminal_emulator_is_read_from_the_tui_config() {
+        let tmp = std::env::temp_dir().join(format!("cockatiel-termemu-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("config.json");
+
+        // Nothing said -> None (system default).
+        std::fs::write(&path, r#"{"operator_setting": 7}"#).unwrap();
+        assert_eq!(read_terminal_emulator(&path), None);
+
+        // A blank value is also "nothing said".
+        std::fs::write(&path, r#"{"terminal_emulator": ""}"#).unwrap();
+        assert_eq!(read_terminal_emulator(&path), None);
+
+        // A real emulator is returned, trimmed.
+        std::fs::write(&path, r#"{"terminal_emulator": "  kitty  "}"#).unwrap();
+        assert_eq!(read_terminal_emulator(&path).as_deref(), Some("kitty"));
+
+        // The writer backfills the key into a file that predates it.
+        std::fs::write(&path, r#"{"operator_setting": 7}"#).unwrap();
+        ensure_tui_config(&path);
+        assert_eq!(read_terminal_emulator(&path), None, "backfilled default is empty");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn terminal_candidates_cover_known_emulators_and_fallback() {
+        // Known emulators get their own arg convention.
+        let gnome = terminal_candidates_for("gnome-terminal");
+        assert_eq!(gnome, vec![("gnome-terminal", &["--", "sh", "-c"][..])]);
+        let wezterm = terminal_candidates_for("wezterm");
+        assert_eq!(wezterm, vec![("wezterm", &["start", "--", "sh", "-c"][..])]);
+        let kitty = terminal_candidates_for("kitty");
+        assert_eq!(kitty, vec![("kitty", &["sh", "-c"][..])]);
+        // Anything else falls back to `-e sh -c`.
+        let unknown = terminal_candidates_for("my-custom-emu");
+        assert_eq!(unknown, vec![("my-custom-emu", &["-e", "sh", "-c"][..])]);
+    }
     /// probes for an engine address. If that probe answered from a file holding
     /// none of the address keys, every operator would silently get the built-in
     /// default port — and the engine's real port would never be discovered.

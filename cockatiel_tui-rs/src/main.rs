@@ -394,6 +394,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = AppState::new(colors, hotkeys);
+    // The configured terminal emulator (empty = system default), read once from
+    // the TUI's config.json so every terminal module / pop-out uses it.
+    state.terminal_emulator = supervisor::read_terminal_emulator(&tui_config_path);
 
     // Auto-rebuild channel: a crashed module's name is sent here and the main
     // loop rebuilds + relaunches it (capped to avoid infinite loops).
@@ -2105,7 +2108,12 @@ async fn handle_launch_result(
     }
 
     let spawned = if plugin.manifest.terminal {
-        supervisor::spawn_terminal_from_parts(plugin, &cmd, &args)
+        supervisor::spawn_terminal_from_parts(
+            plugin,
+            &cmd,
+            &args,
+            state.terminal_emulator.as_deref(),
+        )
     } else {
         supervisor::spawn_from_parts(plugin, &cmd, &args).map(|c| (c, None, None))
     };
@@ -2582,7 +2590,11 @@ async fn dispatch_action(
                 ws_auth_token.to_string(),
             ];
             let title = format!("popout:{}", window_name);
-            if let Err(e) = crate::supervisor::spawn_in_new_terminal(&argv, &title) {
+            if let Err(e) = crate::supervisor::spawn_in_new_terminal(
+                &argv,
+                &title,
+                state.terminal_emulator.as_deref(),
+            ) {
                 // Fall back to nothing rather than corrupting the parent: an
                 // inherited-tty spawn would scribble over the live UI.
                 crate::app::supervisor_log_global(format!(
