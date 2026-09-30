@@ -715,25 +715,38 @@ pub fn spawn_in_new_terminal(
     match std::env::consts::OS {
         "macos" => {
             // The configured emulator is an app name (e.g. "iTerm", "Kitty",
-            // "Alacritty", "WezTerm.app", or a fuzzy partial like "wez"). Empty
-            // = the system default (Terminal.app). Fuzzy-resolved to the
-            // installed app's bundle id so a slightly-off name still works.
+            // "Alacritty", "WezTerm.app", "cool-retro-term", or a fuzzy partial
+            // like "wez"). Empty = the system default (Terminal.app).
             let configured = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
             let resolved = macos_resolve_terminal_emulator(configured, None);
-            // A bundle id always looks like "com.apple.Terminal" (has a dot, no
-            // spaces). Anything else (a display-name stem, or the literal
-            // configured value) uses the plain `tell application "Name"` form.
-            let looks_like_bundle_id = |s: &str| -> bool {
-                s.contains('.') && !s.contains(' ') && !s.contains('/') && !s.contains('~')
-            };
-            let (app_clause, app_display) = match &resolved {
-                Some(id) if looks_like_bundle_id(id) => {
-                    (format!("id \"{}\"", apple_quote(id)), id.clone())
+            let is_terminal_app = resolved
+                .as_ref()
+                .and_then(|r| r.bundle_id.as_deref())
+                .map(|id| id == "com.apple.Terminal")
+                .unwrap_or(false);
+            if !is_terminal_app {
+                // Any non-Terminal emulator (cool-retro-term, WezTerm, iTerm,
+                // ...) has no AppleScript `do script`, so launch its binary
+                // directly with its own CLI. Fall back to the literal configured
+                // name if we couldn't resolve a binary.
+                if let Some(binary) = resolved.as_ref().and_then(|r| r.binary.as_deref()) {
+                    let emu_name = binary
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(configured);
+                    return macos_launch_binary(binary, emu_name, &run)
+                        .map_err(|e| format!("Failed to open a {} window for '{}': {}", configured, title, e));
                 }
-                _ => (
-                    format!("\"{}\"", apple_quote(configured)),
-                    configured.to_string(),
-                ),
+            }
+            // Terminal.app (or an unresolved emulator): use AppleScript, which
+            // Terminal supports natively. The app name is the bundle id (or the
+            // literal configured value when nothing resolved).
+            let app_clause = match &resolved {
+                Some(r) => match &r.bundle_id {
+                    Some(id) => format!("id \"{}\"", apple_quote(id)),
+                    None => format!("\"{}\"", apple_quote(configured)),
+                },
+                None => format!("\"{}\"", apple_quote(configured)),
             };
             let script = format!(
                 "tell application {}\nactivate\nset wins to (every window whose name contains \"{}\")\nif (count of wins) is 0 then\ndo script \"{}\"\nelse\nset w to item 1 of wins\ndo script \"{}\" in w\nend if\nend tell",
@@ -754,7 +767,7 @@ pub fn spawn_in_new_terminal(
             }
             cmd.spawn()
                 .map(|_| ())
-                .map_err(|e| format!("Failed to open a {} window for '{}': {}", app_display, title, e))
+                .map_err(|e| format!("Failed to open a {} window for '{}': {}", configured, title, e))
         }
         "windows" => Command::new("cmd")
             .args(["/C", "start", "", "cmd", "/K"])
@@ -816,6 +829,38 @@ fn terminal_candidates_for(emu: &str) -> Vec<(&str, &[&str])> {
     }
 }
 
+/// The macOS CLI arguments for launching a command in a given terminal
+/// emulator's binary. cool-retro-term and most xterm-style emulators use
+/// `-e <cmd>`; WezTerm uses `start -- sh -c <cmd>`; the default for anything
+/// else is `-e sh -c <cmd>` (matching the Linux fallback).
+fn macos_launch_args(emu: &str) -> Vec<String> {
+    match emu.to_ascii_lowercase() {
+        e if e.contains("wezterm") => vec!["start".into(), "--".into(), "sh".into(), "-c".into()],
+        _ => vec!["-e".into(), "sh".into(), "-c".into()],
+    }
+}
+
+/// Launch a command in a macOS terminal emulator by running its binary
+/// directly with `-e sh -c "<run>"` (or the emulator's own convention). Used
+/// for emulators that have no AppleScript `do script` support (anything other
+/// than Terminal.app), so e.g. cool-retro-term works. `binary` is the app's
+/// executable; `run` is the fully-quoted shell command line. On success
+/// returns Ok(()); Err on spawn failure.
+fn macos_launch_binary(binary: &std::path::Path, emu_name: &str, run: &str) -> Result<(), String> {
+    let mut args = macos_launch_args(emu_name);
+    args.push(run.to_string());
+    let mut cmd = Command::new(binary);
+    cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to launch {}: {}", binary.display(), e))
+}
+
 /// Fuzzy match a query against a candidate: `query` must appear as a
 /// case-insensitive subsequence of `candidate`. E.g. "iterm" matches
 /// "iTerm.app", "wez" matches "WezTerm.app". Returns the match score
@@ -865,12 +910,21 @@ fn macos_app_search_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// A macOS app bundle resolved from a configured terminal-emulator name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedMacApp {
+    /// The bundle's identifier (e.g. "com.github.wez.wezterm"), when readable.
+    bundle_id: Option<String>,
+    /// The executable inside the bundle (e.g. ".../WezTerm.app/Contents/MacOS/wezterm").
+    binary: Option<std::path::PathBuf>,
+}
+
 /// Resolve a configured macOS terminal emulator to the most likely installed
 /// app. The configured value may be an app name ("iTerm", "kitty"), a bundle
 /// name ("iTerm.app", "WezTerm.app"), or a partial/fuzzy match — anything that
 /// can be matched to an installed `*.app`. The winner is resolved to its
-/// bundle identifier so the AppleScript can use the reliable
-/// `tell application id "..."` form.
+/// bundle identifier and executable path so the caller can either use
+/// AppleScript (`tell application id`) or launch the binary directly.
 ///
 /// `search_dirs` is injectable for tests; `None` uses the real system dirs.
 /// Returns `None` when nothing in the search dirs fuzzy-matches, meaning the
@@ -878,7 +932,7 @@ fn macos_app_search_dirs() -> Vec<std::path::PathBuf> {
 fn macos_resolve_terminal_emulator(
     configured: &str,
     search_dirs: Option<&[std::path::PathBuf]>,
-) -> Option<String> {
+) -> Option<ResolvedMacApp> {
     let configured = configured.trim();
     if configured.is_empty() {
         return None;
@@ -921,14 +975,23 @@ fn macos_resolve_terminal_emulator(
 
     let path = best?.1;
     let bundle_id = macos_bundle_identifier(&path);
-    // Prefer the resolved bundle id; fall back to the app's display name
-    // (bundle filename stem) so AppleScript can still `tell application`.
-    Some(bundle_id.unwrap_or_else(|| {
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.strip_suffix(".app").unwrap_or(n).to_string())
-            .unwrap_or_else(|| configured.to_string())
-    }))
+    Some(ResolvedMacApp {
+        bundle_id,
+        binary: macos_app_binary(&path),
+    })
+}
+
+/// The executable inside a macOS app bundle (`Contents/MacOS/<name>`).
+fn macos_app_binary(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos = path.join("Contents").join("MacOS");
+    let entries = std::fs::read_dir(&macos).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Read an app bundle's identifier via `mdls kMDItemCFBundleIdentifier`
@@ -1287,22 +1350,49 @@ pub fn spawn_terminal_from_parts(
             // left stale windows behind. Reusing one window keeps exactly one
             // per module.
             // The configured emulator is an app name (e.g. "iTerm", "Kitty",
-            // "Alacritty", "WezTerm.app", or a fuzzy partial like "wez"); empty
-            // = the system default (Terminal.app). Fuzzy-resolved to the
-            // installed app's bundle id so a slightly-off name still works.
+            // "Alacritty", "WezTerm.app", "cool-retro-term", or a fuzzy partial
+            // like "wez"); empty = the system default (Terminal.app).
             let configured = emulator.filter(|s| !s.trim().is_empty()).unwrap_or("Terminal");
             let resolved = macos_resolve_terminal_emulator(configured, None);
-            let looks_like_bundle_id = |s: &str| -> bool {
-                s.contains('.') && !s.contains(' ') && !s.contains('/') && !s.contains('~')
-            };
-            let (app_clause, app_display) = match &resolved {
-                Some(id) if looks_like_bundle_id(id) => {
-                    (format!("id \"{}\"", apple_quote(id)), id.clone())
+            let is_terminal_app = resolved
+                .as_ref()
+                .and_then(|r| r.bundle_id.as_deref())
+                .map(|id| id == "com.apple.Terminal")
+                .unwrap_or(false);
+            if !is_terminal_app {
+                // Any non-Terminal emulator (cool-retro-term, WezTerm, iTerm,
+                // ...) has no AppleScript `do script`, so launch its binary
+                // directly with its own CLI. The Child handle tracks the
+                // emulator process; there is no AppleScript window marker or
+                // pidfile to manage.
+                if let Some(binary) = resolved.as_ref().and_then(|r| r.binary.as_deref()) {
+                    let emu_name = binary
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(configured);
+                    let mut args = macos_launch_args(emu_name);
+                    args.push(run.clone());
+                    let mut cmd = Command::new(binary);
+                    cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::null());
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+                    }
+                    return cmd.spawn()
+                        .map(|child| (child, None, None))
+                        .map_err(|e| format!("Failed to launch '{}' in {}: {}", p.manifest.name, configured, e));
                 }
-                _ => (
-                    format!("\"{}\"", apple_quote(configured)),
-                    configured.to_string(),
-                ),
+            }
+            // Terminal.app (or an unresolved emulator): use AppleScript, which
+            // Terminal supports natively (with the window-reuse + pidfile
+            // mechanism below).
+            let app_clause = match &resolved {
+                Some(r) => match &r.bundle_id {
+                    Some(id) => format!("id \"{}\"", apple_quote(id)),
+                    None => format!("\"{}\"", apple_quote(configured)),
+                },
+                None => format!("\"{}\"", apple_quote(configured)),
             };
             kill_stale_terminal_processes(&p.manifest.name);
             let script = format!(
@@ -1323,7 +1413,7 @@ pub fn spawn_terminal_from_parts(
             }
             cmd.spawn()
                 .map(|child| (child, Some(marker), Some(pidfile)))
-                .map_err(|e| format!("Failed to launch '{}' in {}: {}", p.manifest.name, app_display, e))
+                .map_err(|e| format!("Failed to launch '{}' in {}: {}", p.manifest.name, configured, e))
         }
         "windows" => {
             Command::new("cmd")
@@ -2963,6 +3053,18 @@ mod tests {
     }
 
     #[test]
+    fn macos_resolver_cool_retro_term_probe() {
+        let r = macos_resolve_terminal_emulator("cool-retro-term", None);
+        eprintln!("CRT by name: {:?}", r);
+        let r2 = macos_resolve_terminal_emulator("cool-retro-term.app", None);
+        eprintln!("CRT by .app: {:?}", r2);
+        let r3 = macos_resolve_terminal_emulator("cool-retro", None);
+        eprintln!("CRT partial: {:?}", r3);
+        let r4 = macos_resolve_terminal_emulator("cool", None);
+        eprintln!("CRT 'cool': {:?}", r4);
+    }
+
+    #[test]
     fn fuzzy_subsequence_matches_names_partially() {
         // Exact-ish matches score highest.
         assert!(fuzzy_subsequence("iterm", "iTerm") > fuzzy_subsequence("iterm", "iTermSomethingElse"));
@@ -2982,29 +3084,54 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("cockatiel-apps-{}", uuid::Uuid::now_v7()));
         let apps = tmp.join("Applications");
         std::fs::create_dir_all(&apps).unwrap();
-        std::fs::create_dir_all(apps.join("WezTerm.app")).unwrap();
-        std::fs::create_dir_all(apps.join("iTerm.app")).unwrap();
-        std::fs::create_dir_all(apps.join("Terminal.app")).unwrap();
-        std::fs::create_dir_all(apps.join("UnrelatedApp.app")).unwrap();
+        for (name, bundle_id) in [
+            ("WezTerm.app", "com.github.wez.wezterm"),
+            ("iTerm.app", "com.googlecode.iterm2"),
+            ("Terminal.app", "com.apple.Terminal"),
+            ("UnrelatedApp.app", "com.example.unrelated"),
+        ] {
+            let bundle = apps.join(name);
+            std::fs::create_dir_all(bundle.join("Contents").join("MacOS")).unwrap();
+            std::fs::write(bundle.join("Contents").join("MacOS").join(name.trim_end_matches(".app")), "").unwrap();
+            std::fs::write(
+                bundle.join("Contents").join("Info.plist"),
+                format!("<dict><key>CFBundleIdentifier</key><string>{bundle_id}</string></dict>"),
+            )
+            .unwrap();
+        }
 
         let dirs = [apps.clone()];
 
+        fn bundle_id(configured: &str, dirs: &[std::path::PathBuf]) -> Option<String> {
+            macos_resolve_terminal_emulator(configured, Some(dirs))
+                .and_then(|r| r.bundle_id)
+        }
+
         // Full name, with and without .app.
         assert_eq!(
-            macos_resolve_terminal_emulator("WezTerm.app", Some(&dirs)).as_deref(),
-            Some("WezTerm"),
-            "bundle name with .app resolves to the stem (no bundle id readable in tests)"
+            bundle_id("WezTerm.app", &dirs).as_deref(),
+            Some("com.github.wez.wezterm"),
+            "bundle name with .app resolves to its bundle id"
         );
         assert_eq!(
-            macos_resolve_terminal_emulator("iterm", Some(&dirs)).as_deref(),
-            Some("iTerm"),
+            bundle_id("iterm", &dirs).as_deref(),
+            Some("com.googlecode.iterm2"),
             "case-insensitive fuzzy match on the stem"
         );
         // Partial fuzzy match.
         assert_eq!(
-            macos_resolve_terminal_emulator("wez", Some(&dirs)).as_deref(),
-            Some("WezTerm"),
+            bundle_id("wez", &dirs).as_deref(),
+            Some("com.github.wez.wezterm"),
             "subsequence match"
+        );
+        // The resolved app also exposes its executable path.
+        let resolved = macos_resolve_terminal_emulator("wez", Some(&dirs));
+        assert!(
+            resolved
+                .and_then(|r| r.binary)
+                .map(|b| b.ends_with("WezTerm.app/Contents/MacOS/WezTerm"))
+                .unwrap_or(false),
+            "the binary inside the bundle is located"
         );
         // No match -> None.
         assert_eq!(macos_resolve_terminal_emulator("somenonexistentapp", Some(&dirs)), None);
