@@ -4,6 +4,22 @@ The v1 path to a complete, extensible chat engine. Done/pending reflects the liv
 
 ## Checkpoint 1 — Core & Protocol
 
+### TODO: 
+- GAME RANK INTIGRATION/LOOKUP for:
+    - [ ] r6 siege
+    - [ ] cs2
+    - [ ] league of legends
+    - [ ] dota2
+    - [ ] pubg
+    - [ ] valorant
+    - [ ] fortnite
+    - [ ] rocket league
+    - [ ] apex legends
+    - [ ] overwatch
+    - [ ] call of duty
+    - [ ] osu
+- 
+
 ### Done
 - [x] Protocol stability first — the Protobuf schema is locked before new features.
 - [x] One-file imports: **JavaScript**, **Python**, **Rust** (ez import, README tutorial, `connect()`, `Send()`, `ReceiveAny()`, `Receive.protobuffType()`; Rust uses `Send(<protobuffType>, <target>, <message>)`).

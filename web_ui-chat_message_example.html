@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>chat message example</title>
+</head>
+	  <!-- notes: 
+		- ignore all but the "chat-message" container and styling, as it is the only relivant bit we're worried about. everything else is modular/flexable. 
+	  	- this also should remin iframe compatable
+		- any values with the comment or value "UA" means "user_addressable" which means that the user will be able to set it to a custom value which will exist within their user-profile in the user-database and should be able to reconfigure it to any param, so this part needs to stay modular as possible.
+		- any values with "SA" in the value or commented with it means it's a setting the streamer can override (if assigned by the streamer, will superseed the users option)
+		- any values with "AV" means "automated_value" which will have some logic to choose this value. note: SA will override these values
+		- if a value like SA or UA has css values within "()" such as: "(font-family: [sans-serif, times, ...]" those are the options for that value. if no values given assume any.
+		- if you see both a SA and UA beside each other, it means either can configure, but the streamer should always supersede the UA settings
+		- custom tags are used for clerification and as a short hand, should be adapted to classes during implimentation
+	  -->
+<style>
+:root {
+	--spacing-def: 1rem;
+	--spacing-xxl: calc(var(--spacing-def) * 8);
+	--spacing-xl: calc(var(--spacing-def) * 4);
+	--spacing-l: calc(var(--spacing-def) * 2);
+	--spacing-m: var(--spacing-def);
+	--spacing-s: calc(var(--spacing-def) / 2);
+	--spacing-xs: calc(var(--spacing-def) / 4);
+	--spacing-xxs: calc(var(--spacing-def) / 8);
+}
+
+chat-message {
+	background-color: blue;
+	display: block; /* Allows component to match iframe width */
+	width: 100%;
+	box-sizing: border-box;
+	color: white; /*SA UA*/ 
+	font-family: sans-serif; /*SA UA*/
+	padding: var(--spacing-m); /*SA UA*/
+}
+
+message-head {
+	background-image: url(https://i.ytimg.com/vi/RmY_c1W6RjI/hq720.jpg?sqp=-oaymwEgCNAFEJQDSFXyq4qpAxIIARUAAIhCGAFwAcABBrgC8xg=&rs=AOn4CLB5_6TImCogTWn6Npye1DoxaxgFKw);
+	background-size: 100%;
+	background-position: 30% 50%;
+
+	/* 1. Add a dark tint color */
+	background-color: rgba(0, 0, 0, 0.7); 
+	/* 2. Blend the color into the image */
+	background-blend-mode: darken; 
+
+	border-radius: var(--spacing-m) var(--spacing-m) var(--spacing-m) 0px;
+	display: grid;
+	grid-template-columns: var(--spacing-xl) minmax(0, 1fr) auto;
+	gap: var(--spacing-s);
+	align-items: start;
+	padding: var(--spacing-s);
+}
+
+icon-container {
+	aspect-ratio: 1 !important;
+	border-radius: 100%;
+	height: var(--spacing-xl); /*SA*/
+	width: var(--spacing-xl);
+	overflow: hidden;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+icon-container > img {
+	aspect-ratio: 1 !important;
+	border-radius: 100%; /*SA UA*/
+	height: 100%;
+	width: 100%;
+	object-fit: cover;
+}
+
+user-info-container {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	min-width: 0; /* Prevents flex children from bursting out of grid bounds */
+}
+
+/* Flex layout allows user items to flow inline on wide screens and wrap on narrow overlays */
+user-info {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--spacing-xs) var(--spacing-s);
+}	
+
+username-container {
+	display: flex;
+	align-items: center;
+}
+
+username {
+	color: white; /*SA UA*/
+	font-size: var(--spacing-l);
+	font-weight: bolder; /*SA UA*/
+	line-height: 1;
+}
+
+platform-container {
+	display: flex;
+	align-items: center;
+	white-space: nowrap;
+}
+
+platform-info {
+	align-items: center;
+	background-color: white; /*AV SA*/
+	border-radius: var(--spacing-l);
+	color: #9146FF;
+	display: flex; /*SA*/
+	flex-direction: row;
+	padding: 0 var(--spacing-xs);
+	overflow: hidden;
+	height: var(--spacing-l);
+}
+
+platform-name {
+	font-size: var(--spacing-m);
+	padding: 0 var(--spacing-xs);
+	height: 100%;
+	display: flex;
+	align-items: center;
+}
+
+platform-icon {
+	height: 100%;
+	aspect-ratio: 1;
+	display: flex; /*SA*/
+	align-items: center;
+	justify-content: center;		
+}
+
+platform-icon > img {
+	border-radius: 0px;
+	width: 80%;
+	height: 80%;
+}
+
+user-perms-container {
+	border-radius: var(--spacing-s);
+	display: flex; /*SA*/
+	align-items: center;
+	overflow: hidden;
+	height: var(--spacing-l);
+}
+
+user-perms {
+	display: flex; /*SA*/
+	align-items: center;
+	justify-content: center;		
+	width: var(--spacing-l);
+	height: var(--spacing-l);
+	overflow: hidden;
+}
+
+user-perms > img {
+	border-radius: 0px;
+	width: 80%;
+	height: 80%;
+}
+
+user-rank-container {
+	align-items: center;
+	background-color: hsl(160, 80%, 40%);
+	border-radius: var(--spacing-l);
+	display: flex; /*SA*/
+	flex-direction: row; 
+	font-family: "Brush Script MT", cursive; /*SA*/
+	font-size: var(--spacing-m);
+	height: var(--spacing-l);
+	padding: 0 var(--spacing-m);
+	white-space: nowrap;
+}
+
+user-rank-icon {
+	aspect-ratio: 1;
+	height: 80%;
+	display: flex; /*SA*/
+	align-items: center;	
+}
+
+user-rank-icon > img {
+	border-radius: 0px;
+	width: 100%;
+	height: 100%;
+}
+
+user-rank-name {
+	display: flex;
+	align-items: center;
+	height: 100%;
+}
+
+user-score-container {
+	display: flex;
+	font-size: var(--spacing-m);
+	flex-direction: row;
+	align-items: center;
+	gap: var(--spacing-xxs);
+	height: var(--spacing-l);
+	white-space: nowrap;
+}
+
+user-score-label {
+	font-weight: 300;
+}
+
+user-score-value {
+	font-weight: bolder;
+}
+
+commendment-container {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: var(--spacing-xxs);
+	font-size: var(--spacing-m);
+	height: var(--spacing-l);
+	white-space: nowrap;
+}
+
+commendment-label {
+	font-weight: 300;
+}
+
+commendment-display {
+	font-weight: 900;
+}
+
+badge-container {
+	align-content: center;
+	display: grid;
+	/* Limits max columns to 6 while wrapping down to 3x2 or 2x3 as container shrinks */
+	grid-template-columns: repeat(auto-fill, minmax(calc(var(--spacing-xl) * 0.75), 1fr));
+	width: max-content;
+	max-width: calc((var(--spacing-xl) * 0.75) * 6 + (var(--spacing-xxs) * 5) + (var(--spacing-xs) * 2));
+	justify-self: end; /* Docks to far right inside message-head grid */
+	align-content: start;
+	background-color: black;
+	border-radius: var(--spacing-m);
+	padding: var(--spacing-xs);
+	gap: var(--spacing-xxs);
+	box-sizing: border-box;
+}
+
+badge {
+	width: calc(var(--spacing-xl) * 0.75);
+	height: calc(var(--spacing-xl) * 0.75);
+	aspect-ratio: 1 !important; 
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+badge > img {
+	aspect-ratio: 1 !important;
+	height: 100%;
+	width: 100%;
+	object-fit: contain;
+}
+
+message-body {
+	display: block;
+	background-color: white; /*SA UA */
+	border-radius: 0px var(--spacing-m) var(--spacing-m) var(--spacing-m); /*SA UA*/
+	color: black;
+	font-size: calc(var(--spacing-m) * 1.5);
+	padding: var(--spacing-m);
+}
+
+command {
+	background-color: hsl(24, 100%, 5%);		
+	border-radius: var(--spacing-s);
+	color: white;
+	display: block;
+	font-size: var(--spacing-m);
+	font-family: monospace;
+	padding: var(--spacing-s);
+}
+
+token {
+	font-size: var(--spacing-m);
+}
+
+flags {
+	filter: opacity(0.7);
+}
+
+flag-key {
+	color: hsl(24, 100%, 70%);
+}
+
+message {
+	display: block;	
+}
+
+</style>
+<body>
+  <h1>example chat message</h1>
+	
+
+  <div style="
+	  background-color: black;
+	  height: 80rem; 
+	  min-width: 20rem;
+	  max-width: 80rem;
+	  width: 100%; 
+  ">
+	  <br>
+	  <br>
+	  	<chat-message id="message-uuid7"> 
+			<message-head>
+				<icon-container>
+					<img width="400"; height="400"; src="https://yt3.googleusercontent.com/uC9SzkA_i2tvfMCr6Pze-tqWM3YkAtJ1X0tl7uzLBo0g1arDPUH-lrzX_xJmGDcvh-3jzbbQvw=s160-c-k-c0x00ffffff-no-rj">
+				</icon-container>
+				<user-info-container>
+					<user-info>
+						<!--<user-info-main>-->
+							<username-container>
+								<username> vulbyte <!--UA--> </username>
+							</username-container>
+							<platform-container>
+								<platform-info>
+									<platform-name> twitch </platform-name>
+									<platform-icon> 
+										<img width="400"; height="400"; src="https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d3/Twitch_Glitch_Logo_Purple.svg/960px-Twitch_Glitch_Logo_Purple.svg.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail">
+									</platform-icon>
+								</platform-info>
+							</platform-container>
+							<user-perms-container>
+								<user-perms>
+									<img width="400"; height="400"; src=" https://cdn-icons-png.flaticon.com/512/7235/7235288.png ">
+								</user-perms>
+							</user-perms-container>
+							<!--</user-info-main>-->
+							<!--<user-info-secondary>-->
+							<user-rank-container>
+								<user-rank-name>emerald</user-rank-name>
+								<user-rank-icon>
+									<img width="400"; height="400"; src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+								</user-rank-icon>
+							</user-rank-container>
+							<user-score-container>
+								<user-score-label> score: </user-score-label>
+								<user-score-value> 143925 </user-score-value>
+							</user-score-container>
+							<commendment-container>
+								<commendment-label>rep:</commendment-label>
+								<commendment-display>4132</commendment-display>
+							</commendment-container>
+							<!--</user-info-secondary>-->
+					</user-info>
+				</user-info-container>
+					<badge-container>
+						<badge>
+							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+						</badge>
+						<badge>
+							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+						</badge>
+						<badge>
+							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+						</badge>
+						<badge>
+							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+						</badge>
+						<badge>
+							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+						</badge>
+						<badge>
+							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+						</badge>
+					</badge-container>
+			</message-head>
+			<message-body>
+				<command>
+					<token>!</token>tts
+					<flags>	
+						<flag> <flag-key>v</flag-key><flag-value>20</flag-value> </flag>
+						<flag> <flag-key>r</flag-key><flag-value>1.8</flag-value> </flag>
+						<flag> <flag-key>p</flag-key><flag-value>0.8</flag-value> </flag>
+					</flags>
+				</command>
+				<message>
+					hello how are youuuu?
+					hello how are youuuu?
+					hello how are youuuu?
+					hello how are youuuu?
+				</message>
+			</message-body>
+		</chat-message>	
+  </div>
+</body>
+</html>
+
