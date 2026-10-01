@@ -58,3 +58,6 @@
 [submodule "modules/cockatiel_module-clip-rs"]
 	path = modules/cockatiel_module-clip-rs
 	url = git@github.com:vulbyte/cockatiel_module-clip-rs.git
+[submodule "cockatiel_tui_v2-rs"]
+	path = cockatiel_tui_v2-rs
+	url = git@github.com:vulbyte/cockatiel_tui_v2-rs.git
