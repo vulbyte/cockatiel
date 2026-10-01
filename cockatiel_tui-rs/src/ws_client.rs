@@ -16,8 +16,8 @@ use crate::db;
 pub enum WsEvent {
     Connected,
     Disconnected,
-    Log { source: String, message: String, #[allow(dead_code)] event_type: i32 },
-    QueryResult { #[allow(dead_code)] query_id: String, #[allow(dead_code)] result: DatabaseQueryResult },
+    Log { source: String, message: String, event_type: i32 },
+    QueryResult { query_id: String, result: DatabaseQueryResult },
     StatsUpdate(db::GlobalStats),
     ConnectionInfo { ip: String, port: u16, pin: u32 },
     Prompt(Prompt),

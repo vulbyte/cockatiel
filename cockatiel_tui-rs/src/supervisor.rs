@@ -2618,7 +2618,7 @@ mod tests {
         };
         let p = Plugin {
             manifest,
-            directory: std::path::PathBuf::from("/tmp/tts-service"),
+            directory: "/tmp/m".into(),
         };
         let parts = build_module_command(&p, 9734, 603936);
         let expected_arch = if std::env::consts::ARCH == "aarch64" {
@@ -2929,7 +2929,7 @@ mod tests {
         };
         let plugin = Plugin {
             manifest,
-            directory: std::path::PathBuf::from("/tmp"),
+            directory: "/tmp/m".into(),
         };
         let (child, marker, pidfile) = spawn_terminal_from_parts(&plugin, "/bin/sleep", &["90".to_string()], None)
             .expect("spawn");
@@ -3000,7 +3000,7 @@ mod tests {
         };
         let plugin = Plugin {
             manifest,
-            directory: std::path::PathBuf::from("/tmp"),
+            directory: "/tmp/m".into(),
         };
 
         let count_windows = || {
@@ -3824,11 +3824,9 @@ mod tests {
             status: "offline".to_string(),
             position: pos.to_string(),
             credentials: Vec::new(),
-            directory: String::new(),
             credential_values: std::collections::HashMap::new(),
             config_complete: false,
             alive: false,
-            last_seen: 0,
             avg_ms: None,
             autostart: false,
 

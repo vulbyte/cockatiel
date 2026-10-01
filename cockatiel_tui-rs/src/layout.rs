@@ -44,8 +44,6 @@ pub struct LayoutAreas {
     pub left: Rect,
     pub logo: Rect,
     pub log: Rect,
-    #[allow(dead_code)]
-    pub right: Rect,
     pub modules: Rect,
     pub chart: Rect,
     pub prompts: Rect,
@@ -113,7 +111,6 @@ impl LayoutState {
             left: left_area,
             logo: logo_area,
             log: log_area,
-            right: right_area,
             modules: modules_area,
             chart: chart_area,
             prompts: prompts_area,

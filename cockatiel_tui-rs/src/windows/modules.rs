@@ -2390,11 +2390,9 @@ mod tests {
             status: "connected".to_string(),
             position: "preprocess".to_string(),
             credentials: Vec::new(),
-            directory: String::new(),
             credential_values: Default::default(),
             config_complete: true,
             alive: true,
-            last_seen: 0,
             avg_ms: None,
             autostart: false,
 

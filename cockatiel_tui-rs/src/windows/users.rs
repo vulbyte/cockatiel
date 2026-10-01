@@ -1010,8 +1010,6 @@ mod tests {
             reprimands: 0,
             channels: Vec::new(),
             flags: "{}".to_string(),
-            created_at: 0,
-            updated_at: 0,
             total_score: score,
             messages_sent: 0,
             rank: 0,

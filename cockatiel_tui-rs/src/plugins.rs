@@ -137,14 +137,6 @@ pub struct Plugin {
     pub directory: PathBuf,
 }
 
-impl Plugin {
-    /// Resolve the plugin's manifest path.
-    #[allow(dead_code)]
-    pub fn manifest_path(&self) -> PathBuf {
-        self.directory.join(MANIFEST_FILENAME)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

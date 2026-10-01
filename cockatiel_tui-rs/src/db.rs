@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use cockatiel_client::proto::*;
-use cockatiel_client::proto::container::Payload;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct CredentialField {
@@ -8,9 +7,6 @@ pub struct CredentialField {
     pub label: String,
     #[serde(default)]
     pub sensitive: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub list: bool,
     #[serde(default)]
     pub optional: bool,
 }
@@ -22,16 +18,10 @@ pub struct ModuleStatus {
     pub status: String,
     pub position: String,
     pub credentials: Vec<CredentialField>,
-    #[allow(dead_code)]
-    pub directory: String,
     pub credential_values: HashMap<String, String>,
-    #[allow(dead_code)]
     pub config_complete: bool,
     /// Engine-reported liveness (false once the probe window expired).
     pub alive: bool,
-    /// Engine-reported last activity (ms epoch).
-    #[allow(dead_code)]
-    pub last_seen: i64,
     /// Rolling average processing time (ms) for the module's last 8 messages,
     /// reported by the engine. `None` until it has completed a message.
     pub avg_ms: Option<f64>,
@@ -63,10 +53,6 @@ pub struct UserSummary {
     /// Channels as "platform:channel_id (handle)" display strings.
     pub channels: Vec<String>,
     pub flags: String,
-    #[allow(dead_code)]
-    pub created_at: i64,
-    #[allow(dead_code)]
-    pub updated_at: i64,
     /// Lifetime score earned (never reduced by spending).
     pub total_score: i64,
     /// Chat messages this user has sent.
@@ -112,8 +98,6 @@ pub struct GlobalStats {
     pub total_messages: u64,
     pub total_users: u64,
     pub total_commands: u64,
-    #[allow(dead_code)]
-    pub mod_actions: u64,
     pub platform_counts: HashMap<String, u64>,
     pub platform_errors: HashMap<String, u64>,
     pub chart_data: Vec<TimeBucket>,
@@ -177,8 +161,6 @@ pub struct GlobalStats {
 pub struct TimeBucket {
     pub timestamp: u64,
     pub counts: HashMap<String, u64>,
-    #[allow(dead_code)]
-    pub errors: u64,
 }
 
 impl Default for GlobalStats {
@@ -187,7 +169,6 @@ impl Default for GlobalStats {
             total_messages: 0,
             total_users: 0,
             total_commands: 0,
-            mod_actions: 0,
             platform_counts: HashMap::new(),
             platform_errors: HashMap::new(),
             chart_data: Vec::new(),
@@ -246,21 +227,6 @@ impl GlobalStats {
             pause_flash_tick: blink,
             ..Default::default()
         };
-    }
-}
-
-#[allow(dead_code)]
-pub fn make_query(sql: &str, query_id: &str) -> Container {
-    Container {
-        version: 1,
-        auth_token: String::new(),
-        module_name: "cockatiel-tui".into(),
-        module_instance_uuid7: String::new(),
-        payload: Some(Payload::DatabaseQuery(DatabaseQuery {
-            query_id: query_id.to_string(),
-            sql: sql.to_string(),
-            params: Vec::new(),
-        })),
     }
 }
 
@@ -435,7 +401,6 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                         let entry = buckets.entry(bucket_ts).or_insert_with(|| TimeBucket {
                             timestamp: bucket_ts as u64,
                             counts: HashMap::new(),
-                            errors: 0,
                         });
                         entry.counts.insert(platform.to_string(), count);
                     }
@@ -468,7 +433,6 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                             .get("credentials")
                             .and_then(|v| serde_json::from_value::<Vec<CredentialField>>(v.clone()).ok())
                             .unwrap_or_default();
-                        let directory = row.get("directory").and_then(|v| v.as_str()).unwrap_or("").to_string();
                         let credential_values: HashMap<String, String> = row
                             .get("credential_values")
                             .and_then(|v| v.as_object())
@@ -480,7 +444,6 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                             .unwrap_or_default();
                         let config_complete = row.get("config_complete").and_then(|v| v.as_bool()).unwrap_or(false);
                         let alive = row.get("alive").and_then(|v| v.as_bool()).unwrap_or(true);
-                        let last_seen = row.get("last_seen").and_then(|v| v.as_i64()).unwrap_or(0);
                         let avg_ms = row.get("avg_ms").and_then(|v| v.as_f64());
                         let autostart = row.get("autostart").and_then(|v| v.as_bool()).unwrap_or(false);
                         let authority = row.get("authority").and_then(|v| v.as_u64()).unwrap_or(1);
@@ -491,11 +454,9 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                             status,
                             position: position.to_string(),
                             credentials,
-                            directory,
                             credential_values,
                             config_complete,
                             alive,
-                            last_seen,
                             avg_ms,
                             autostart,
                             authority,
@@ -597,8 +558,6 @@ fn parse_user(v: &serde_json::Value) -> Option<UserSummary> {
         reprimands: v.get("reprimands").and_then(|x| x.as_i64()).unwrap_or(0),
         channels,
         flags: v.get("flags").and_then(|x| x.as_str()).unwrap_or("{}").to_string(),
-        created_at: v.get("created_at").and_then(|x| x.as_i64()).unwrap_or(0),
-        updated_at: v.get("updated_at").and_then(|x| x.as_i64()).unwrap_or(0),
         total_score: v.get("total_score").and_then(|x| x.as_i64()).unwrap_or(0),
         messages_sent: v.get("messages_sent").and_then(|x| x.as_i64()).unwrap_or(0),
         rank: v.get("rank").and_then(|x| x.as_i64()).unwrap_or(0),
@@ -920,11 +879,9 @@ mod tests {
                 status: "connected".into(),
                 position: "preprocess".into(),
                 credentials: Vec::new(),
-                directory: String::new(),
                 credential_values: Default::default(),
                 config_complete: true,
                 alive: true,
-                last_seen: 1,
                 avg_ms: None,
                 autostart: false,
 

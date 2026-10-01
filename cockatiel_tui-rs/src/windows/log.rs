@@ -55,10 +55,8 @@ impl LogFilter {
 }
 
 pub struct LogWindow {
-    #[allow(dead_code)]
     pub entries: VecDeque<LogEntry>,
     pub filter: LogFilter,
-    #[allow(dead_code)]
     pub max_entries: usize,
     pub scroll: usize,
 }
@@ -73,7 +71,6 @@ impl LogWindow {
         }
     }
 
-    #[allow(dead_code)]
     pub fn push(&mut self, entry: LogEntry) {
         if self.entries.len() >= self.max_entries {
             self.entries.pop_front();
