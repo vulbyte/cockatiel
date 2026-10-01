@@ -405,7 +405,17 @@ impl UserDatabase {
             let messages_sent: i64 = row.get(13)?;
 
             let channels = self.get_channels(&user_uuid).await?;
-            let rank = self.compute_rank(&user_uuid, score, total_score, commendations, reprimands, messages_sent, created_at).await;
+            let rank = self
+                .compute_rank(
+                    &user_uuid,
+                    score as i32,
+                    total_score as i32,
+                    commendations as i32,
+                    reprimands as i32,
+                    messages_sent as i32,
+                    created_at,
+                )
+                .await;
 
             Ok(Some(User {
                 uuid7: user_uuid,
@@ -414,15 +424,15 @@ impl UserDatabase {
                 is_moderator: is_moderator != 0,
                 is_admin: is_admin != 0,
                 is_owner: is_owner != 0,
-                score,
-                commendations,
-                reprimands,
+                score: score as i32,
+                commendations: commendations as i32,
+                reprimands: reprimands as i32,
                 channels,
                 flags,
                 created_at,
                 updated_at,
-                total_score,
-                messages_sent,
+                total_score: total_score as i32,
+                messages_sent: messages_sent as i32,
                 rank,
             }))
         } else {
@@ -470,7 +480,7 @@ impl UserDatabase {
     pub async fn adjust_score(
         &self,
         uuid7: &str,
-        delta: i64,
+        delta: i32,
         is_commendation: bool,
     ) -> Result<Option<User>, Box<dyn std::error::Error>> {
         let conn = self.conn().await?;
@@ -505,7 +515,7 @@ impl UserDatabase {
     pub async fn adjust_score_only(
         &self,
         uuid7: &str,
-        delta: i64,
+        delta: i32,
     ) -> Result<Option<User>, Box<dyn std::error::Error>> {
         let conn = self.conn().await?;
         let now = Self::now_ms();
@@ -549,7 +559,7 @@ impl UserDatabase {
     /// the guard is verified by the pre-read (we only attempt when score >=
     /// amount) and the single-statement `WHERE score >= ?amount` makes the
     /// deduct atomic under concurrency.
-    pub async fn deduct_score(&self, uuid7: &str, amount: i64) -> Result<Option<User>, Box<dyn std::error::Error>> {
+    pub async fn deduct_score(&self, uuid7: &str, amount: i32) -> Result<Option<User>, Box<dyn std::error::Error>> {
         if amount <= 0 {
             return self.get_user_by_uuid(uuid7).await;
         }
@@ -592,11 +602,11 @@ impl UserDatabase {
     pub async fn compute_rank(
         &self,
         uuid7: &str,
-        _score: i64,
-        total_score: i64,
-        _commendations: i64,
-        reprimands: i64,
-        messages_sent: i64,
+        _score: i32,
+        total_score: i32,
+        _commendations: i32,
+        reprimands: i32,
+        messages_sent: i32,
         _created_at: i64,
     ) -> f32 {
         let cfg = self.rank_config().await;
