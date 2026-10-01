@@ -6,7 +6,8 @@ use futures_util::{SinkExt, StreamExt};
 use prost::Message;
 use uuid::Uuid;
 use cockatiel_client::proto::*;
-use cockatiel_client::proto::container::Payload;
+use cockatiel_client::proto::container_for_engine::Payload as EnginePayload;
+use cockatiel_client::proto::container_for_module::Payload as ModulePayload;
 
 use crate::ws_client::{WsCommand, WsEvent};
 
@@ -80,7 +81,7 @@ async fn handle_child(
             _ => continue,
         };
 
-        let container = match Container::decode(data.as_slice()) {
+        let container = match ContainerForEngine::decode(data.as_slice()) {
             Ok(c) => c,
             Err(e) => {
                 crate::app::supervisor_log_global(format!("WS server: decode error: {}", e));
@@ -89,7 +90,7 @@ async fn handle_child(
         };
 
         match container.payload {
-            Some(Payload::ConnectionRequest(_req)) => {
+            Some(EnginePayload::ConnectionRequest(_req)) => {
                 // For parent mode, pin is 0 and we use auth_token for validation
                 // The child sends auth_token in the Container.auth_token field
                 if container.auth_token != auth_token {
@@ -98,12 +99,11 @@ async fn handle_child(
                 }
 
                 let my_uuid = Uuid::now_v7().to_string();
-                let return_msg = Container {
-                    version: 1,
+                let return_msg = ContainerForModule {
+                    version: 2,
                     auth_token: String::new(),
-                    module_name: "cockatiel-tui-child".into(),
                     module_instance_uuid7: String::new(),
-                    payload: Some(Payload::ConnectionRequestReturn(ConnectionRequestReturn {
+                    payload: Some(ModulePayload::ConnectionRequestReturn(ConnectionRequestReturn {
                         new_port: 0,
                         module_instance_uuid7: my_uuid.clone(),
                     })),
@@ -132,7 +132,7 @@ async fn handle_child(
             _ => continue,
         };
 
-        if let Ok(container) = Container::decode(data.as_slice()) {
+        if let Ok(container) = ContainerForEngine::decode(data.as_slice()) {
             if container.auth_token == my_uuid {
                 break;
             }
@@ -149,12 +149,11 @@ async fn handle_child(
         loop {
             match rx.recv().await {
                 Ok(WsEvent::Log { source, message, event_type: _ }) => {
-                    let msg = Container {
-                        version: 1,
+                    let msg = ContainerForModule {
+                        version: 2,
                         auth_token: my_uuid.clone(),
-                        module_name: "cockatiel-tui".into(),
                         module_instance_uuid7: my_uuid.clone(),
-                        payload: Some(Payload::Log(Log {
+                        payload: Some(ModulePayload::Log(Log {
                             log: format!("[{}] {}", source, message),
                             blob: Vec::new(),
                         })),
@@ -173,12 +172,11 @@ async fn handle_child(
                 // userdb queries) are forwarded so the child runs the same
                 // `update_stats_from_query` merge into its GlobalStats.
                 Ok(WsEvent::QueryResult { result, .. }) => {
-                    let msg = Container {
-                        version: 1,
+                    let msg = ContainerForModule {
+                        version: 2,
                         auth_token: my_uuid.clone(),
-                        module_name: "cockatiel-tui".into(),
                         module_instance_uuid7: my_uuid.clone(),
-                        payload: Some(Payload::DatabaseQueryResult(result)),
+                        payload: Some(ModulePayload::DatabaseQueryResult(result)),
                     };
                     if sink
                         .send(tokio_tungstenite::tungstenite::Message::Binary(
@@ -191,12 +189,11 @@ async fn handle_child(
                     }
                 }
                 Ok(WsEvent::Connected) => {
-                    let msg = Container {
-                        version: 1,
+                    let msg = ContainerForModule {
+                        version: 2,
                         auth_token: my_uuid.clone(),
-                        module_name: "cockatiel-tui".into(),
                         module_instance_uuid7: my_uuid.clone(),
-                        payload: Some(Payload::Log(Log {
+                        payload: Some(ModulePayload::Log(Log {
                             log: "parent connected".into(),
                             blob: Vec::new(),
                         })),
@@ -224,13 +221,13 @@ async fn handle_child(
             let Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) = msg else {
                 continue;
             };
-            let Ok(container) = Container::decode(data.as_slice()) else {
+            let Ok(container) = ContainerForEngine::decode(data.as_slice()) else {
                 continue;
             };
             if container.auth_token != child_uuid {
                 continue;
             }
-            if let Some(Payload::DatabaseQuery(query)) = container.payload {
+            if let Some(EnginePayload::DatabaseQuery(query)) = container.payload {
                 let _ = ws_command_tx.send(WsCommand::SendQuery {
                     query_id: query.query_id,
                     sql: query.sql,

@@ -8,7 +8,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 
 use cockatiel_client::proto::*;
-use cockatiel_client::proto::container::Payload;
+use cockatiel_client::proto::container_for_engine::Payload as EnginePayload;
+use cockatiel_client::proto::container_for_module::Payload as ModulePayload;
 
 use crate::db;
 
@@ -196,12 +197,12 @@ impl WsClient {
 
         // Single handshake: send ConnectionRequest with PIN (or auth_token for reconnection)
         let module_name = if self.parent_mode { "cockatiel-tui-child" } else { "cockatiel-tui" };
-        let request = Container {
-            version: 1,
+        let request = ContainerForEngine {
+            version: 2,
             auth_token: if self.auth_token.is_empty() { String::new() } else { self.auth_token.clone() },
             module_name: module_name.into(),
             module_instance_uuid7: if self.instance_uuid7.is_empty() { String::new() } else { self.instance_uuid7.clone() },
-            payload: Some(Payload::ConnectionRequest(ConnectionRequest {
+            payload: Some(EnginePayload::ConnectionRequest(ConnectionRequest {
                 pin: self.pin as i32,
                 process_position: 4,
                 priority: 1,
@@ -235,9 +236,9 @@ impl WsClient {
             let WsMessage::Binary(data) = response_msg else {
                 continue;
             };
-            let response = Container::decode(data.as_ref())?;
+            let response = ContainerForModule::decode(data.as_ref())?;
             match response.payload {
-                Some(Payload::ConnectionRequestReturn(ret)) => {
+                Some(ModulePayload::ConnectionRequestReturn(ret)) => {
                     if ret.module_instance_uuid7.is_empty() {
                         // Engine rejected the connection. Downgrade the identity so
                         // the run() retry loop tries the next fallback instead of
@@ -255,24 +256,24 @@ impl WsClient {
                     got_return = true;
                     break;
                 }
-                Some(Payload::Log(log)) => {
+                Some(ModulePayload::Log(log)) => {
                     let _ = self.event_tx.send(WsEvent::Log {
-                        source: response.module_name,
+                        source: "engine".to_string(),
                         message: log.log,
                         event_type: 1,
                     });
                 }
-                Some(Payload::Prompt(prompt)) => {
+                Some(ModulePayload::Prompt(prompt)) => {
                     let _ = self.event_tx.send(WsEvent::Prompt(prompt));
                 }
-                Some(Payload::AuthVerify(_)) => {
+                Some(ModulePayload::AuthVerify(_)) => {
                     // Answer the liveness probe like any module.
-                    let reply = Container {
-                        version: 1,
+                    let reply = ContainerForEngine {
+                        version: 2,
                         auth_token: if self.auth_token.is_empty() { String::new() } else { self.auth_token.clone() },
                         module_name: if self.parent_mode { "cockatiel-tui-child" } else { "cockatiel-tui" }.into(),
                         module_instance_uuid7: if self.instance_uuid7.is_empty() { String::new() } else { self.instance_uuid7.clone() },
-                        payload: Some(Payload::AuthVerify(AuthVerify {
+                        payload: Some(EnginePayload::AuthVerify(AuthVerify {
                             cur_auth: self.auth_token.clone(),
                         })),
                     };
@@ -303,12 +304,12 @@ impl WsClient {
             // forwarded events (logs, query results) and forwards its own
             // one-shot queries back to the parent.
             self.auth_token = self.instance_uuid7.clone();
-            let auth_cont = Container {
-                version: 1,
+            let auth_cont = ContainerForEngine {
+                version: 2,
                 auth_token: self.instance_uuid7.clone(),
                 module_name: "cockatiel-tui-child".into(),
                 module_instance_uuid7: self.instance_uuid7.clone(),
-                payload: Some(Payload::ConnectionRequest(ConnectionRequest {
+                payload: Some(EnginePayload::ConnectionRequest(ConnectionRequest {
                     pin: 0,
                     process_position: 4,
                     priority: 1,
@@ -327,7 +328,7 @@ impl WsClient {
                     msg = read.next() => {
                         match msg {
                             Some(Ok(WsMessage::Binary(data))) => {
-                                let container = match Container::decode(data.as_ref()) {
+                                let container = match ContainerForModule::decode(data.as_ref()) {
                                     Ok(c) => c,
                                     Err(_) => continue,
                                 };
@@ -335,14 +336,14 @@ impl WsClient {
                                     continue;
                                 }
                                 match container.payload {
-                                    Some(Payload::Log(log)) => {
+                                    Some(ModulePayload::Log(log)) => {
                                         let _ = self.event_tx.send(WsEvent::Log {
-                                            source: container.module_name,
+                                            source: "engine".to_string(),
                                             message: log.log,
                                             event_type: 1,
                                         });
                                     }
-                                    Some(Payload::DatabaseQueryResult(result)) => {
+                                    Some(ModulePayload::DatabaseQueryResult(result)) => {
                                         let query_id = result.query_id.clone();
                                         db::update_stats_from_query(&mut self.stats, &query_id, &result);
                                         let _ = self.event_tx.send(WsEvent::QueryResult {
@@ -362,12 +363,12 @@ impl WsClient {
                         let Some(cmd) = cmd else { break };
                         match cmd {
                             WsCommand::SendQuery { query_id, sql } => {
-                                let container = Container {
-                                    version: 1,
+                                let container = ContainerForEngine {
+                                    version: 2,
                                     auth_token: auth_token.clone(),
                                     module_name: "cockatiel-tui-child".into(),
                                     module_instance_uuid7: instance_uuid7.clone(),
-                                    payload: Some(Payload::DatabaseQuery(DatabaseQuery {
+                                    payload: Some(EnginePayload::DatabaseQuery(DatabaseQuery {
                                         query_id,
                                         sql,
                                         params: Vec::new(),
@@ -400,7 +401,7 @@ impl WsClient {
                     msg = read.next() => {
                         match msg {
                             Some(Ok(WsMessage::Binary(data))) => {
-                                let container = Container::decode(data.as_ref())?;
+                                let container = ContainerForModule::decode(data.as_ref())?;
                                 // NOTE: The engine authenticates every message it
                                 // processes before routing, so a container reaching
                                 // this loop is already trusted. Do NOT filter on
@@ -410,14 +411,14 @@ impl WsClient {
                                 // token, neither of which matches the TUI's own
                                 // token. Filtering here silently drops every prompt.
                                 match container.payload {
-                                    Some(Payload::Log(log)) => {
+                                    Some(ModulePayload::Log(log)) => {
                                         let _ = self.event_tx.send(WsEvent::Log {
-                                            source: container.module_name,
+                                            source: "engine".to_string(),
                                             message: log.log,
                                             event_type: 1,
                                         });
                                     }
-                                    Some(Payload::DatabaseQueryResult(result)) => {
+                                    Some(ModulePayload::DatabaseQueryResult(result)) => {
                                         let query_id = result.query_id.clone();
                                         let is_userdb = query_id.starts_with("userdb_");
                                         let is_test = query_id == "test_run";
@@ -457,33 +458,33 @@ impl WsClient {
                                         });
                                         let _ = self.event_tx.send(WsEvent::StatsUpdate(self.stats.clone()));
                                     }
-                                    Some(Payload::Err(err)) => {
+                                    Some(ModulePayload::Err(err)) => {
                                         let _ = self.event_tx.send(WsEvent::Log {
-                                            source: container.module_name,
+                                            source: "engine".to_string(),
                                             message: err.log,
                                             event_type: 3,
                                         });
                                     }
-                                    Some(Payload::ModuleControlResult(result)) => {
+                                    Some(ModulePayload::ModuleControlResult(result)) => {
                                         let _ = self.event_tx.send(WsEvent::Log {
                                             source: "engine".into(),
                                             message: result.message,
                                             event_type: if result.success { 1 } else { 3 },
                                         });
                                     }
-                                    Some(Payload::Prompt(prompt)) => {
+                                    Some(ModulePayload::Prompt(prompt)) => {
                                         let _ = self.event_tx.send(WsEvent::Prompt(prompt));
                                     }
-                                    Some(Payload::AuthVerify(_)) => {
+                                    Some(ModulePayload::AuthVerify(_)) => {
                                         // Answer the liveness probe like any
                                         // module, so a quiet TUI is never
                                         // flagged unresponsive and killed.
-                                        let reply = Container {
-                                            version: 1,
+                                        let reply = ContainerForEngine {
+                                            version: 2,
                                             auth_token: auth_token.clone(),
                                             module_name: "cockatiel-tui".into(),
                                             module_instance_uuid7: instance_uuid7.clone(),
-                                            payload: Some(Payload::AuthVerify(AuthVerify {
+                                            payload: Some(EnginePayload::AuthVerify(AuthVerify {
                                                 cur_auth: auth_token.clone(),
                                             })),
                                         };
@@ -515,12 +516,12 @@ impl WsClient {
                         let Some(cmd) = cmd else { break };
                         match cmd {
                             WsCommand::SendQuery { query_id, sql } => {
-                                let container = Container {
-                                    version: 1,
+                                let container = ContainerForEngine {
+                                    version: 2,
                                     auth_token: auth_token.clone(),
                                     module_name: "cockatiel-tui".into(),
                                     module_instance_uuid7: instance_uuid7.clone(),
-                                    payload: Some(Payload::DatabaseQuery(DatabaseQuery {
+                                    payload: Some(EnginePayload::DatabaseQuery(DatabaseQuery {
                                         query_id,
                                         sql,
                                         params: Vec::new(),
@@ -532,12 +533,12 @@ impl WsClient {
                                 }
                             }
                             WsCommand::SendPromptResponse { prompt_id, accepted, reason } => {
-                                let container = Container {
-                                    version: 1,
+                                let container = ContainerForEngine {
+                                    version: 2,
                                     auth_token: auth_token.clone(),
                                     module_name: "cockatiel-tui".into(),
                                     module_instance_uuid7: instance_uuid7.clone(),
-                                    payload: Some(Payload::PromptResponse(PromptResponse {
+                                    payload: Some(EnginePayload::PromptResponse(PromptResponse {
                                         prompt_id_uuid7: prompt_id,
                                         accepted,
                                         reason,
@@ -549,12 +550,12 @@ impl WsClient {
                                 }
                             }
                             WsCommand::SendLog { source, message } => {
-                                let container = Container {
-                                    version: 1,
+                                let container = ContainerForEngine {
+                                    version: 2,
                                     auth_token: auth_token.clone(),
                                     module_name: "cockatiel-tui".into(),
                                     module_instance_uuid7: instance_uuid7.clone(),
-                                    payload: Some(Payload::Log(Log {
+                                    payload: Some(EnginePayload::Log(Log {
                                         log: format!("[{}] {}", source, message),
                                         blob: Vec::new(),
                                     })),
@@ -577,12 +578,12 @@ impl WsClient {
                             continue;
                         }
                         for (query_id, sql) in db::get_pending_queries() {
-                            let container = Container {
-                                version: 1,
+                            let container = ContainerForEngine {
+                                version: 2,
                                 auth_token: auth_token.clone(),
                                 module_name: "cockatiel-tui".into(),
                                 module_instance_uuid7: instance_uuid7.clone(),
-                                payload: Some(Payload::DatabaseQuery(DatabaseQuery {
+                                payload: Some(EnginePayload::DatabaseQuery(DatabaseQuery {
                                     query_id: query_id.to_string(),
                                     sql,
                                     params: Vec::new(),
