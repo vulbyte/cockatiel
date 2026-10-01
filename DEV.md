@@ -191,7 +191,12 @@ Example (strict JSON):
 
 **User database.** `cockatiel_user_database-rs` is a separate WebSocket service holding users, scores, roles, and per-user key/values. The engine is its only privileged client; mod commands (`commend`, `reprimand`, `ban`, `timeout`) map onto it. Platform roles (owner/mod/sponsor) are verified on login and merged with the user-db tier.
 
-**TUI as supervisor.** `cockatiel_tui-rs` is the operator's control surface. It launches the engine + user database, discovers and registers modules, starts/stops/rebuilds them (prebuilt binary → rebuild → crash-recovery ladder), edits their `.env`/`config.json` in place, answers approval/credential prompts, and streams live logs.
+**TUI as supervisor.** `cockatiel_tui_v2-rs` (the v2 TUI — a Blender-inspired
+BSP layout engine) is the operator's control surface. It launches the engine +
+user database, discovers and registers modules, starts/stops/rebuilds them
+(prebuilt binary → rebuild → crash-recovery ladder), edits their
+`.env`/`config.json` in place, answers approval/credential prompts, and streams
+live logs. The v1 TUI is retired and archived under `legacy/cockatiel_tui-rs/`.
 
 **Security model.**
 
