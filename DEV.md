@@ -7,19 +7,61 @@ the engine runs at x location, and looks for the following types of modules to c
 ## module overview
 
 ### the connection standard
-> every modules needs to do this
+> every module needs to do this
 
+Every module is a process that connects to the engine over **WSS** (TLS; the
+engine trusts only its self-signed cert, auto-pinned when `COCKATIEL_TLS_CERT`
+points at `cockatiel_engine-rs/tls/cockatiel-cert.pem`, otherwise plain `ws://`).
+On connect it sends a `ConnectionRequest` with a PIN (single-use, printed by the
+engine on boot; `config.json` holds `engine_ip`/`engine_port`/`pin`); the engine
+replies with a JWT `auth_token` + `module_instance_uuid7`. From then on every
+`Container` carries `auth_token` + `module_name` + `module_instance_uuid7`.
+
+Lifecycle requirements:
+- Answer `AuthVerify` probes or the watchdog severs you (the one-file clients
+  auto-answer; direct socket readers must answer manually).
+- Re-register your `CommandsPayload` on every fresh connection — the engine
+  forgets a session when the socket drops.
+- Reconnect with backoff when the engine drops the socket (`reconnect_base_secs`
+  doubling to `reconnect_max_secs`); a module that exits on disconnect leaves the
+  watchdog to sever it.
+- Your manifest (`cockatiel_module_info.json`) declares the pipeline stage
+  (`capabilities`), launch/build commands, binary routes, per-module gates
+  (`authority`/`min_rank`/`price`), and a `credentials` array describing the
+  settings the TUI edits. The engine trusts the manifest `capabilities` over the
+  requested `process_position` at registration time.
 
 ### adapters
 the adapters are expected to be bi-directional, send and receive. 
 > if you do not want your adapter to send messages, simply except the prompt and scilently drop it. cockatiel does not validate sent messages are send, only requests the module to do so.
 
+Adapters declare `capabilities: "input"`, so they sit in the `inputs` stage, not
+pre-process. They feed raw chat into the engine as `MessagePreProcess`, and can
+send to a platform via `SendToPlatforms` (optionally targeting one
+`channel_id`). They also push `ChannelStats` so modules can query live viewer
+counts (`channel_viewers`).
+
 ### pre-process
-pre-process modules are 
+pre-process modules are run **concurrently** on every message before the
+sequential in-process chain. They can rewrite the message, hold it for audit, or
+pass it through. They ack with `MessagePreProcess` (content preserved unless they
+changed it). Command-owning pre-process modules (e.g. `clip`, `events`,
+`fake-input`) only receive messages routed to their commands plus catch-alls.
+Pre-process order is alphabetical; content-modified modules (banned-words,
+score-messages) run as `inprocess` to guarantee ordering.
 
 ### in-process
+in-process modules run **sequentially** in config order, each seeing the
+`processed_message` produced by the previous one. They ack with
+`MessageInProcess`, carrying `processed_message` (what the message became) and
+`abandon_message` (drop it). The chain is ordered: `language-constrainer` first
+(holds out-of-language messages for audit), then `banned-words` (censorship on
+whatever the language gate let through), then the rest in config order.
 
 ### post-process
+post-process modules run **concurrently** after the chain, on the finished
+message, and can return anything (they are display/archival consumers —
+`term-chat`, `audit-viewer`, `tts-rs`). They ack with `MessagePostProcess`.
 
 
 ## One-file client imports
