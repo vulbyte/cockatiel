@@ -1,6 +1,4 @@
-pub mod proto {
-    include!(concat!(env!("OUT_DIR"), "/cockatiel_userdb.v1.rs"));
-}
+pub use cockatiel_proto::proto;
 
 mod db;
 

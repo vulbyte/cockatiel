@@ -199,12 +199,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cockatiel-proto"
+version = "0.1.0"
+source = "git+https://github.com/vulbyte/cockatiel_proto?rev=80d335b1ed12c8c27e63550bf952afbc87931362#80d335b1ed12c8c27e63550bf952afbc87931362"
+dependencies = [
+ "prost 0.14.4",
+ "prost-build",
+]
+
+[[package]]
 name = "cockatiel-user-database"
 version = "0.1.0"
 dependencies = [
+ "cockatiel-proto",
  "futures-util",
  "prost 0.14.4",
- "prost-build",
  "serde",
  "serde_json",
  "tokio",
