@@ -350,53 +350,43 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
         }
         return;
     }
-    if let Some(rows) = parse_query_result(result) {
-        match query_id {
-            "total_messages" => {
-                if let Some(row) = rows.first() {
-                    stats.total_messages = row.get("COUNT(*)").or_else(|| row.get("count")).and_then(|v| v.as_u64()).unwrap_or(0);
-                }
-            }
-            "total_users" => {
-                if let Some(row) = rows.first() {
-                    stats.total_users = row.get("COUNT(DISTINCT user_uuid7)").or_else(|| row.get("count")).and_then(|v| v.as_u64()).unwrap_or(0);
-                }
-            }
-            "total_commands" => {
-                if let Some(row) = rows.first() {
-                    stats.total_commands = row.get("COUNT(*)").or_else(|| row.get("count")).and_then(|v| v.as_u64()).unwrap_or(0);
-                }
-            }
-            "platform_counts" => {
-                stats.platform_counts.clear();
-                for row in &rows {
+    // stats is a JSON object (not a row array) from the engine's Phase-2
+    // `stats` op: all timeline aggregates in one response.
+    if query_id == "stats" && result.success {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&result.result_blob) {
+            stats.total_messages = v.get("total_messages").and_then(|x| x.as_u64()).unwrap_or(0);
+            stats.total_users = v.get("total_users").and_then(|x| x.as_u64()).unwrap_or(0);
+            stats.total_commands = v.get("total_commands").and_then(|x| x.as_u64()).unwrap_or(0);
+            stats.platform_counts.clear();
+            if let Some(arr) = v.get("platform_counts").and_then(|x| x.as_array()) {
+                for row in arr {
                     if let (Some(platform), Some(count)) = (
-                        row.get("platform").and_then(|v| v.as_str()),
-                        row.get("COUNT(*)").or_else(|| row.get("count")).and_then(|v| v.as_u64()),
+                        row.get("platform").and_then(|x| x.as_str()),
+                        row.get("n").and_then(|x| x.as_u64()),
                     ) {
                         stats.platform_counts.insert(platform.to_string(), count);
                     }
                 }
             }
-            "platform_errors" => {
-                stats.platform_errors.clear();
-                for row in &rows {
+            stats.platform_errors.clear();
+            if let Some(arr) = v.get("platform_errors").and_then(|x| x.as_array()) {
+                for row in arr {
                     if let (Some(platform), Some(count)) = (
-                        row.get("platform").and_then(|v| v.as_str()),
-                        row.get("COUNT(*)").or_else(|| row.get("count")).and_then(|v| v.as_u64()),
+                        row.get("platform").and_then(|x| x.as_str()),
+                        row.get("n").and_then(|x| x.as_u64()),
                     ) {
                         stats.platform_errors.insert(platform.to_string(), count);
                     }
                 }
             }
-            "chart_data" => {
-                stats.chart_data.clear();
+            stats.chart_data.clear();
+            if let Some(arr) = v.get("chart_data").and_then(|x| x.as_array()) {
                 let mut buckets: HashMap<i64, TimeBucket> = HashMap::new();
-                for row in &rows {
+                for row in arr {
                     if let (Some(bucket_ts), Some(platform), Some(count)) = (
-                        row.get("bucket").and_then(|v| v.as_i64()),
-                        row.get("platform").and_then(|v| v.as_str()),
-                        row.get("COUNT(*)").or_else(|| row.get("count")).and_then(|v| v.as_u64()),
+                        row.get("bucket").and_then(|x| x.as_i64()),
+                        row.get("platform").and_then(|x| x.as_str()),
+                        row.get("n").and_then(|x| x.as_u64()),
                     ) {
                         let entry = buckets.entry(bucket_ts).or_insert_with(|| TimeBucket {
                             timestamp: bucket_ts as u64,
@@ -409,7 +399,11 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                 chart_data.sort_by_key(|b| b.timestamp);
                 stats.chart_data = chart_data;
             }
-            "module_list" => {
+        }
+        return;
+    }
+    if let Some(rows) = parse_query_result(result) {
+        if query_id == "module_list" {
                 stats.module_entries.clear();
                 for row in &rows {
                     if let Some(name) = row.get("name").and_then(|v| v.as_str()) {
@@ -463,31 +457,17 @@ pub fn update_stats_from_query(stats: &mut GlobalStats, query_id: &str, result: 
                         });
                     }
                 }
-            }
-            _ => {}
         }
     }
 }
 
 pub fn get_pending_queries() -> Vec<(&'static str, String)> {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let five_min_ago = now_ms - (5 * 60 * 1000);
-    let bucket_ms = 10_000i64;
-
+    // The engine's `stats` virtual query returns ALL timeline aggregates in one
+    // response (Phase 2 replaced the six raw-SQL stats queries that used to be
+    // fired here every poll). db_status / module_list / userdb remain separate
+    // named ops.
     vec![
-        ("total_messages", "SELECT COUNT(*) FROM timeline_events WHERE pipeline_status != 'audit'".to_string()),
-        ("total_users", "SELECT COUNT(DISTINCT user_uuid7) FROM timeline_events WHERE user_uuid7 != '' AND user_uuid7 IS NOT NULL AND pipeline_status != 'audit'".to_string()),
-        ("total_commands", "SELECT COUNT(*) FROM timeline_events WHERE command != '' AND command IS NOT NULL AND pipeline_status != 'audit'".to_string()),
-        ("platform_counts", "SELECT platform, COUNT(*) FROM timeline_events WHERE pipeline_status != 'audit' GROUP BY platform".to_string()),
-        ("platform_errors", "SELECT platform, COUNT(*) FROM timeline_events WHERE pipeline_status = 'failed' GROUP BY platform".to_string()),
-        ("chart_data", format!(
-            "SELECT (persisted_at / {bucket}) * {bucket} AS bucket, platform, COUNT(*) FROM timeline_events WHERE persisted_at > {since} AND pipeline_status != 'audit' GROUP BY bucket, platform ORDER BY bucket ASC",
-            bucket = bucket_ms,
-            since = five_min_ago,
-        )),
+        ("stats", "{}".to_string()),
         ("module_list", "SELECT 1".to_string()),  // virtual query, engine returns module list
         ("db_status", "SELECT 1".to_string()),  // virtual query: timeline/userdb backup status + pipeline_paused
         ("userdb_list_users", r#"{"limit":500}"#.to_string()),  // virtual query: user DB list (score DESC)
