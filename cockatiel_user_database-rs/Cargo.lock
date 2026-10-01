@@ -201,7 +201,7 @@ dependencies = [
 [[package]]
 name = "cockatiel-proto"
 version = "0.1.0"
-source = "git+https://github.com/vulbyte/cockatiel_proto?rev=47776efcb4a0dbb7959b403b107dd6bc93f4216f#47776efcb4a0dbb7959b403b107dd6bc93f4216f"
+source = "git+https://github.com/vulbyte/cockatiel_proto?rev=1f5a3bfc60268a102d441d5ab42551c77908bc0a#1f5a3bfc60268a102d441d5ab42551c77908bc0a"
 dependencies = [
  "prost 0.14.4",
  "prost-build",

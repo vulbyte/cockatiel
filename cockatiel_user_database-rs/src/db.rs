@@ -75,45 +75,79 @@ pub struct UserDatabase {
 /// The rank formula's tunable parameters. Lives in the user database's own
 /// `config.json`; a streamer edits them there (via the TUI's user-db config
 /// editor) and the db re-reads the file on a short ticker.
+///
+/// The rank is a 0-1 float (numbers for logic; tier NAMES are a display
+/// concern derived from the root `rank_chart.json`). Formula:
+///
+/// ```text
+/// reputation =
+///     (decayed_commends × w_comm)
+///   + (total_score / score_divisor)
+///   + min(messages_sent / msg_ref, 1.0) × w_act
+///   - (decayed_reprimands × rep_base)
+///   - (reprimands / max(messages_sent, 1)) × rep_density_w
+/// rank = 1 / (1 + e^(-steepness × reputation))   // sigmoid → [0, 1]
+/// ```
+///
+/// All values are 32-bit (the project caps ints/floats at 32-bit; epoch
+/// timestamps are the documented exception and stay 64-bit).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RankConfig {
     /// Age (in days) at which each decay weight kicks in. Must be sorted
-    /// ascending and match `decay_weights` length. An event older than the
-    /// last boundary counts as 0 (fully decayed/"inked").
-    pub decay_boundaries_days: Vec<u64>,
+    /// ascending and match `decay_weights` length. Events are de-emphasised
+    /// only mildly (account age matters much less than it used to).
+    pub decay_boundaries_days: Vec<u32>,
     /// The weight applied to events in each age bucket. `decay_weights[0]` for
     /// events younger than `decay_boundaries_days[0]`, etc.
-    pub decay_weights: Vec<f64>,
-    /// The divisor in the score term: `score / max(account_years, floor) / this`.
-    pub score_divisor: f64,
-    /// Minimum account years used in the score term (floors an account younger
-    /// than this so a brand-new user isn't divided by ~0).
-    pub account_year_floor: f64,
+    pub decay_weights: Vec<f32>,
+    /// Weight per decayed commendation.
+    pub w_comm: f32,
+    /// Divisor for the lifetime-score term: `total_score / score_divisor`.
+    pub score_divisor: f32,
+    /// Reference message count at which the activity bonus saturates.
+    pub msg_ref: f32,
+    /// Weight of the (capped) activity bonus.
+    pub w_act: f32,
+    /// Base penalty per decayed reprimand.
+    pub rep_base: f32,
+    /// Harsh lever: multiplies `reprimands / max(messages_sent, 1)` so a
+    /// low-activity user with many reprimands is pushed hard toward 0.
+    pub rep_density_w: f32,
+    /// Sigmoid steepness; larger = more separation around 0.5.
+    pub steepness: f32,
 }
 
 impl Default for RankConfig {
     fn default() -> Self {
         Self {
-            // 0-1y → 1.0, 1-2y → 0.5, 2-3y → 0.25, 3y+ → 0 (past the last).
-            decay_boundaries_days: vec![365, 730, 1095],
-            decay_weights: vec![1.0, 0.5, 0.25],
-            score_divisor: 100000.0,
-            account_year_floor: 1.0,
+            // Events de-emphasised only mildly with age (0-1y → 1.0, 1-2y →
+            // 0.95, 2-3y → 0.9, 3-4y → 0.8, 4y+ → 0.8). Account age matters
+            // much less than the old 1.0/0.5/0.25/0 curve.
+            decay_boundaries_days: vec![365, 730, 1095, 1460],
+            decay_weights: vec![1.0, 0.95, 0.9, 0.8],
+            w_comm: 1.0,
+            score_divisor: 1000.0,
+            msg_ref: 100.0,
+            w_act: 0.05,
+            rep_base: 1.0,
+            rep_density_w: 5.0,
+            steepness: 0.02,
         }
     }
 }
 
 impl RankConfig {
     /// The decay weight for an event `age_days` old.
-    pub fn weight_for_age(&self, age_days: u64) -> f64 {
+    pub fn weight_for_age(&self, age_days: u32) -> f32 {
         for (i, boundary) in self.decay_boundaries_days.iter().enumerate() {
             if age_days < *boundary {
-                return self.decay_weights.get(i).copied().unwrap_or(0.0);
+                return self.decay_weights.get(i).copied().unwrap_or(0.8);
             }
         }
-        // Older than the last boundary → fully decayed.
-        0.0
+        // Older than the last boundary → the final (mild) weight, never 0:
+        // old standing should still count, just less.
+        self.decay_weights.last().copied().unwrap_or(0.8)
     }
 
     /// Load from `config.json` in the given directory, or defaults if absent.
@@ -534,39 +568,49 @@ impl UserDatabase {
         self.get_user_by_uuid(uuid7).await
     }
 
-    /// The user's rank: `Σ weight(age)` over commendation events minus
-    /// `Σ weight(age)` over reprimand events, plus a normalized score term.
+    /// The user's rank on the 0-1 scale.
     ///
-    /// Events are read from `rating_history` (each carries a `created_at`), and
-    /// each is weighted by its age against the configurable decay
-    /// (`decay_boundaries_days` / `decay_weights`, e.g. 1.0 at 0-1y, 0.5 at
-    /// 1-2y, 0.25 at 2-3y, 0 past 3y). The score term is
-    /// `score / max(account_years, floor) / score_divisor` so spending doesn't
-    /// dominate standing. Rank is computed server-side and returned on every
-    /// user fetch — callers never make a second trip for it.
+    /// ```text
+    /// reputation =
+    ///     (decayed_commends × w_comm)
+    ///   + (total_score / score_divisor)
+    ///   + min(messages_sent / msg_ref, 1.0) × w_act
+    ///   - (decayed_reprimands × rep_base)
+    ///   - (reprimands / max(messages_sent, 1)) × rep_density_w
+    /// rank = 1 / (1 + e^(-steepness × reputation))
+    /// ```
+    ///
+    /// Commendations, lifetime score and message activity drive the rank UP;
+    /// reprimands drive it down, and the density term
+    /// (`reprimands / max(messages_sent, 1)`) is the harsh lever — a
+    /// low-activity user with many reprimands is crushed toward 0, while a
+    /// high-activity user with a few reprimands is barely touched. Account age
+    /// is de-emphasised (decay weights are near-flat and never reach 0). The
+    /// 0-1 number is for logic; tier NAMES are a display concern derived from
+    /// the root `rank_chart.json`.
     #[allow(clippy::too_many_arguments)]
     pub async fn compute_rank(
         &self,
         uuid7: &str,
-        score: i64,
-        _total_score: i64,
+        _score: i64,
+        total_score: i64,
         _commendations: i64,
-        _reprimands: i64,
-        _messages_sent: i64,
-        created_at: i64,
-    ) -> i64 {
+        reprimands: i64,
+        messages_sent: i64,
+        _created_at: i64,
+    ) -> f32 {
         let cfg = self.rank_config().await;
         let now = Self::now_ms();
-        let age_days = |ts: i64| -> u64 {
+        let age_days = |ts: i64| -> u32 {
             let ms = now.saturating_sub(ts).max(0);
-            (ms / 86_400_000) as u64
+            (ms / 86_400_000) as u32
         };
 
         // Decayed event counts from rating_history. `.ok()` drops the non-Send
         // error type immediately so this future stays Send (the connection
         // itself is Send).
-        let mut commend_weighted = 0.0_f64;
-        let mut reprimand_weighted = 0.0_f64;
+        let mut commend_weighted = 0.0_f32;
+        let mut reprimand_weighted = 0.0_f32;
         let conn = self.conn().await.ok();
         if let Some(conn) = conn {
             if let Ok(mut rows) = conn
@@ -589,13 +633,25 @@ impl UserDatabase {
             }
         }
 
-        // Score term: score / max(account_years, floor) / divisor.
-        let account_ms = now.saturating_sub(created_at).max(0);
-        let account_years = (account_ms as f64) / (86_400_000.0_f64 * 365.0);
-        let account_years = account_years.max(cfg.account_year_floor);
-        let score_term = (score as f64) / account_years / cfg.score_divisor;
+        // Reputation (can be negative). Account age is NOT a divisor here —
+        // standing comes from what the user has earned, not how old they are.
+        let messages = messages_sent.max(1) as f32;
+        let reputation = (commend_weighted * cfg.w_comm)
+            + (total_score as f32 / cfg.score_divisor)
+            + ((messages / cfg.msg_ref).min(1.0) * cfg.w_act)
+            - (reprimand_weighted * cfg.rep_base)
+            - ((reprimands as f32 / messages) * cfg.rep_density_w);
 
-        (commend_weighted - reprimand_weighted + score_term).round() as i64
+        // Sigmoid → [0, 1]. A neutral user (no ratings, modest activity) sits
+        // near 0.5; deep negative reputation → ~0; strong positive → ~1.
+        let e = reputation * cfg.steepness;
+        if e >= 0.0 {
+            1.0 / (1.0 + (-e).exp())
+        } else {
+            // Numerically stable for large negative arguments.
+            let ex = e.exp();
+            ex / (1.0 + ex)
+        }
     }
 
     /// A user's rating history: every commend/reprimand event with giver, date
@@ -1042,8 +1098,16 @@ mod tests {
         assert_eq!(t.score, 1);
         assert_eq!(t.total_score, 1);
 
-        // Rank: +1 commend (weight 1.0) - 1 reprimand (weight 1.0) = 0 (+ score term ~0).
-        assert_eq!(t.rank, 0, "recent commend and reprimand cancel in rank");
+        // Rank on the 0-1 scale. The commend (+1, weight 1.0) and reprimand
+        // (−1, weight 1.0) cancel in the base terms, but the density lever
+        // (reprimands / max(messages_sent,1) × rep_density_w) pushes a
+        // zero-message user who got reprimanded below neutral 0.5.
+        assert!(
+            (0.0..1.0).contains(&t.rank),
+            "rank must be in [0,1], got {}",
+            t.rank
+        );
+        assert!(t.rank < 0.5, "low-activity reprimanded user should sit below neutral, got {}", t.rank);
     }
 
     #[tokio::test]
