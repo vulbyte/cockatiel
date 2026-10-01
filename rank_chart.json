@@ -1,0 +1,14 @@
+{
+  "tiers": [
+    { "name": "opal",     "min": 0.9 },
+    { "name": "diamond",  "min": 0.8 },
+    { "name": "ruby",     "min": 0.7 },
+    { "name": "emerald",  "min": 0.6 },
+    { "name": "sapphire", "min": 0.5 },
+    { "name": "gold",     "min": 0.4 },
+    { "name": "silver",   "min": 0.3 },
+    { "name": "bronze",   "min": 0.2 },
+    { "name": "copper",   "min": 0.1 },
+    { "name": "coal",     "min": 0.0 }
+  ]
+}
