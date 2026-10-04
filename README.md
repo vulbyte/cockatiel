@@ -77,6 +77,12 @@ On startup the TUI **automatically launches the engine and the user database**
 (you can disable this later under the TUI config, `launch_engine`). It generates
 and wires the credentials (PIN, tokens) between them for you — no manual setup.
 
+> The engine also **auto-discovers everything in `./modules/` on every start**:
+> each module with a `cockatiel_module_info.json` is registered, wired into the
+> pipeline, and given a `config.json` that points it at the engine — you never
+> have to add a module by hand. Existing configs and your earlier choices
+> (approvals, stage moves, credentials) are always preserved.
+
 ### 5. Connect a platform
 
 From the **modules window** in the TUI (a pane in the default layout — press
