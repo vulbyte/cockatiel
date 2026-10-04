@@ -131,7 +131,10 @@ from the TUI.
 
 - **`error: failed to run custom build command` during build** — usually a
   missing Rust build dependency. Ensure Rust is up to date (`rustup update
-  stable`) and that the crate's own README prerequisites are met.
+  stable`). A `Could not find protoc` error is NOT a missing dependency: the
+  protocol crates now ship a vendored `protoc` binary, so no system
+  `protobuf-compiler` install is required — update the repo (`git pull` +
+  `git submodule update --init --recursive`) to pull in the fix.
 - **TUI starts but no modules appear** — the modules window lists discovered
   modules; if it's empty, check that the repo was cloned with `--recurse-
   submodules` and run `git submodule update --init --recursive`.
