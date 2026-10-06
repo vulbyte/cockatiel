@@ -1,0 +1,159 @@
+{
+  "lock_version": 1,
+  "components": {
+    "banned-words": {
+      "path": "modules/cockatiel_module-banned_words-rs",
+      "sha": "9eaf5f0e5d48b4915ccdab1cef1c520fb385fda3",
+      "version": "0.2.0",
+      "repo": "vulbyte/cockatiel_module-banned_words-rs",
+      "kind": "module"
+    },
+    "clip": {
+      "path": "modules/cockatiel_module-clip-rs",
+      "sha": "6f4af2d26540fe6ae358292771f7dc2cc0bb186f",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-clip-rs",
+      "kind": "module"
+    },
+    "cockatiel-audit-viewer": {
+      "path": "modules/cockatiel_module-audit_viewer-rs",
+      "sha": "b70f967a1dee0c255c92e2c8e3239759bb38dd06",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-audit_viewer-rs",
+      "kind": "module"
+    },
+    "commend": {
+      "path": "modules/cockatiel_module-commend-rs",
+      "sha": "575b5cbf2179014ed738d02e362a3885a6df1aa5",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-commend-rs",
+      "kind": "module"
+    },
+    "discord-adapter": {
+      "path": "modules/cockatiel_module-discord_adapter-rs",
+      "sha": "c6f7dc4ea47c454eb51ea0e40570075916ffca8c",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-discord_adapter-rs",
+      "kind": "module"
+    },
+    "engine": {
+      "path": "cockatiel_engine-rs",
+      "sha": "c9046dfa4638ee22810eb02c53d99f7281f2c824",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_engine-rs",
+      "kind": "engine"
+    },
+    "events": {
+      "path": "modules/cockatiel_module-events-rs",
+      "sha": "0d863befc88b2dfe9ebca687edd05901a286cd49",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-events-rs",
+      "kind": "module"
+    },
+    "fake-input": {
+      "path": "modules/cockatiel_module-fake_input-rs",
+      "sha": "60b99a87cc6169beda7e25b232b8823cb34ada6c",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-fake_input-rs",
+      "kind": "module"
+    },
+    "kick-adapter": {
+      "path": "modules/cockatiel_module-kick_adapter-rs",
+      "sha": "da4adcc626173ac17ba75964821a02cce120b725",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-kick_adapter-rs",
+      "kind": "module"
+    },
+    "language-constrainer": {
+      "path": "modules/cockatiel_module-language_constrainer-rs",
+      "sha": "6ccf479d7f74add9c67fc8e08c02c1d9f1e6e692",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-language_constrainer-rs",
+      "kind": "module"
+    },
+    "reprimand": {
+      "path": "modules/cockatiel_module-reprimand-rs",
+      "sha": "bb75f6bd32cb222356f9e707f94daaba2dfccfbf",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-reprimand-rs",
+      "kind": "module"
+    },
+    "score-messages": {
+      "path": "modules/cockatiel_module-score_messages-rs",
+      "sha": "a7c2e61e968c3f172a0c04d120428f6020670220",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-score_messages-rs",
+      "kind": "module"
+    },
+    "soundboard": {
+      "path": "modules/cockatiel_module-soundboard-rs",
+      "sha": "023b5c1075dc0de7305abe9ec0d188513aa6a63f",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-soundboard-rs",
+      "kind": "module"
+    },
+    "stress-test": {
+      "path": "modules/cockatiel_module-stress_test-rs",
+      "sha": "c67503a1a44385b9ba5822099993d5acb58ac1ae",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-stress_test-rs",
+      "kind": "module"
+    },
+    "term-chat": {
+      "path": "modules/cockatiel_module-term_chat-rs",
+      "sha": "0b4c6ae33de4d03818133790b91fe95ecdaa27b7",
+      "version": "0.2.0",
+      "repo": "vulbyte/cockatiel_module-term_chat-rs",
+      "kind": "module"
+    },
+    "test-runner": {
+      "path": "cockatiel_test_runner-rs",
+      "sha": null,
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel",
+      "kind": "test-runner"
+    },
+    "tts-experimental-py": {
+      "path": "modules/cockatiel_module-tts_experimental_py",
+      "sha": "4db1b777447a7c7411eba43a5374607eff2922c1",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-tts_experimental_py",
+      "kind": "module"
+    },
+    "tts-rs": {
+      "path": "modules/cockatiel_module-tts-rs",
+      "sha": "b4bfa9f0426f19b80fdcfe217a00b5b210c0064a",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-tts-rs",
+      "kind": "module"
+    },
+    "tui": {
+      "path": "cockatiel_tui_v2-rs",
+      "sha": "9d9844c23ddebdc8a44eeb57e974bd70b3bf809d",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_tui_v2-rs",
+      "kind": "tui"
+    },
+    "twitch-adapter": {
+      "path": "modules/cockatiel_module-twitch_adapter-rs",
+      "sha": "c5f27f7c5eb908dfaabcd6331f5f2f357a51f288",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-twitch_adapter-rs",
+      "kind": "module"
+    },
+    "user-db": {
+      "path": "cockatiel_user_database-rs",
+      "sha": null,
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel",
+      "kind": "user-db"
+    },
+    "youtube-adapter": {
+      "path": "modules/cockatiel_module-youtube_adapter-rs",
+      "sha": "cf8f9cfcddeb079cc79690d1818ca7674e9fad6c",
+      "version": "0.1.0",
+      "repo": "vulbyte/cockatiel_module-youtube_adapter-rs",
+      "kind": "module"
+    }
+  }
+}
