@@ -1,0 +1,156 @@
+name: release
+
+# Build, package, gate (doctor), and publish the Cockatiel core components.
+#
+# The heavy lifting lives in scripts/ so it is runnable locally and testable:
+#   scripts/package-release.sh <version> <out-dir>   build + archive + checksum
+#   scripts/doctor-gate.sh                           real engine+user-db+suites
+#   scripts/merge-manifests.py <dist-dir>            fold platform assets back
+#
+# Publishing is PER COMPONENT REPO (engine/tui have their own repos; user-db and
+# test-runner ship from this monorepo). It needs a token that can write to every
+# component repo: set the `RELEASE_TOKEN` secret (a PAT with `repo` scope).
+#
+# NOTE (maintainer): the checked-in `release.assets` maps are updated by
+# `merge-manifests.py`, which writes the working tree. Committing those into the
+# submodule repos and bumping the monorepo gitlinks is left as an explicit,
+# reviewable step rather than an automatic push from CI (see the final step).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.1.0"
+        required: true
+        type: string
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  package:
+    name: package ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   arch: x86_64,  runner: ubuntu-latest,         deps: linux }
+          - { os: linux,   arch: aarch64, runner: ubuntu-24.04-arm,       deps: linux }
+          - { os: windows, arch: x86_64,  runner: windows-latest,         deps: windows }
+          - { os: windows, arch: aarch64, runner: windows-11-vs2026-arm,  deps: windows }
+          - { os: macos,   arch: aarch64, runner: macos-15,               deps: macos }
+          # macOS x86_64: cross-compile on the arm64 runner and verify under
+          # Rosetta (GitHub retired hosted Intel runners). Add once the cross
+          # toolchain step is in place:
+          #   - { os: macos, arch: x86_64, runner: macos-15, deps: macos, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux build dependencies
+        if: matrix.deps == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev libasound2-dev libxdo-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          raw="${{ inputs.version || github.ref_name }}"
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build + package core
+        shell: bash
+        run: scripts/package-release.sh "${{ steps.ver.outputs.version }}" dist
+
+      - name: Doctor gate (real engine + user-db + compliance suites)
+        shell: bash
+        run: scripts/doctor-gate.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          raw="${{ inputs.version || github.ref_name }}"
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+
+      # Union every platform's asset entry into the checked-in manifests. This
+      # is what makes the launcher find (and checksum-verify) each archive.
+      - name: Merge per-platform manifests
+        run: python3 scripts/merge-manifests.py dist
+
+      - name: Publish per-component releases
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          tag="v$version"
+          declare -A REPO=(
+            [engine]=vulbyte/cockatiel_engine-rs
+            [tui]=vulbyte/cockatiel_tui_v2-rs
+            [user-db]=vulbyte/cockatiel
+            [cockatiel-test-runner]=vulbyte/cockatiel
+          )
+          for name in "${!REPO[@]}"; do
+            repo="${REPO[$name]}"
+            gh release view "$tag" --repo "$repo" >/dev/null 2>&1 \
+              || gh release create "$tag" --repo "$repo" --title "Cockatiel $version" --notes "Automated release $version"
+            shopt -s nullglob
+            files=(dist/${name}-*)
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "warning: no archives for $name" >&2
+              continue
+            fi
+            gh release upload "$tag" --repo "$repo" --clobber "${files[@]}"
+          done
+
+      # The merged manifests are in the working tree. Upload them so the
+      # maintainer (or a follow-up PR job) can fold them into the component
+      # repos and bump the monorepo gitlinks. Doing that automatically from CI
+      # would push to every submodule repo, so it stays a reviewed step.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merged-manifests
+          path: |
+            cockatiel_engine-rs/cockatiel_module_info.json
+            cockatiel_tui_v2-rs/cockatiel_module_info.json
+            cockatiel_user_database-rs/cockatiel_module_info.json
+            cockatiel_test_runner-rs/cockatiel_module_info.json
