@@ -94,7 +94,7 @@ jobs:
         run: |
           cd cockatiel_test_runner-rs
           cargo run -- --suite screening --iterations 25 --pin "$CI_PIN" 2>&1 | tee /tmp/screening.log
-          if ! rg -q "0 failed" /tmp/screening.log; then
+          if ! grep -q "0 failed" /tmp/screening.log; then
             echo "SCREENING NOT GREEN"
             exit 1
           fi
@@ -103,7 +103,7 @@ jobs:
         run: |
           cd cockatiel_test_runner-rs
           cargo run -- --suite hardening --pin "$CI_PIN" 2>&1 | tee /tmp/hardening.log
-          if ! rg -q "0 failed" /tmp/hardening.log; then
+          if ! grep -q "0 failed" /tmp/hardening.log; then
             echo "HARDENING NOT GREEN"
             exit 1
           fi
@@ -113,7 +113,7 @@ jobs:
           cd cockatiel_test_runner-rs
           cargo run -- --suite probe --pin "$CI_PIN" 2>&1 | tee /tmp/probe.log
           # The probe suite fails if a launched module fails its auth_verify probe.
-          if ! rg -q "0 failed" /tmp/probe.log; then
+          if ! grep -q "0 failed" /tmp/probe.log; then
             echo "PROBE NOT GREEN"
             exit 1
           fi
@@ -124,7 +124,7 @@ jobs:
           cargo run -- --suite soak --duration-secs 30 --pin "$CI_PIN" 2>&1 | tee /tmp/soak.log
           # The soak fails if any launched module drops off the live list or
           # stops answering AuthVerify within the full 30s window.
-          if ! rg -q "0 failed" /tmp/soak.log; then
+          if ! grep -q "0 failed" /tmp/soak.log; then
             echo "SOAK NOT GREEN"
             tail -60 /tmp/soak.log
             exit 1
