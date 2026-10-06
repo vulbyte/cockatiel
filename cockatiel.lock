@@ -38,7 +38,7 @@
     },
     "engine": {
       "path": "cockatiel_engine-rs",
-      "sha": "c9046dfa4638ee22810eb02c53d99f7281f2c824",
+      "sha": "58f5fba154cd42be06b2e1f4e8bb12cf9ebd4659",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_engine-rs",
       "kind": "engine"
