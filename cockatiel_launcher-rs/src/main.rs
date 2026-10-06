@@ -387,11 +387,20 @@ fn parse_install(args: &[String]) -> Result<(InstallOptions, Vec<String>), Strin
             force,
             assume_yes,
             allow_brew,
+            // Prompt for Homebrew installs only when we can actually ask: not
+            // with --yes, and not on a piped/redirected stdin.
+            interactive: !assume_yes && stdin_is_tty(),
             overrides,
             platform: platform_from(os, arch),
         },
         trailing,
     ))
+}
+
+/// Whether stdin is an interactive terminal (so a `[y/N]` prompt makes sense).
+fn stdin_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 fn cmd_install(args: &[String]) -> Result<i32, String> {
@@ -438,8 +447,13 @@ fn cmd_run(args: &[String]) -> Result<i32, String> {
         Target::Dir(_) => return Err("internal error: tui target is not a binary".to_string()),
     };
 
+    // Pin the install root explicitly. The TUI can also detect it from its own
+    // path (`<root>/bin/<exe>` beside `<root>/engine`), but passing it removes
+    // the dependency on that layout rule and keeps a relocated/renamed TUI
+    // working.
     let status = Command::new(&tui)
         .args(&tui_args)
+        .env("COCKATIEL_HOME", &opts.root)
         .status()
         .map_err(|e| format!("launch {}: {}", tui.display(), e))?;
     Ok(status.code().unwrap_or(1))

@@ -29,6 +29,8 @@ pub struct InstallOptions {
     pub force: bool,
     pub assume_yes: bool,
     pub allow_brew: bool,
+    /// May we prompt on the terminal? Set false for `--yes` or a non-TTY stdin.
+    pub interactive: bool,
     pub overrides: Overrides,
     pub platform: Platform,
 }
@@ -155,6 +157,12 @@ pub fn install_all(
 
         match install_component(key, &locked.kind, &plan, &manifest, &layout, opts, fetcher, extractor, runner) {
             Ok(outcome) => {
+                // macOS: strip the quarantine flag from the installed component
+                // so Gatekeeper does not block an unsigned (un-notarized)
+                // binary. Downloads made by curl/wget are not quarantined, but
+                // a manually-extracted or pre-fetched archive may be. No-op when
+                // the flag is absent.
+                clear_quarantine(&layout.component_target(key, &locked.kind));
                 state.components.insert(
                     key.clone(),
                     StateEntry {
@@ -181,6 +189,31 @@ pub fn install_all(
 
 fn state_path(layout: &Layout) -> PathBuf {
     layout.root.join(".cockatiel-state.json")
+}
+
+/// Remove macOS's `com.apple.quarantine` attribute from an installed component
+/// (best-effort; a no-op off macOS and when the attribute is absent). macOS
+/// Gatekeeper blocks unsigned, un-notarized binaries that carry the flag; since
+/// Cockatiel is not notarized, clearing it is the local workaround.
+fn clear_quarantine(target: &Target) {
+    #[cfg(target_os = "macos")]
+    {
+        let path = match target {
+            Target::Dir(p) => p.clone(),
+            Target::Bin { dir, name } => dir.join(name),
+        };
+        let _ = std::process::Command::new("xattr")
+            .arg("-dr")
+            .arg("com.apple.quarantine")
+            .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target;
+    }
 }
 
 fn plan_identity(plan: &Plan, manifest: &ComponentManifest) -> (String, Option<String>, Option<String>) {
@@ -247,7 +280,14 @@ fn install_component(
             result.map(|()| Outcome::Installed)
         }
         Plan::Build { source, .. } => {
-            let binary = build_from_source(runner, source, manifest, opts.allow_brew, opts.assume_yes)?;
+            let binary = build_from_source(
+                runner,
+                source,
+                manifest,
+                opts.allow_brew,
+                opts.assume_yes,
+                opts.interactive,
+            )?;
             let staging = layout.staging_dir();
             std::fs::create_dir_all(&staging)
                 .map_err(|e| format!("create {}: {}", staging.display(), e))?;
@@ -654,6 +694,7 @@ mod tests {
             force: false,
             assume_yes: false,
             allow_brew: false,
+            interactive: false,
             overrides: Overrides::default(),
             platform: platform(),
         }

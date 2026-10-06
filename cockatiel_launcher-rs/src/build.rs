@@ -107,41 +107,84 @@ fn build_tools_remediation(missing: &[String]) -> String {
     )
 }
 
+/// Install `packages` with Homebrew, but only with consent: automatically when
+/// `assume_yes`, otherwise after an interactive `[y/N]` prompt (when
+/// `interactive`), otherwise fail with `remediation`.
+///
+/// This is the single place that runs `brew install`, so no code path can
+/// install anything without the operator having agreed to it.
+fn brew_install_or_err(
+    runner: &dyn CommandRunner,
+    source: &Path,
+    allow_brew: bool,
+    assume_yes: bool,
+    interactive: bool,
+    packages: &[String],
+    remediation: impl FnOnce() -> String,
+) -> Result<(), String> {
+    let Some(brew) = allow_brew.then(|| detect_brew(runner)).flatten() else {
+        return Err(remediation());
+    };
+    let consented = assume_yes
+        || (interactive
+            && confirm(&format!(
+                "Homebrew is available. Install {}?",
+                packages.join(" ")
+            )));
+    if !consented {
+        return Err(remediation());
+    }
+    let brew = brew.to_string_lossy().to_string();
+    let mut args = vec!["install".to_string()];
+    args.extend(packages.iter().cloned());
+    runner
+        .run(&brew, &args, source)
+        .map_err(|e| format!("`brew install {}` failed: {}", packages.join(" "), e))
+}
+
+/// Ask a yes/no question on the terminal. Anything but `y`/`yes` is a no, and a
+/// read failure is a no — the safe default when we cannot get an answer.
+fn confirm(question: &str) -> bool {
+    use std::io::{self, Write};
+    eprint!("{} [y/N] ", question);
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 /// Build `source` and return the path to the produced binary.
 ///
 /// * `allow_brew` — whether the caller opted into Homebrew-assisted installs.
 /// * `assume_yes` — whether we may run a brew install without a prompt.
+/// * `interactive` — whether we may prompt the user (stdin is a TTY and the
+///   caller did not pass `--yes`). Only consulted when `assume_yes` is false.
 pub fn build_from_source(
     runner: &dyn CommandRunner,
     source: &Path,
     manifest: &ComponentManifest,
     allow_brew: bool,
     assume_yes: bool,
+    interactive: bool,
 ) -> Result<PathBuf, String> {
     if runner.which("cargo").is_none() {
-        let brew = allow_brew.then(|| detect_brew(runner)).flatten();
-        match brew {
-            Some(brew) if assume_yes => {
-                let brew = brew.to_string_lossy().to_string();
-                let args = vec!["install".to_string(), "rustup".to_string()];
-                runner
-                    .run(&brew, &args, source)
-                    .map_err(|e| format!("`brew install rustup` failed: {}", e))?;
-                if runner.which("cargo").is_none() {
-                    return Err(format!(
-                        "{} (brew install rustup ran but cargo is still not on PATH; \
-                         you may need to open a new shell)",
-                        rust_remediation()
-                    ));
-                }
-            }
-            Some(_) => {
-                return Err(format!(
-                    "{}; or run `brew install rustup`",
-                    rust_remediation()
-                ));
-            }
-            None => return Err(rust_remediation()),
+        brew_install_or_err(
+            runner,
+            source,
+            allow_brew,
+            assume_yes,
+            interactive,
+            &["rustup".to_string()],
+            || format!("{}; or run `brew install rustup`", rust_remediation()),
+        )?;
+        if runner.which("cargo").is_none() {
+            return Err(format!(
+                "{} (brew install rustup ran but cargo is still not on PATH; \
+                 you may need to open a new shell)",
+                rust_remediation()
+            ));
         }
     }
 
@@ -153,18 +196,15 @@ pub fn build_from_source(
         missing.push("pkg-config".to_string());
     }
     if !missing.is_empty() {
-        let brew = allow_brew.then(|| detect_brew(runner)).flatten();
-        match brew {
-            Some(brew) => {
-                let brew = brew.to_string_lossy().to_string();
-                let mut args = vec!["install".to_string()];
-                args.extend(missing.iter().cloned());
-                runner
-                    .run(&brew, &args, source)
-                    .map_err(|e| format!("`brew install {}` failed: {}", missing.join(" "), e))?;
-            }
-            None => return Err(build_tools_remediation(&missing)),
-        }
+        brew_install_or_err(
+            runner,
+            source,
+            allow_brew,
+            assume_yes,
+            interactive,
+            &missing,
+            || build_tools_remediation(&missing),
+        )?;
     }
 
     let (program, args) = match &manifest.build_command {
@@ -305,7 +345,7 @@ mod tests {
         let manifest = manifest_with_binary();
         let platform = Platform::new("macos", "aarch64");
         let _ = platform;
-        let bin = build_from_source(&runner, &source, &manifest, false, false).unwrap();
+        let bin = build_from_source(&runner, &source, &manifest, false, false, false).unwrap();
         assert!(bin.ends_with("target/release/cockatiel-engine-rs"));
         let runs = runner.runs.lock().unwrap();
         assert_eq!(runs.len(), 1);
@@ -318,7 +358,7 @@ mod tests {
     fn missing_cargo_returns_rustup_remediation() {
         let source = temp_dir("nocargo");
         let runner = FakeRunner::default();
-        let err = build_from_source(&runner, &source, &manifest_with_binary(), false, false)
+        let err = build_from_source(&runner, &source, &manifest_with_binary(), false, false, false)
             .unwrap_err();
         assert!(err.contains("rustup.rs"), "{}", err);
         let _ = std::fs::remove_dir_all(&source);
@@ -331,7 +371,7 @@ mod tests {
             present: vec!["brew".to_string()],
             ..Default::default()
         };
-        let err = build_from_source(&runner, &source, &manifest_with_binary(), true, true)
+        let err = build_from_source(&runner, &source, &manifest_with_binary(), true, true, false)
             .unwrap_err();
         assert!(err.contains("cargo"), "{}", err);
         let runs = runner.runs.lock().unwrap();
@@ -348,7 +388,7 @@ mod tests {
             ..Default::default()
         };
         let err =
-            build_from_source(&runner, &source, &manifest_with_binary(), false, false).unwrap_err();
+            build_from_source(&runner, &source, &manifest_with_binary(), false, false, false).unwrap_err();
         assert!(err.contains("cmake"), "{}", err);
         let _ = std::fs::remove_dir_all(&source);
     }
@@ -364,11 +404,31 @@ mod tests {
             )),
             ..Default::default()
         };
-        build_from_source(&runner, &source, &manifest_with_binary(), true, false).unwrap();
+        build_from_source(&runner, &source, &manifest_with_binary(), true, true, false).unwrap();
         let runs = runner.runs.lock().unwrap();
         assert_eq!(runs[0].0, "brew");
         assert_eq!(runs[0].1, vec!["install", "cmake"]);
         assert_eq!(runs[1].0, "cargo");
+        let _ = std::fs::remove_dir_all(&source);
+    }
+
+    #[test]
+    fn missing_cmake_with_brew_but_no_consent_does_not_install() {
+        // Homebrew is present and allowed, but the operator neither passed
+        // --yes nor is on an interactive stdin: nothing may be installed.
+        let source = temp_dir("brewcmake_noconsent");
+        let runner = FakeRunner {
+            present: vec!["cargo".to_string(), "brew".to_string()],
+            ..Default::default()
+        };
+        let err =
+            build_from_source(&runner, &source, &manifest_with_binary(), true, false, false)
+                .unwrap_err();
+        assert!(err.contains("cmake"), "{}", err);
+        assert!(
+            runner.runs.lock().unwrap().is_empty(),
+            "brew must not run without consent"
+        );
         let _ = std::fs::remove_dir_all(&source);
     }
 
