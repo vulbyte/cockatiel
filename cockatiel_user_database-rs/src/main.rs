@@ -195,7 +195,7 @@ async fn handle_connection(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[UserDB] malformed request: {}", e);
-                send_response(&mut write, fail("Malformed request", &e.to_string())).await?;
+                send_response(&mut write, fail("Malformed request", e.to_string())).await?;
                 continue;
             }
         };
@@ -216,7 +216,7 @@ async fn handle_connection(
             Ok(resp) => resp,
             Err(join) => {
                 eprintln!("[UserDB] request panicked: {}", join);
-                fail("Query panicked", &format!("a database operation panicked (unsupported SQL?): {}", join))
+                fail("Query panicked", format!("a database operation panicked (unsupported SQL?): {}", join))
             }
         };
         send_response(&mut write, response).await?;
@@ -247,7 +247,7 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
             }
             match db.add_user(&add.username, channel).await {
                 Ok(user) => ok(Some(user), "User added".to_string()),
-                Err(e) => fail("Add user failed", &e.to_string()),
+                Err(e) => fail("Add user failed", e.to_string()),
             }
         }
         user_db_request::Op::DeleteUser(del) => {
@@ -268,28 +268,38 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
             match db.delete_user(&del.uuid7).await {
                 Ok(true) => ok(None, "User deleted".to_string()),
                 Ok(false) => fail("Delete failed", "User not found"),
-                Err(e) => fail("Delete failed", &e.to_string()),
+                Err(e) => fail("Delete failed", e.to_string()),
             }
         }
         user_db_request::Op::AddScore(s) => {
             match db.adjust_score(&s.uuid7, s.delta, true).await {
                 Ok(Some(user)) => ok(Some(user), "Score added".to_string()),
                 Ok(None) => fail("Score add failed", "User not found"),
-                Err(e) => fail("Score add failed", &e.to_string()),
+                Err(e) => fail("Score add failed", e.to_string()),
             }
         }
         user_db_request::Op::RemoveScore(s) => {
-            match db.adjust_score(&s.uuid7, -s.delta, false).await {
+            // NOTE: `RemoveScore` currently routes through `adjust_score(...,
+            // is_commendation = false)`, which only bumps the reprimand counter
+            // and does NOT change the score. Whether a "remove score" request
+            // should actually subtract from the balance is an open design
+            // question; the semantics are deliberately left as-is here.
+            // `checked_neg` (not `-s.delta`) so `i32::MIN`, which has no positive
+            // counterpart, is rejected instead of panicking/wrapping.
+            let Some(delta) = s.delta.checked_neg() else {
+                return fail("Score remove failed", "delta overflow: i32::MIN cannot be negated");
+            };
+            match db.adjust_score(&s.uuid7, delta, false).await {
                 Ok(Some(user)) => ok(Some(user), "Score removed".to_string()),
                 Ok(None) => fail("Score remove failed", "User not found"),
-                Err(e) => fail("Score remove failed", &e.to_string()),
+                Err(e) => fail("Score remove failed", e.to_string()),
             }
         }
         user_db_request::Op::AdjustScoreOnly(s) => {
             match db.adjust_score_only(&s.uuid7, s.delta).await {
                 Ok(Some(user)) => ok(Some(user), "Score adjusted".to_string()),
                 Ok(None) => fail("Score adjust failed", "User not found"),
-                Err(e) => fail("Score adjust failed", &e.to_string()),
+                Err(e) => fail("Score adjust failed", e.to_string()),
             }
         }
         user_db_request::Op::RateUser(r) => {
@@ -305,21 +315,21 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                     resp.error = outcome.message;
                     resp
                 }
-                Err(e) => fail("Rating failed", &e.to_string()),
+                Err(e) => fail("Rating failed", e.to_string()),
             }
         }
         user_db_request::Op::AddChannel(ac) => {
             match db.add_channel(&ac.uuid7, ac.channel.as_ref()).await {
                 Ok(Some(user)) => ok(Some(user), "Channel added".to_string()),
                 Ok(None) => fail("Add channel failed", "User not found"),
-                Err(e) => fail("Add channel failed", &e.to_string()),
+                Err(e) => fail("Add channel failed", e.to_string()),
             }
         }
         user_db_request::Op::RemoveChannel(rc) => {
             match db.remove_channel(&rc.uuid7, &rc.platform, &rc.channel_id).await {
                 Ok(Some(user)) => ok(Some(user), "Channel removed".to_string()),
                 Ok(None) => fail("Remove channel failed", "User not found"),
-                Err(e) => fail("Remove channel failed", &e.to_string()),
+                Err(e) => fail("Remove channel failed", e.to_string()),
             }
         }
         user_db_request::Op::GetUser(g) => {
@@ -339,14 +349,14 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
         user_db_request::Op::ListUsers(l) => {
             match db.list_users(&l.platform, l.limit, l.offset).await {
                 Ok(users) => ok_many(users, "Users listed".to_string()),
-                Err(e) => fail("List users failed", &e.to_string()),
+                Err(e) => fail("List users failed", e.to_string()),
             }
         }
         user_db_request::Op::UpdateFlags(uf) => {
             match db.update_flags(&uf.uuid7, &uf.flags).await {
                 Ok(Some(user)) => ok(Some(user), "Flags updated".to_string()),
                 Ok(None) => fail("Update flags failed", "User not found"),
-                Err(e) => fail("Update flags failed", &e.to_string()),
+                Err(e) => fail("Update flags failed", e.to_string()),
             }
         }
         user_db_request::Op::SetRoles(sr) => {
@@ -361,7 +371,7 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
             {
                 Ok(Some(user)) => ok(Some(user), "Roles updated".to_string()),
                 Ok(None) => fail("Set roles failed", "User not found"),
-                Err(e) => fail("Set roles failed", &e.to_string()),
+                Err(e) => fail("Set roles failed", e.to_string()),
             }
         }
         user_db_request::Op::ReadUserValue(rv) => {
@@ -371,7 +381,7 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                     value,
                 }, "Value read".to_string()),
                 Ok(None) => fail("Read value failed", "Value or user not found"),
-                Err(e) => fail("Read value failed", &e.to_string()),
+                Err(e) => fail("Read value failed", e.to_string()),
             }
         }
         user_db_request::Op::WriteUserValue(wv) => {
@@ -381,14 +391,14 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                     value,
                 }, "Value written".to_string()),
                 Ok(None) => fail("Write value failed", "User not found"),
-                Err(e) => fail("Write value failed", &e.to_string()),
+                Err(e) => fail("Write value failed", e.to_string()),
             }
         }
         user_db_request::Op::DeleteUserValue(dv) => {
             match db.delete_user_value(&dv.uuid7, &dv.key).await {
                 Ok(true) => ok(None, "Value deleted".to_string()),
                 Ok(false) => fail("Delete value failed", "Value or user not found"),
-                Err(e) => fail("Delete value failed", &e.to_string()),
+                Err(e) => fail("Delete value failed", e.to_string()),
             }
         }
         user_db_request::Op::ListUserValues(lv) => {
@@ -400,20 +410,20 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
                     }).collect();
                     ok_values(results, "Values listed".to_string())
                 }
-                Err(e) => fail("List values failed", &e.to_string()),
+                Err(e) => fail("List values failed", e.to_string()),
             }
         }
         user_db_request::Op::DeductScore(d) => {
             match db.deduct_score(&d.uuid7, d.amount).await {
                 Ok(Some(user)) => ok(Some(user), "Score deducted".to_string()),
                 Ok(None) => fail("Deduct failed", "User not found or insufficient score"),
-                Err(e) => fail("Deduct failed", &e.to_string()),
+                Err(e) => fail("Deduct failed", e.to_string()),
             }
         }
         user_db_request::Op::GetRatingHistory(g) => {
             match db.get_rating_history(&g.uuid7, &g.kind, g.limit, g.offset).await {
                 Ok(entries) => ok_history(entries, "Rating history listed".to_string()),
-                Err(e) => fail("Get rating history failed", &e.to_string()),
+                Err(e) => fail("Get rating history failed", e.to_string()),
             }
         }
         user_db_request::Op::SetRankConfig(_) => {
@@ -426,7 +436,7 @@ async fn dispatch(db: &Arc<UserDatabase>, request: &UserDbRequest) -> UserDbResp
             match db.increment_messages_sent(&m.uuid7).await {
                 Ok(Some(user)) => ok(Some(user), "Messages sent incremented".to_string()),
                 Ok(None) => fail("Increment failed", "User not found"),
-                Err(e) => fail("Increment failed", &e.to_string()),
+                Err(e) => fail("Increment failed", e.to_string()),
             }
         }
     }
@@ -516,6 +526,28 @@ async fn send_response(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = Vec::new();
     response.encode(&mut buf)?;
-    write.send(WsMessage::Binary(buf.into())).await?;
+    write.send(WsMessage::Binary(buf)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remove_score_with_i32_min_is_rejected_not_panicking() {
+        // Uninitialized DB is fine: the overflow guard runs before any query.
+        let db = Arc::new(UserDatabase::new());
+        let req = UserDbRequest {
+            auth_token: "t".into(),
+            op: Some(user_db_request::Op::RemoveScore(proto::ScoreRequest {
+                uuid7: "nobody".into(),
+                delta: i32::MIN,
+                reason: String::new(),
+            })),
+        };
+        let resp = dispatch(&db, &req).await;
+        assert!(!resp.success, "i32::MIN must be rejected, not panic");
+        assert!(resp.error.contains("overflow"), "error was: {}", resp.error);
+    }
 }

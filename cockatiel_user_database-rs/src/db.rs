@@ -70,6 +70,12 @@ pub struct UserDatabase {
     /// config.json (the db is self-contained and never reads another module's
     /// config). Re-read live on a ticker so tuning applies without a restart.
     rank_config: Arc<std::sync::Mutex<RankConfig>>,
+    /// Serializes multi-statement transactions. Every clone of this service
+    /// shares ONE underlying turso connection, so two concurrent `BEGIN`s
+    /// would nest (and the second would fail) rather than serialize. Holding
+    /// this lock across a transaction makes the check-then-write critical
+    /// sections (reprimand cooldown, user delete) atomic under concurrency.
+    write_lock: Arc<Mutex<()>>,
 }
 
 /// The rank formula's tunable parameters. Lives in the user database's own
@@ -153,10 +159,47 @@ impl RankConfig {
     /// Load from `config.json` in the given directory, or defaults if absent.
     pub fn load(dir: &std::path::Path) -> Self {
         let path = dir.join("config.json");
-        std::fs::read_to_string(&path)
+        let mut cfg = std::fs::read_to_string(&path)
             .ok()
             .and_then(|data| serde_json::from_str::<RankConfig>(&data).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A streamer edits this file by hand; a 0 or non-finite divisor would
+        // make every user's rank NaN/inf. Clamp on load, never trust the file.
+        cfg.sanitize();
+        cfg
+    }
+
+    /// Replace any value that would poison the rank math with the safe default.
+    ///
+    /// `score_divisor` and `msg_ref` are divisors and must be finite and
+    /// strictly positive; the decay/weight/steepness terms must be finite.
+    /// `steepness` may be 0 (flat 0.5 rank) but a negative or non-finite value
+    /// would invert or destroy the sigmoid, so it falls back to the default.
+    /// Non-finite decay weights fall back to the template's mildest weight.
+    pub fn sanitize(&mut self) {
+        let d = RankConfig::default();
+        fn positive(v: f32, fallback: f32) -> f32 {
+            if v.is_finite() && v > 0.0 { v } else { fallback }
+        }
+        fn finite(v: f32, fallback: f32) -> f32 {
+            if v.is_finite() { v } else { fallback }
+        }
+        self.score_divisor = positive(self.score_divisor, d.score_divisor);
+        self.msg_ref = positive(self.msg_ref, d.msg_ref);
+        self.steepness = if self.steepness.is_finite() && self.steepness >= 0.0 {
+            self.steepness
+        } else {
+            d.steepness
+        };
+        self.w_comm = finite(self.w_comm, d.w_comm);
+        self.w_act = finite(self.w_act, d.w_act);
+        self.rep_base = finite(self.rep_base, d.rep_base);
+        self.rep_density_w = finite(self.rep_density_w, d.rep_density_w);
+        for w in &mut self.decay_weights {
+            if !w.is_finite() {
+                *w = d.decay_weights.last().copied().unwrap_or(0.8);
+            }
+        }
     }
 }
 
@@ -172,6 +215,7 @@ impl UserDatabase {
             local: Arc::new(Mutex::new(None)),
             path: Arc::new(Mutex::new(None)),
             rank_config: Arc::new(std::sync::Mutex::new(RankConfig::default())),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -212,7 +256,10 @@ impl UserDatabase {
         conn.execute(CREATE_USERS, ()).await?;
         conn.execute(CREATE_CHANNELS, ()).await?;
         conn.execute(CREATE_USER_VALUES, ()).await?;
-        conn.execute(CREATE_RATING_HISTORY, ()).await?;
+        // `execute` parses ONLY the first statement, so the two CREATE INDEX
+        // statements in this string used to be silently dropped. `execute_batch`
+        // parses and runs every statement, so the table and both indexes exist.
+        conn.execute_batch(CREATE_RATING_HISTORY).await?;
 
         // Migration to schema v2: add `total_score` + `messages_sent`. On an
         // existing v1 database the columns are absent, so `CREATE TABLE IF NOT
@@ -470,11 +517,56 @@ impl UserDatabase {
         Ok(rows.next().await?.is_some())
     }
 
+    /// Delete a user and EVERY row that references them, atomically.
+    ///
+    /// Deletes the user's channels, their key-value entries and their rating
+    /// history (both as recipient and as giver, so no orphaned history row
+    /// survives pointing at a uuid that no longer exists). Wrapped in an
+    /// IMMEDIATE transaction under `write_lock` so a partial failure can never
+    /// leave the user deleted but their rows behind (or vice versa).
     pub async fn delete_user(&self, uuid7: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let conn = self.conn().await?;
-        conn.execute("DELETE FROM user_channels WHERE user_uuid7 = ?1", turso::params![uuid7]).await?;
-        let changed = conn.execute("DELETE FROM users WHERE uuid7 = ?1", turso::params![uuid7]).await?;
-        Ok(changed > 0)
+        let _guard = self.write_lock.lock().await;
+        let mut conn = self.conn().await?;
+        let tx = conn
+            .transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
+            .await?;
+
+        let result = async {
+            tx.execute(
+                "DELETE FROM user_channels WHERE user_uuid7 = ?1",
+                turso::params![uuid7],
+            )
+            .await?;
+            tx.execute(
+                "DELETE FROM user_values WHERE user_uuid7 = ?1",
+                turso::params![uuid7],
+            )
+            .await?;
+            tx.execute(
+                "DELETE FROM rating_history WHERE recipient_uuid7 = ?1 OR giver_uuid7 = ?1",
+                turso::params![uuid7],
+            )
+            .await?;
+            let changed = tx
+                .execute("DELETE FROM users WHERE uuid7 = ?1", turso::params![uuid7])
+                .await?;
+            Ok::<u64, turso::Error>(changed)
+        }
+        .await;
+
+        match result {
+            Ok(changed) => {
+                tx.commit().await?;
+                Ok(changed > 0)
+            }
+            Err(e) => {
+                // Roll back explicitly: the Transaction panics if dropped
+                // without finishing, and a half-applied delete is the exact
+                // corruption this function exists to prevent.
+                let _ = tx.rollback().await;
+                Err(Box::new(e))
+            }
+        }
     }
 
     pub async fn adjust_score(
@@ -555,26 +647,27 @@ impl UserDatabase {
     /// negative). The lifetime `total_score` is untouched. Returns the updated
     /// user on success, or `None` when the user is missing or lacks the funds.
     ///
-    /// turso's `execute` returns a scan counter rather than rows-affected, so
-    /// the guard is verified by the pre-read (we only attempt when score >=
-    /// amount) and the single-statement `WHERE score >= ?amount` makes the
-    /// deduct atomic under concurrency.
+    /// The single `WHERE ... score >= ?amount` makes the deduct atomic, and
+    /// turso's `execute` returns the number of rows the statement changed
+    /// (`n_change`), so 0 changed rows is the authoritative "no such user or
+    /// insufficient funds" signal. Relying on that count (instead of a
+    /// separate balance pre-read) is what closes the double-spend window: if
+    /// the balance drops between a read and the update, the guarded UPDATE
+    /// matches 0 rows and we report failure rather than a phantom success.
     pub async fn deduct_score(&self, uuid7: &str, amount: i32) -> Result<Option<User>, Box<dyn std::error::Error>> {
         if amount <= 0 {
             return self.get_user_by_uuid(uuid7).await;
         }
-        let current = self.get_user_by_uuid(uuid7).await?;
-        let Some(user) = current else {
-            return Ok(None);
-        };
-        if user.score < amount {
+        let conn = self.conn().await?;
+        let changed = conn
+            .execute(
+                "UPDATE users SET score = score - ?1, updated_at = ?2 WHERE uuid7 = ?3 AND score >= ?1",
+                turso::params![amount, Self::now_ms(), uuid7],
+            )
+            .await?;
+        if changed == 0 {
             return Ok(None);
         }
-        let conn = self.conn().await?;
-        conn.execute(
-            "UPDATE users SET score = score - ?1, updated_at = ?2 WHERE uuid7 = ?3 AND score >= ?1",
-            turso::params![amount, Self::now_ms(), uuid7],
-        ).await?;
         self.get_user_by_uuid(uuid7).await
     }
 
@@ -609,7 +702,11 @@ impl UserDatabase {
         messages_sent: i32,
         _created_at: i64,
     ) -> f32 {
-        let cfg = self.rank_config().await;
+        let mut cfg = self.rank_config().await;
+        // Defense in depth: `RankConfig::load` already sanitizes, but the
+        // formula must never emit NaN/inf even if an unsanitized config
+        // reached it (0 divisor, non-finite weight, etc.).
+        cfg.sanitize();
         let now = Self::now_ms();
         let age_days = |ts: i64| -> u32 {
             let ms = now.saturating_sub(ts).max(0);
@@ -707,10 +804,13 @@ impl UserDatabase {
     }
 
     /// Commend or reprimand a user. For a REPRIMAND the 24h cooldown is
-    /// enforced atomically: the history row is inserted only when no
-    /// reprimand from the same giver to this recipient exists within the
-    /// last 24 hours (single `INSERT ... WHERE NOT EXISTS`, so concurrent
-    /// attempts can't both pass). Commends are unlimited.
+    /// enforced atomically: the history row is inserted only when no reprimand
+    /// from the same giver to this recipient exists within the last 24 hours.
+    /// The check and the insert run inside one IMMEDIATE transaction, and
+    /// `write_lock` serializes transactions (every clone of this service shares
+    /// one underlying connection, so without the lock two `BEGIN`s would nest
+    /// rather than serialize). Concurrent reprimands therefore cannot both
+    /// pass the check. Commends are unlimited.
     pub async fn rate_user(
         &self,
         giver_uuid7: &str,
@@ -720,12 +820,12 @@ impl UserDatabase {
         handle: &str,
         reason: &str,
     ) -> Result<RatingOutcome, Box<dyn std::error::Error>> {
-        let conn = self.conn().await?;
         let now = Self::now_ms();
         let kind = if is_commendation { "commend" } else { "reprimand" };
         let id = uuid::Uuid::now_v7().to_string();
 
         if is_commendation {
+            let conn = self.conn().await?;
             conn.execute(
                 "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -733,34 +833,52 @@ impl UserDatabase {
             )
             .await?;
         } else {
-            // 24h cooldown: check for an existing reprimand from the same giver
-            // to this recipient within the last 24 hours. (A check-then-insert
-            // rather than a single INSERT...WHERE NOT EXISTS — the turso/Limbo
-            // driver can't translate the subquery form. The race window between
-            // two perfectly-simultaneous reprimands is negligible.)
-            let mut rows = conn
-                .query(
-                    "SELECT 1 FROM rating_history
-                     WHERE giver_uuid7 = ?1 AND recipient_uuid7 = ?2 AND kind = 'reprimand'
-                       AND created_at > ?3 LIMIT 1",
-                    turso::params![giver_uuid7, recipient_uuid7, now - 86400000],
+            // 24h cooldown, check+insert atomic under one transaction.
+            let _guard = self.write_lock.lock().await;
+            let mut conn = self.conn().await?;
+            let tx = conn
+                .transaction_with_behavior(turso::transaction::TransactionBehavior::Immediate)
+                .await?;
+
+            let result = async {
+                let mut rows = tx
+                    .query(
+                        "SELECT 1 FROM rating_history
+                         WHERE giver_uuid7 = ?1 AND recipient_uuid7 = ?2 AND kind = 'reprimand'
+                           AND created_at > ?3 LIMIT 1",
+                        turso::params![giver_uuid7, recipient_uuid7, now - 86400000],
+                    )
+                    .await?;
+                if rows.next().await?.is_some() {
+                    return Ok::<bool, turso::Error>(false);
+                }
+                tx.execute(
+                    "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    turso::params![id, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, now],
                 )
                 .await?;
-            if let Some(_row) = rows.next().await? {
-                return Ok(RatingOutcome {
-                    applied: false,
-                    message: format!(
-                        "reprimand cooldown: you already reprimanded {} within the last 24 hours",
-                        handle
-                    ),
-                });
+                Ok(true)
             }
-            conn.execute(
-                "INSERT INTO rating_history (uuid7, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                turso::params![id, giver_uuid7, recipient_uuid7, kind, platform, handle, reason, now],
-            )
-            .await?;
+            .await;
+
+            match result {
+                Ok(true) => tx.commit().await?,
+                Ok(false) => {
+                    tx.rollback().await?;
+                    return Ok(RatingOutcome {
+                        applied: false,
+                        message: format!(
+                            "reprimand cooldown: you already reprimanded {} within the last 24 hours",
+                            handle
+                        ),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    return Err(Box::new(e));
+                }
+            }
         }
 
         self.adjust_score(recipient_uuid7, 1, is_commendation)
@@ -1148,5 +1266,166 @@ mod tests {
             assert_eq!(e.giver_uuid7, giver);
             assert!(e.created_at > 0);
         }
+    }
+
+    #[tokio::test]
+    async fn rating_history_indexes_are_created() {
+        let db = temp_db().await;
+        let conn = db.conn().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'rating_history'",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut names = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            names.push(row.get::<String>(0).unwrap());
+        }
+        assert!(
+            names.contains(&"idx_rating_history_giver".to_string()),
+            "giver index missing; found {names:?}"
+        );
+        assert!(
+            names.contains(&"idx_rating_history_recipient".to_string()),
+            "recipient index missing; found {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_user_removes_all_referencing_rows_transactionally() {
+        let db = temp_db().await;
+        let a = add(&db, "a", "ca").await;
+        let b = add(&db, "b", "cb").await;
+        let c = add(&db, "c", "cc").await;
+        let d = add(&db, "d", "cd").await;
+
+        // A is referenced in BOTH directions (giver and recipient).
+        db.rate_user(&a, &b, true, "test", "b", "nice").await.unwrap();
+        db.rate_user(&b, &a, false, "test", "a", "rude").await.unwrap();
+        // An unrelated pair whose history must survive the delete.
+        db.rate_user(&c, &d, true, "test", "d", "nice").await.unwrap();
+        db.write_user_value(&a, "theme", "dark").await.unwrap();
+        assert!(db.read_user_value(&a, "theme").await.unwrap().is_some());
+
+        assert!(db.delete_user(&a).await.unwrap(), "delete reports true for a real user");
+        assert!(db.get_user_by_uuid(&a).await.unwrap().is_none());
+
+        let conn = db.conn().await.unwrap();
+        for (table, sql) in [
+            ("user_channels", "SELECT COUNT(*) FROM user_channels WHERE user_uuid7 = ?1"),
+            ("user_values", "SELECT COUNT(*) FROM user_values WHERE user_uuid7 = ?1"),
+        ] {
+            let mut rows = conn.query(sql, turso::params![a.clone()]).await.unwrap();
+            let n: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+            assert_eq!(n, 0, "{table} rows for the deleted user must be gone");
+        }
+
+        // Both history rows referencing A are gone; the C->D row survives.
+        let mut rows = conn.query("SELECT giver_uuid7 FROM rating_history", ()).await.unwrap();
+        let mut givers = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            givers.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(givers, vec![c], "only the unrelated history row may remain");
+    }
+
+    #[tokio::test]
+    async fn deduct_score_fails_when_guarded_update_matches_no_rows() {
+        let db = temp_db().await;
+        let uid = add(&db, "u", "c").await;
+        db.adjust_score_only(&uid, 5).await.unwrap();
+
+        // Exact balance succeeds (and the row-count path returns the user).
+        let ok = db.deduct_score(&uid, 5).await.unwrap().unwrap();
+        assert_eq!(ok.score, 0);
+
+        // Score is now 0, so the guarded UPDATE changes 0 rows. This is the
+        // path a stale pre-read would have reported as success; it must fail.
+        assert!(db.deduct_score(&uid, 1).await.unwrap().is_none());
+        assert_eq!(db.get_user_by_uuid(&uid).await.unwrap().unwrap().score, 0);
+
+        // A missing user also changes 0 rows -> None.
+        assert!(db.deduct_score("no-such-uuid", 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_reprimands_apply_at_most_once() {
+        let db = std::sync::Arc::new(temp_db().await);
+        let giver = add(&db, "giver", "cg").await;
+        let target = add(&db, "target", "ct").await;
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let db = db.clone();
+            let giver = giver.clone();
+            let target = target.clone();
+            handles.push(tokio::spawn(async move {
+                db.rate_user(&giver, &target, false, "test", "target", "spam")
+                    .await
+                    .unwrap()
+                    .applied
+            }));
+        }
+        let mut applied = 0;
+        for h in handles {
+            if h.await.unwrap() {
+                applied += 1;
+            }
+        }
+        assert_eq!(applied, 1, "exactly one concurrent reprimand may apply");
+
+        let t = db.get_user_by_uuid(&target).await.unwrap().unwrap();
+        assert_eq!(t.reprimands, 1);
+        let history = db.get_rating_history(&target, "reprimand", 100, 0).await.unwrap();
+        assert_eq!(history.len(), 1, "only one reprimand history row may exist");
+    }
+
+    #[test]
+    fn rank_config_sanitize_replaces_poison_values() {
+        let mut cfg = RankConfig {
+            score_divisor: 0.0,
+            msg_ref: -1.0,
+            steepness: f32::NAN,
+            w_comm: f32::INFINITY,
+            w_act: f32::NEG_INFINITY,
+            rep_base: f32::NAN,
+            rep_density_w: f32::INFINITY,
+            decay_weights: vec![f32::NAN, 0.5],
+            ..Default::default()
+        };
+        cfg.sanitize();
+
+        let d = RankConfig::default();
+        assert_eq!(cfg.score_divisor, d.score_divisor);
+        assert_eq!(cfg.msg_ref, d.msg_ref);
+        assert_eq!(cfg.steepness, d.steepness);
+        assert_eq!(cfg.w_comm, d.w_comm);
+        assert_eq!(cfg.w_act, d.w_act);
+        assert_eq!(cfg.rep_base, d.rep_base);
+        assert_eq!(cfg.rep_density_w, d.rep_density_w);
+        assert!(cfg.decay_weights.iter().all(|w| w.is_finite()));
+        assert_eq!(cfg.decay_weights[1], 0.5, "finite weights are preserved");
+    }
+
+    #[tokio::test]
+    async fn compute_rank_stays_finite_with_a_zero_divisor_config() {
+        let dir = std::env::temp_dir().join(format!("cok_udb_cfg_{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A hostile config: both divisors are 0, which would be inf/NaN.
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"score_divisor": 0.0, "msg_ref": 0.0, "w_comm": 1.0}"#,
+        )
+        .unwrap();
+
+        let db = UserDatabase::new();
+        db.reload_config(&dir);
+        let rank = db.compute_rank("u", 0, 12345, 3, 2, 7, 0).await;
+        assert!(rank.is_finite(), "rank must be finite, got {rank}");
+        assert!((0.0..=1.0).contains(&rank), "rank must be in [0,1], got {rank}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
