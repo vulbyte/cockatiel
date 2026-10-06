@@ -23,7 +23,11 @@ use crate::{
     probe::{cleanup, launch_module, launch_module_pty},
     screening::{auth_as_test_runner, connected_module_state, WsStream},
 };
-use cockatiel_client::proto::{container::Payload, *};
+use cockatiel_client::proto::{
+    container_for_engine::Payload as EnginePayload,
+    container_for_module::Payload as ModulePayload,
+    *,
+};
 
 /// Default continuous window a module must survive without dropping.
 pub const DEFAULT_SOAK_SECS: u64 = 30;
@@ -41,7 +45,7 @@ async fn auth_verify_ok(ws: &mut WsStream, auth: &str, uuid: &str, module: &str)
         "cockatiel-test-runner",
         uuid,
         auth,
-        Payload::DatabaseQuery(DatabaseQuery {
+        EnginePayload::DatabaseQuery(DatabaseQuery {
             query_id: "test_probe".into(),
             sql: format!(r#"{{"module":"{}","type":"auth_verify"}}"#, module),
             params: vec![],
@@ -55,8 +59,8 @@ async fn auth_verify_ok(ws: &mut WsStream, auth: &str, uuid: &str, module: &str)
         if let Ok(Some(Ok(WsMessage::Binary(data)))) =
             tokio::time::timeout(Duration::from_millis(1500), ws.next()).await
         {
-            if let Ok(c) = Container::decode(data.as_ref()) {
-                if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
+            if let Ok(c) = ContainerForModule::decode(data.as_ref()) {
+                if let Some(ModulePayload::DatabaseQueryResult(res)) = c.payload {
                     if res.query_id == "test_probe" {
                         return serde_json::from_slice::<serde_json::Value>(&res.result_blob)
                             .ok()
@@ -83,8 +87,7 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
     // 1. Discover modules (same eligibility as the probe harness, EXCEPT that
     //    terminal/UI modules are included via a PTY — they are exactly the
     //    modules this suite exists to keep honest).
-    let runner_dir = std::env::current_dir().unwrap_or_default();
-    let modules_dir = runner_dir.parent().unwrap_or(&runner_dir).join("modules");
+    let modules_dir = crate::paths::modules_dir(cli);
     let mut launched: Vec<String> = Vec::new();
     let mut children: Vec<std::process::Child> = Vec::new();
 

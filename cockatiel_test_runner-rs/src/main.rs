@@ -4,10 +4,15 @@ use futures_util::{SinkExt, StreamExt};
 use prost::Message;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
-use cockatiel_client::proto::{container::Payload, *};
+use cockatiel_client::proto::{
+    container_for_engine::Payload as EnginePayload,
+    container_for_module::Payload as ModulePayload,
+    *,
+};
 
 mod fake_engine;
 mod hardening;
+mod paths;
 mod probe;
 mod screening;
 mod soak;
@@ -28,6 +33,8 @@ struct Cli {
     ip: String,
     port: u16,
     pin: i32,
+    install_root: Option<std::path::PathBuf>,
+    modules_dir: Option<std::path::PathBuf>,
 }
 
 fn print_help() {
@@ -43,6 +50,8 @@ OPTIONS:
   --iterations <n>     messages per test burst        (default: 100)
   --duration-secs <n>  soak window: seconds each module must stay connected (default: 30)
   --json               output machine-readable JSON summary
+  --install-root <path>  self-contained install root (bin/engine/modules)   (default: COCKATIEL_HOME)
+  --modules-dir <path>   override the modules directory
   --help               show this help
 "#
     );
@@ -58,6 +67,8 @@ fn parse_args(args: &[String]) -> Cli {
         ip: "127.0.0.1".to_string(),
         port: 9734,
         pin: 0,
+        install_root: None,
+        modules_dir: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -101,6 +112,22 @@ fn parse_args(args: &[String]) -> Cli {
             "--json" => {
                 cli.json = true;
                 i += 1;
+            }
+            "--install-root" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.install_root = Some(std::path::PathBuf::from(v));
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--modules-dir" => {
+                if let Some(v) = args.get(i + 1) {
+                    cli.modules_dir = Some(std::path::PathBuf::from(v));
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             }
             "--ip" | "-i" => {
                 if let Some(v) = args.get(i + 1) {
@@ -181,7 +208,7 @@ fn pinned_tls_config(cert_pem_path: &str) -> Result<rustls::ClientConfig, String
         .with_no_client_auth())
 }
 
-pub(crate) async fn send_container(ws: &mut WsStream, c: &Container) -> Result<(), String> {
+pub(crate) async fn send_container(ws: &mut WsStream, c: &ContainerForEngine) -> Result<(), String> {
     let mut buf = Vec::new();
     c.encode(&mut buf).map_err(|e| e.to_string())?;
     ws.send(WsMessage::Binary(buf.into()))
@@ -189,10 +216,10 @@ pub(crate) async fn send_container(ws: &mut WsStream, c: &Container) -> Result<(
         .map_err(|e| format!("send: {}", e))
 }
 
-pub(crate) async fn receive_container(ws: &mut WsStream, timeout_ms: u64) -> Result<Container, String> {
+pub(crate) async fn receive_container(ws: &mut WsStream, timeout_ms: u64) -> Result<ContainerForModule, String> {
     let r = tokio::time::timeout(Duration::from_millis(timeout_ms), ws.next()).await;
     match r {
-        Ok(Some(Ok(WsMessage::Binary(data)))) => Container::decode(data.as_ref()).map_err(|e| e.to_string()),
+        Ok(Some(Ok(WsMessage::Binary(data)))) => ContainerForModule::decode(data.as_ref()).map_err(|e| e.to_string()),
         Ok(Some(Ok(WsMessage::Close(_)))) => Err("closed".into()),
         Ok(Some(Ok(_))) => Err("non-binary".into()),
         Ok(Some(Err(e))) => Err(format!("ws err: {}", e)),
@@ -201,14 +228,71 @@ pub(crate) async fn receive_container(ws: &mut WsStream, timeout_ms: u64) -> Res
     }
 }
 
-pub(crate) fn make_container(module: &str, uuid: &str, auth: &str, payload: Payload) -> Container {
-    Container {
+pub(crate) fn make_container(module: &str, uuid: &str, auth: &str, payload: EnginePayload) -> ContainerForEngine {
+    ContainerForEngine {
         version: 1,
         auth_token: auth.to_string(),
         module_name: module.to_string(),
         module_instance_uuid7: uuid.to_string(),
         payload: Some(payload),
     }
+}
+
+/// Run a typed `TimelineQuery` (event_type = 1, user message) filtered by
+/// platform + raw-message prefix, and return the matching events.
+///
+/// The engine removed its raw-SQL fallback (Phase 2), so the legacy
+/// `DatabaseQuery`+SQL path is denied — the compliance suites must use the
+/// typed surface. A fresh `request_id` correlates the reply; strays from
+/// earlier queries are drained. `None` on send failure or a 2 s timeout.
+pub(crate) async fn timeline_query_events(
+    ws: &mut WsStream,
+    auth: &str,
+    uuid: &str,
+    platform: &str,
+    raw_prefix: &str,
+    limit: i32,
+) -> Option<Vec<cockatiel_client::proto::TimelineEvent>> {
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let query = make_container(
+        "cockatiel-test-runner",
+        uuid,
+        auth,
+        EnginePayload::TimelineQuery(cockatiel_client::proto::TimelineQuery {
+            timeline_id_uuid7: String::new(),
+            request_id: request_id.clone(),
+            event_type: 1,
+            platform: platform.to_string(),
+            user_uuid7: String::new(),
+            kind: String::new(),
+            since_ms: 0,
+            raw_prefix: raw_prefix.to_string(),
+            pipeline_status: String::new(),
+            limit: limit.clamp(0, i32::MAX),
+            offset: 0,
+        }),
+    );
+    if send_container(ws, &query).await.is_err() {
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
+            Ok(Some(Ok(WsMessage::Binary(data)))) => {
+                if let Ok(c) = ContainerForModule::decode(data.as_ref()) {
+                    if let Some(ModulePayload::TimelineQueryResult(res)) = c.payload {
+                        if res.request_id != request_id {
+                            continue;
+                        }
+                        return Some(res.events);
+                    }
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+            _ => {}
+        }
+    }
+    None
 }
 
 // ── Mode A: chain verification (real engine) ────────────────────────
@@ -221,7 +305,7 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
     // auto-approve requires the PINNED instance uuid (modules.json), so present
     // it first; fall back to a fresh uuid for a fresh engine's bootstrap.
     let mut uuids = Vec::new();
-    if let Some(u) = crate::hardening::registered_instance_uuid("cockatiel-test-runner") {
+    if let Some(u) = crate::hardening::registered_instance_uuid(cli, "cockatiel-test-runner") {
         uuids.push(u);
     }
     uuids.push(uuid::Uuid::now_v7().to_string());
@@ -241,7 +325,7 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
             "cockatiel-test-runner",
             &uuid,
             "",
-            Payload::ConnectionRequest(ConnectionRequest {
+            EnginePayload::ConnectionRequest(ConnectionRequest {
                 pin: cli.pin,
                 process_position: ProcessPosition::Connection as i32,
                 priority: 1,
@@ -296,7 +380,7 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
             "cockatiel-test-runner",
             &uuid,
             &auth,
-            Payload::MessagePreProcess(MessagePreProcess {
+            EnginePayload::MessagePreProcess(MessagePreProcess {
                 message_uuid7: String::new(),
                 raw_message: Some(chat),
                 audio: vec![],
@@ -309,51 +393,30 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
             break;
         }
 
-        // Give the engine a moment to ingest, then check the row exists by its
-        // unique content (the engine owns the uuid).
+        // Give the engine a moment to ingest, then confirm the row exists via
+        // the typed timeline surface (the engine owns the uuid; the raw-SQL
+        // `DatabaseQuery` path was removed in Phase 2).
         tokio::time::sleep(Duration::from_millis(60)).await;
-        let qid = format!("chain_check_{}", i);
-        let check = make_container(
-            "cockatiel-test-runner",
-            &uuid,
-            &auth,
-            Payload::DatabaseQuery(DatabaseQuery {
-                query_id: qid.clone(),
-                sql: format!(
-                    "SELECT pipeline_status FROM timeline_events WHERE platform = 'test' AND raw_message = 'chain message {}'",
-                    i
-                ),
-                params: vec![],
-            }),
-        );
-        if send_container(&mut ws, &check).await.is_err() {
-            m.failed += 1;
-            break;
-        }
-        // Read until we get the matching query response (skip any strays).
         let verified = {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
             let mut ok = false;
             while tokio::time::Instant::now() < deadline {
-                match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
-                    Ok(Some(Ok(WsMessage::Binary(data)))) => {
-                        if let Ok(c) = Container::decode(data.as_ref()) {
-                            if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
-                                if res.query_id != qid {
-                                    continue;
-                                }
-                                let has_row = match serde_json::from_slice::<serde_json::Value>(&res.result_blob) {
-                                Ok(v) => v.as_array().map(|arr| !arr.is_empty()).unwrap_or(false),
-                                Err(_) => false,
-                            };
-                                ok = res.success && has_row;
-                                break;
-                            }
-                        }
+                if let Some(events) = timeline_query_events(
+                    &mut ws,
+                    &auth,
+                    &uuid,
+                    "test",
+                    &format!("chain message {}", i),
+                    10,
+                )
+                .await
+                {
+                    if !events.is_empty() {
+                        ok = true;
+                        break;
                     }
-                    Ok(Some(Ok(_))) => {}
-                    _ => break,
                 }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
             ok
         };
@@ -426,12 +489,8 @@ pub(crate) fn module_missing_required_credentials(dir: &std::path::Path, manifes
 }
 
 async fn run_module_suite(cli: &Cli) -> Vec<Metrics> {
-    // Discover module manifests from the repo root's modules/ directory.
-    let runner_dir = std::env::current_dir().unwrap_or_default();
-    let modules_dir = runner_dir
-        .parent()
-        .unwrap_or(&runner_dir)
-        .join("modules");
+    // Discover module manifests from the resolved modules directory.
+    let modules_dir = paths::modules_dir(cli);
     let mut results = Vec::new();
 
     let mut entries = match std::fs::read_dir(&modules_dir) {
@@ -538,7 +597,7 @@ async fn benchmark_one_module(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             m.failed += 1;
@@ -546,7 +605,6 @@ async fn benchmark_one_module(
             return m;
         }
     };
-    let child_pid = child.id();
 
     // Wait for the fake engine to finish the burst (session done or timeout).
     let saw_session = tokio::time::timeout(
@@ -558,8 +616,11 @@ async fn benchmark_one_module(
         m.failed += 1;
     }
 
-    // Kill the module (crash detection: if it already died, note it).
-    let _ = std::process::Command::new("kill").arg(child_pid.to_string()).spawn();
+    // Kill + reap the module. `Child::kill` is portable (Windows included) —
+    // the old `kill` shell-out did not exist on Windows — and `wait` reaps the
+    // child so it cannot linger as a zombie.
+    let _ = child.kill();
+    let _ = child.wait();
 
     let em = engine.metrics.lock().await.clone();
     m.passed = em.passed;
@@ -586,7 +647,7 @@ async fn archive_to_timeline(batch_uuid: &str, results: &[Metrics], ip: &str, po
         "cockatiel-test-runner",
         &uuid,
         "",
-        Payload::ConnectionRequest(ConnectionRequest {
+        EnginePayload::ConnectionRequest(ConnectionRequest {
             pin,
             process_position: ProcessPosition::Connection as i32,
             priority: 1,
@@ -610,7 +671,7 @@ async fn archive_to_timeline(batch_uuid: &str, results: &[Metrics], ip: &str, po
             "cockatiel-test-runner",
             &uuid,
             &auth,
-            Payload::DatabaseQuery(DatabaseQuery {
+            EnginePayload::DatabaseQuery(DatabaseQuery {
                 query_id: "test_archive".into(),
                 sql: payload,
                 params: vec![],

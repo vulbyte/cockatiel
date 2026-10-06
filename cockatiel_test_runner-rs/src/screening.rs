@@ -11,7 +11,11 @@ use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 use crate::{
     Cli, Metrics, connect_engine, make_container, receive_container, send_container,
 };
-use cockatiel_client::proto::{container::Payload, *};
+use cockatiel_client::proto::{
+    container_for_engine::Payload as EnginePayload,
+    container_for_module::Payload as ModulePayload,
+    *,
+};
 
 /// Shared test-runner WebSocket type (screening / probe harness).
 pub(crate) type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -27,7 +31,7 @@ pub(crate) async fn auth_as_test_runner(
 ) -> Result<(WsStream, String, String), String> {
     // Resolve the registered instance uuid for the test-runner (same lookup
     // hardening::connect_session uses) before defaulting to a fresh one.
-    let registered = crate::hardening::registered_instance_uuid("cockatiel-test-runner");
+    let registered = crate::hardening::registered_instance_uuid(cli, "cockatiel-test-runner");
     let mut uuids = Vec::new();
     if let Some(u) = registered {
         uuids.push(u);
@@ -41,7 +45,7 @@ pub(crate) async fn auth_as_test_runner(
             "cockatiel-test-runner",
             &uuid,
             "",
-            Payload::ConnectionRequest(ConnectionRequest {
+            EnginePayload::ConnectionRequest(ConnectionRequest {
                 pin: cli.pin,
                 process_position: ProcessPosition::Connection as i32,
                 priority: 1,
@@ -79,47 +83,19 @@ async fn wait_for_rows(
     want: u64,
     prefix: &str,
 ) -> bool {
+    // Poll the typed timeline surface until `want` rows with this prefix are
+    // visible, or the deadline passes. Re-query each round because rows land
+    // asynchronously (the engine assigns the uuid and inserts on ingest). The
+    // legacy raw-SQL `DatabaseQuery` path was removed in Phase 2, so the typed
+    // `TimelineQuery` is the only read surface that works.
     let deadline = Instant::now() + Duration::from_secs(15);
-    // Send the count query ONCE, then drain frames until the matching response
-    // arrives (the connection may have older buffered query results ahead of it).
-    let qid = uuid::Uuid::now_v7().to_string();
-    let check = make_container(
-        "cockatiel-test-runner",
-        uuid,
-        auth,
-        Payload::DatabaseQuery(DatabaseQuery {
-            query_id: qid.clone(),
-            sql: format!(
-                "SELECT COUNT(*) AS n FROM timeline_events WHERE platform = 'test' AND raw_message LIKE '{}%'",
-                prefix
-            ),
-            params: vec![],
-        }),
-    );
-    if send_container(ws, &check).await.is_err() {
-        return false;
-    }
     while Instant::now() < deadline {
-        let timeout = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
-        match timeout {
-            Ok(Some(Ok(WsMessage::Binary(data)))) => {
-                if let Ok(c) = Container::decode(data.as_ref()) {
-                    if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
-                        if res.query_id != qid {
-                            continue; // stale buffered response — keep draining
-                        }
-                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&res.result_blob) {
-                            if let Some(n) = v.as_array().and_then(|a| a.first()).and_then(|o| o.get("n")).and_then(|n| n.as_u64()) {
-                                if n >= want {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Some(events) =
+            crate::timeline_query_events(ws, auth, uuid, "test", prefix, 500).await
+        {
+            if events.len() as u64 >= want {
+                return true;
             }
-            Ok(_) => {}
-            Err(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -165,7 +141,7 @@ async fn flood_messages(cli: &Cli, m: &mut Metrics) {
             "cockatiel-test-runner",
             &uuid,
             &auth,
-            Payload::MessagePreProcess(MessagePreProcess {
+            EnginePayload::MessagePreProcess(MessagePreProcess {
                 message_uuid7: String::new(),
                 raw_message: Some(ChatMessage {
                     platform: "test".into(),
@@ -219,7 +195,7 @@ async fn command_flood(cli: &Cli, m: &mut Metrics) {
             "cockatiel-test-runner",
             &uuid,
             &auth,
-            Payload::MessagePreProcess(MessagePreProcess {
+            EnginePayload::MessagePreProcess(MessagePreProcess {
                 message_uuid7: String::new(),
                 raw_message: Some(ChatMessage {
                     platform: "test".into(),
@@ -247,7 +223,7 @@ async fn command_flood(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &uuid, &auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let responded = send_container(&mut ws, &q).await.is_ok()
         && tokio::time::timeout(Duration::from_secs(2), ws.next()).await.is_ok();
@@ -283,7 +259,7 @@ async fn incorrect_commands(cli: &Cli, m: &mut Metrics) {
     for cmd in bad {
         let pre = make_container(
             "cockatiel-test-runner", &uuid, &auth,
-            Payload::MessagePreProcess(MessagePreProcess {
+            EnginePayload::MessagePreProcess(MessagePreProcess {
                 message_uuid7: String::new(),
                 raw_message: Some(ChatMessage {
                     platform: "test".into(), raw_data: vec![],
@@ -302,7 +278,7 @@ async fn incorrect_commands(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &uuid, &auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let alive = send_container(&mut ws, &q).await.is_ok()
         && tokio::time::timeout(Duration::from_secs(2), ws.next()).await.is_ok();
@@ -336,7 +312,7 @@ async fn flag_fuzzing(cli: &Cli, m: &mut Metrics) {
         let cmd = format!("!tts -{} {} -{}:{} fuzz{}", f, v, names[(i+1)%names.len()], v, i);
         let pre = make_container(
             "cockatiel-test-runner", &uuid, &auth,
-            Payload::MessagePreProcess(MessagePreProcess {
+            EnginePayload::MessagePreProcess(MessagePreProcess {
                 message_uuid7: String::new(),
                 raw_message: Some(ChatMessage {
                     platform: "test".into(), raw_data: vec![],
@@ -354,7 +330,7 @@ async fn flag_fuzzing(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &uuid, &auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let alive = send_container(&mut ws, &q).await.is_ok()
         && tokio::time::timeout(Duration::from_secs(2), ws.next()).await.is_ok();
@@ -392,7 +368,7 @@ async fn malformed_frames(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &uuid, &auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let alive = send_container(&mut ws, &q).await.is_ok()
         && tokio::time::timeout(Duration::from_secs(2), ws.next()).await.is_ok();
@@ -422,7 +398,7 @@ async fn connect_churn(cli: &Cli, m: &mut Metrics) {
         let uuid = uuid::Uuid::now_v7().to_string();
         let req = make_container(
             "cockatiel-test-runner", &uuid, "",
-            Payload::ConnectionRequest(ConnectionRequest {
+            EnginePayload::ConnectionRequest(ConnectionRequest {
                 pin: cli.pin, process_position: ProcessPosition::Connection as i32,
                 priority: 1, module_instance_uuid7: uuid.clone(),
             }),
@@ -453,41 +429,17 @@ async fn wait_for_rows_count(
     want: u64,
     prefix: &str,
 ) -> (bool, u64) {
-    let qid = uuid::Uuid::now_v7().to_string();
-    let check = make_container(
-        "cockatiel-test-runner",
-        uuid,
-        auth,
-        Payload::DatabaseQuery(DatabaseQuery {
-            query_id: qid.clone(),
-            sql: format!(
-                "SELECT COUNT(*) AS n FROM timeline_events WHERE platform = 'test' AND raw_message LIKE '{}%'",
-                prefix
-            ),
-            params: vec![],
-        }),
-    );
-    if send_container(ws, &check).await.is_err() {
-        return (false, 0);
-    }
+    // Typed `TimelineQuery` (raw SQL was removed in Phase 2), polled until the
+    // wanted count is visible or the deadline passes.
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last = 0u64;
     while Instant::now() < deadline {
-        if let Ok(Some(Ok(WsMessage::Binary(data)))) = tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
-            if let Ok(c) = Container::decode(data.as_ref()) {
-                if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
-                    if res.query_id != qid {
-                        continue;
-                    }
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&res.result_blob) {
-                        if let Some(n) = v.as_array().and_then(|a| a.first()).and_then(|o| o.get("n")).and_then(|n| n.as_u64()) {
-                            last = n;
-                            if n >= want {
-                                return (true, n);
-                            }
-                        }
-                    }
-                }
+        if let Some(events) =
+            crate::timeline_query_events(ws, auth, uuid, "test", prefix, 500).await
+        {
+            last = events.len() as u64;
+            if last >= want {
+                return (true, last);
             }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -518,7 +470,7 @@ async fn concurrent_adapters(cli: &Cli, m: &mut Metrics) {
             for i in 0..per {
                 let pre = make_container(
                     "cockatiel-test-runner", &assigned_uuid, &auth,
-                    Payload::MessagePreProcess(MessagePreProcess {
+                    EnginePayload::MessagePreProcess(MessagePreProcess {
                         message_uuid7: String::new(),
                         raw_message: Some(ChatMessage {
                             platform: "test".into(), raw_data: vec![],
@@ -586,7 +538,7 @@ pub(crate) async fn connected_module_state(
 ) -> std::collections::HashMap<String, bool> {
     let q = make_container(
         "cockatiel-test-runner", uuid, auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: "module_list".into(), sql: "".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: "module_list".into(), sql: "".into(), params: vec![] }),
     );
     let mut out = std::collections::HashMap::new();
     if send_container(ws, &q).await.is_err() {
@@ -595,8 +547,8 @@ pub(crate) async fn connected_module_state(
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if let Ok(Some(Ok(WsMessage::Binary(data)))) = tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
-            if let Ok(c) = Container::decode(data.as_ref()) {
-                if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
+            if let Ok(c) = ContainerForModule::decode(data.as_ref()) {
+                if let Some(ModulePayload::DatabaseQueryResult(res)) = c.payload {
                     if res.query_id == "module_list" {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&res.result_blob) {
                             if let Some(arr) = v.as_array() {
@@ -680,7 +632,7 @@ pub(crate) async fn probe_module(
     for _ in 0..3 {
         let q = make_container(
             "cockatiel-test-runner", uuid, auth,
-            Payload::DatabaseQuery(DatabaseQuery {
+            EnginePayload::DatabaseQuery(DatabaseQuery {
                 query_id: "test_probe".into(),
                 sql: format!(r#"{{"module": "{}", "type": "{}"}}"#, module, ptype),
                 params: vec![],
@@ -694,8 +646,8 @@ pub(crate) async fn probe_module(
         let mut got = false;
         while Instant::now() < deadline {
             if let Ok(Some(Ok(WsMessage::Binary(data)))) = tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
-                if let Ok(c) = Container::decode(data.as_ref()) {
-                    if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
+                if let Ok(c) = ContainerForModule::decode(data.as_ref()) {
+                    if let Some(ModulePayload::DatabaseQueryResult(res)) = c.payload {
                         if res.query_id == "test_probe" {
                             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&res.result_blob) {
                                 if v.get("responded").and_then(|r| r.as_bool()).unwrap_or(false) {

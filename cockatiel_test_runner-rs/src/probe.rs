@@ -116,13 +116,7 @@ fn launch_module_impl(
     }
     // The engine only accepts WSS — point launched modules at its self-signed
     // cert so they connect over TLS (same as the TUI supervisor does).
-    let cert = std::env::current_dir()
-        .unwrap_or_default()
-        .join("..")
-        .join("cockatiel_engine-rs")
-        .join("tls")
-        .join("cockatiel-cert.pem");
-    if cert.exists() {
+    if let Some(cert) = crate::paths::tls_cert(cli) {
         cmd.env("COCKATIEL_TLS_CERT", &cert);
     }
     cmd.current_dir(dir)
@@ -144,8 +138,7 @@ pub async fn run_probe_suite(cli: &Cli) -> Vec<Metrics> {
 
     // 1. Discover modules (same eligibility as the benchmark: skip terminal/UI
     // modules and modules whose required credentials aren't configured).
-    let runner_dir = std::env::current_dir().unwrap_or_default();
-    let modules_dir = runner_dir.parent().unwrap_or(&runner_dir).join("modules");
+    let modules_dir = crate::paths::modules_dir(cli);
     let mut launched: Vec<String> = Vec::new();
     let mut children: Vec<std::process::Child> = Vec::new();
 

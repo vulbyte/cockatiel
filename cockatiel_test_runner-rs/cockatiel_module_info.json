@@ -1,36 +1,50 @@
 {
-  "name": "cockatiel-test-runner",
-  "description": "Compliance & benchmark suite: verifies the pre/in/post message chain against the real engine, then archives results to the timeline.",
-  "version": "0.1.0",
-  "capabilities": "input",
-  "root_file": "./src/main.rs",
-  "launch_command": "cargo",
-  "command_flags": [
-    "run",
-    "--release"
-  ],
   "autostart": true,
-  "terminal": false,
   "binary": {
-    "macos": {
-      "x86_64": "target/release/cockatiel-test-runner",
-      "aarch64": "target/release/cockatiel-test-runner",
-      "arm": "target/release/cockatiel-test-runner"
-    },
     "linux": {
-      "x86_64": "target/release/cockatiel-test-runner",
       "aarch64": "target/release/cockatiel-test-runner",
-      "arm": "target/release/cockatiel-test-runner"
+      "arm": "target/release/cockatiel-test-runner",
+      "x86_64": "target/release/cockatiel-test-runner"
+    },
+    "macos": {
+      "aarch64": "target/release/cockatiel-test-runner",
+      "arm": "target/release/cockatiel-test-runner",
+      "x86_64": "target/release/cockatiel-test-runner"
     },
     "windows": {
-      "x86_64": "target/release/cockatiel-test-runner.exe",
       "aarch64": "target/release/cockatiel-test-runner.exe",
-      "arm": "target/release/cockatiel-test-runner.exe"
+      "arm": "target/release/cockatiel-test-runner.exe",
+      "x86_64": "target/release/cockatiel-test-runner.exe"
     }
   },
   "build_command": "cargo",
   "build_flags": [
     "build",
     "--release"
-  ]
+  ],
+  "capabilities": "input",
+  "command_flags": [
+    "run",
+    "--release"
+  ],
+  "description": "Compliance & benchmark suite: verifies the pre/in/post message chain against the real engine, then archives results to the timeline.",
+  "kind": "test-runner",
+  "launch_command": "cargo",
+  "name": "cockatiel-test-runner",
+  "release": {
+    "assets": {
+      "macos": {
+        "aarch64": {
+          "file": "cockatiel-test-runner-0.1.0-macos-aarch64.tar.gz",
+          "sha256": "0c9d0e9f888252b17e1c2d9cac61aa7d807988f8ff8d44dcdc6b289c0fc4c841"
+        }
+      }
+    },
+    "base_url": "https://github.com/vulbyte/cockatiel/releases/download",
+    "repo": "vulbyte/cockatiel",
+    "tag": "v0.1.0"
+  },
+  "root_file": "./src/main.rs",
+  "terminal": false,
+  "version": "0.1.0"
 }

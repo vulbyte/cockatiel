@@ -13,7 +13,11 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
 use crate::{Cli, Metrics, connect_engine, make_container, receive_container, send_container};
-use cockatiel_client::proto::{container::Payload, *};
+use cockatiel_client::proto::{
+    container_for_engine::Payload as EnginePayload,
+    container_for_module::Payload as ModulePayload,
+    *,
+};
 
 type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WsWrite = futures_util::stream::SplitSink<WsStream, WsMessage>;
@@ -23,17 +27,17 @@ type WsRead = futures_util::stream::SplitStream<WsStream>;
 /// frames (AuthVerify probes auto-replied), plus the identity.
 struct Session {
     write: WsWrite,
-    rx: mpsc::Receiver<Container>,
+    rx: mpsc::Receiver<ContainerForModule>,
     auth: String,
     uuid: String,
     name: String,
 }
 
-fn spawn_reader(read: WsRead, tx: mpsc::Sender<Container>) {
+fn spawn_reader(read: WsRead, tx: mpsc::Sender<ContainerForModule>) {
     tokio::spawn(async move {
         let mut read = read;
         while let Some(Ok(WsMessage::Binary(data))) = read.next().await {
-            if let Ok(c) = Container::decode(data.as_ref()) {
+            if let Ok(c) = ContainerForModule::decode(data.as_ref()) {
                 if tx.send(c).await.is_err() {
                     break;
                 }
@@ -42,7 +46,7 @@ fn spawn_reader(read: WsRead, tx: mpsc::Sender<Container>) {
     });
 }
 
-async fn send_split(write: &mut WsWrite, c: &Container) -> Result<(), String> {
+async fn send_split(write: &mut WsWrite, c: &ContainerForEngine) -> Result<(), String> {
     let mut buf = Vec::new();
     c.encode(&mut buf).map_err(|e| e.to_string())?;
     write.send(WsMessage::Binary(buf)).await.map_err(|e| format!("send: {}", e))
@@ -50,7 +54,7 @@ async fn send_split(write: &mut WsWrite, c: &Container) -> Result<(), String> {
 
 /// Receive the next non-probe frame, auto-replying to AuthVerify probes so the
 /// engine's liveness watchdog keeps the session alive.
-async fn recv_frame(sess: &mut Session, timeout_ms: u64) -> Result<Container, String> {
+async fn recv_frame(sess: &mut Session, timeout_ms: u64) -> Result<ContainerForModule, String> {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -59,10 +63,10 @@ async fn recv_frame(sess: &mut Session, timeout_ms: u64) -> Result<Container, St
         }
         match tokio::time::timeout(remaining, sess.rx.recv()).await {
             Ok(Some(c)) => {
-                if matches!(c.payload, Some(Payload::AuthVerify(_))) {
+                if matches!(c.payload, Some(ModulePayload::AuthVerify(_))) {
                     let reply = make_container(
                         &sess.name, &sess.uuid, &sess.auth,
-                        Payload::Log(Log { log: "probe-ack".into(), blob: vec![] }),
+                        EnginePayload::Log(Log { log: "probe-ack".into(), blob: vec![] }),
                     );
                     let _ = send_split(&mut sess.write, &reply).await;
                     continue;
@@ -77,9 +81,8 @@ async fn recv_frame(sess: &mut Session, timeout_ms: u64) -> Result<Container, St
 /// The instance uuid the engine pinned for a registered module name, read from
 /// the engine's modules.json. Control-surface auto-approve now requires the
 /// pinned uuid (not name alone), so sessions must present it on a warm engine.
-pub(crate) fn registered_instance_uuid(name: &str) -> Option<String> {
-    let cwd = std::env::current_dir().ok();
-    let path = cwd.clone()?.parent()?.join("cockatiel_engine-rs").join("modules.json");
+pub(crate) fn registered_instance_uuid(cli: &Cli, name: &str) -> Option<String> {
+    let path = crate::paths::engine_modules_json(cli)?;
     registered_instance_uuid_at(&path, name)
 }
 
@@ -105,7 +108,7 @@ async fn connect_session(cli: &Cli, name: &str, position: ProcessPosition) -> Re
     // auto-approve on a warm engine), then fall back to a fresh uuid for a
     // fresh engine's first registration / regular module auto-approve by name.
     let mut uuids = Vec::new();
-    if let Some(u) = registered_instance_uuid(name) {
+    if let Some(u) = registered_instance_uuid(cli, name) {
         uuids.push(u);
     }
     uuids.push(uuid::Uuid::now_v7().to_string());
@@ -116,7 +119,7 @@ async fn connect_session(cli: &Cli, name: &str, position: ProcessPosition) -> Re
             let (mut write, read) = ws.split();
             let req = make_container(
                 name, &uuid, "",
-                Payload::ConnectionRequest(ConnectionRequest {
+                EnginePayload::ConnectionRequest(ConnectionRequest {
                     pin: cli.pin,
                     process_position: position as i32,
                     priority: if position == ProcessPosition::Connection { 1 } else { 100 },
@@ -162,14 +165,14 @@ async fn auth_as_module(cli: &Cli, name: &str) -> Result<Session, String> {
 async fn expect_denied(sess: &mut Session, query_id: &str, sql: &str) -> Result<String, String> {
     let q = make_container(
         &sess.name, &sess.uuid, &sess.auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: query_id.to_string(), sql: sql.to_string(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: query_id.to_string(), sql: sql.to_string(), params: vec![] }),
     );
     send_split(&mut sess.write, &q).await?;
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         match recv_frame(sess, 2000).await {
             Ok(c) => {
-                if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
+                if let Some(ModulePayload::DatabaseQueryResult(res)) = c.payload {
                     if res.query_id == query_id {
                         if res.success {
                             return Err(format!("NOT denied (success=true) for '{}': {}", query_id, res.error));
@@ -193,10 +196,10 @@ async fn is_severed(sess: &mut Session) -> bool {
             Ok(None) => return true, // channel closed => connection dropped
             Err(_) => return false,  // still open (not severed)
             Ok(Some(c)) => {
-                if matches!(c.payload, Some(Payload::AuthVerify(_))) {
+                if matches!(c.payload, Some(ModulePayload::AuthVerify(_))) {
                     let reply = make_container(
                         &sess.name, &sess.uuid, &sess.auth,
-                        Payload::Log(Log { log: "probe-ack".into(), blob: vec![] }),
+                        EnginePayload::Log(Log { log: "probe-ack".into(), blob: vec![] }),
                     );
                     let _ = send_split(&mut sess.write, &reply).await;
                 }
@@ -240,7 +243,7 @@ async fn c1_wrong_pin(cli: &Cli, m: &mut Metrics) {
     let uuid = uuid::Uuid::now_v7().to_string();
     let req = make_container(
         "cockatiel-test-runner", &uuid, "",
-        Payload::ConnectionRequest(ConnectionRequest {
+        EnginePayload::ConnectionRequest(ConnectionRequest {
             pin: 999999, process_position: ProcessPosition::Connection as i32,
             priority: 1, module_instance_uuid7: uuid.clone(),
         }),
@@ -266,7 +269,7 @@ async fn c1_blank_identity(cli: &Cli, m: &mut Metrics) {
     let uuid = uuid::Uuid::now_v7().to_string();
     let req = make_container(
         "unnamed_module", &uuid, "",
-        Payload::ConnectionRequest(ConnectionRequest {
+        EnginePayload::ConnectionRequest(ConnectionRequest {
             pin: cli.pin, process_position: ProcessPosition::Connection as i32,
             priority: 1, module_instance_uuid7: uuid.clone(),
         }),
@@ -291,7 +294,7 @@ async fn c2_forged_token(cli: &Cli, m: &mut Metrics) {
     };
     let c = make_container(
         "cockatiel-test-runner", &sess.uuid, "not.a.jwt",
-        Payload::Log(Log { log: "forged".into(), blob: vec![] }),
+        EnginePayload::Log(Log { log: "forged".into(), blob: vec![] }),
     );
     let _ = send_split(&mut sess.write, &c).await;
     let severed = is_severed(&mut sess).await;
@@ -312,7 +315,7 @@ async fn c3_name_trust(cli: &Cli, m: &mut Metrics) {
     // Claim to be the TUI while using the module's own token.
     let c = make_container(
         "cockatiel-tui", &sess.uuid, &sess.auth,
-        Payload::Log(Log { log: "impersonate".into(), blob: vec![] }),
+        EnginePayload::Log(Log { log: "impersonate".into(), blob: vec![] }),
     );
     let _ = send_split(&mut sess.write, &c).await;
     let severed = is_severed(&mut sess).await;
@@ -368,7 +371,7 @@ async fn expect_engine_info_pin_null(sess: &mut Session) -> bool {
     let qid = "engine_info";
     let q = make_container(
         &sess.name, &sess.uuid, &sess.auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.to_string(), sql: String::new(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.to_string(), sql: String::new(), params: vec![] }),
     );
     if send_split(&mut sess.write, &q).await.is_err() {
         return false;
@@ -376,7 +379,7 @@ async fn expect_engine_info_pin_null(sess: &mut Session) -> bool {
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if let Ok(c) = recv_frame(sess, 2000).await {
-            if let Some(Payload::DatabaseQueryResult(res)) = c.payload {
+            if let Some(ModulePayload::DatabaseQueryResult(res)) = c.payload {
                 if res.query_id == qid {
                     if !res.success {
                         return false;
@@ -462,7 +465,7 @@ async fn c8_send_to_platforms_actor(cli: &Cli, m: &mut Metrics) {
     };
     let send = make_container(
         "cockatiel-test-runner", &sess.uuid, &sess.auth,
-        Payload::SendToPlatforms(SendToPlatforms {
+        EnginePayload::SendToPlatforms(SendToPlatforms {
             msg: "spam".into(), level: 0, module_uuid7: String::new(), pid: String::new(),
             platform: "twitch".into(), actor_platform: "twitch".into(),
             actor_handle: "some-viewer".into(), actor_uuid7: String::new(), channel_id: String::new(),
@@ -474,7 +477,7 @@ async fn c8_send_to_platforms_actor(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &sess.uuid, &sess.auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let alive = send_split(&mut sess.write, &q).await.is_ok() && recv_frame(&mut sess, 2000).await.is_ok();
     m.push_detail("c8_send_to_platforms_actor", sent && alive, start.elapsed().as_millis(), 0.0, 0.0, 0.0, "non-mod send denied (connection alive)");
@@ -501,7 +504,7 @@ async fn c9_sql_injection(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &sess.uuid, &sess.auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let alive = send_split(&mut sess.write, &q).await.is_ok() && recv_frame(&mut sess, 2000).await.is_ok();
     m.push_detail(
@@ -526,7 +529,7 @@ async fn c10_prompt_impersonation(cli: &Cli, m: &mut Metrics) {
     };
     let bogus = make_container(
         "cockatiel-test-runner", &sess.uuid, &sess.auth,
-        Payload::PromptResponse(PromptResponse {
+        EnginePayload::PromptResponse(PromptResponse {
             prompt_id_uuid7: "00000000-0000-0000-0000-000000000000".into(),
             accepted: true, reason: String::new(),
         }),
@@ -536,7 +539,7 @@ async fn c10_prompt_impersonation(cli: &Cli, m: &mut Metrics) {
     let qid = uuid::Uuid::now_v7().to_string();
     let q = make_container(
         "cockatiel-test-runner", &sess.uuid, &sess.auth,
-        Payload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
+        EnginePayload::DatabaseQuery(DatabaseQuery { query_id: qid.clone(), sql: "SELECT 1 AS one".into(), params: vec![] }),
     );
     let alive = send_split(&mut sess.write, &q).await.is_ok() && recv_frame(&mut sess, 2000).await.is_ok();
     m.push_detail("c10_prompt_impersonation", sent && alive, start.elapsed().as_millis(), 0.0, 0.0, 0.0, "bogus prompt ignored; engine alive");

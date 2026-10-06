@@ -8,7 +8,10 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
 
-use cockatiel_client::proto::{container::Payload, *};
+use cockatiel_client::proto::{
+    container_for_module::Payload as ModulePayload,
+    *,
+};
 
 use crate::metrics::Metrics;
 
@@ -80,13 +83,12 @@ impl FakeEngine {
         if let Ok(Some(Ok(WsMessage::Binary(data)))) =
             tokio::time::timeout(Duration::from_secs(3), ws.next()).await
         {
-            if let Ok(req) = Container::decode(data.as_ref()) {
-                let resp = Container {
+            if let Ok(req) = ContainerForEngine::decode(data.as_ref()) {
+                let resp = ContainerForModule {
                     version: 1,
                     auth_token: "fake-token".into(),
-                    module_name: "fake-engine".into(),
                     module_instance_uuid7: req.module_instance_uuid7.clone(),
-                    payload: Some(Payload::ConnectionRequestReturn(
+                    payload: Some(ModulePayload::ConnectionRequestReturn(
                         cockatiel_client::proto::ConnectionRequestReturn {
                             new_port: 0,
                             module_instance_uuid7: req.module_instance_uuid7,
@@ -107,7 +109,7 @@ impl FakeEngine {
         let burst_start = Instant::now();
 
         for i in 0..iterations {
-            let payload = Payload::MessageInProcess(MessageInProcess {
+            let payload = ModulePayload::MessageInProcess(MessageInProcess {
                 message_uuid7: uuid::Uuid::now_v7().to_string(),
                 raw_message: Some(ChatMessage {
                     platform: "test".into(),
@@ -123,10 +125,9 @@ impl FakeEngine {
                 audio: vec![],
                 audio_type: String::new(),
             });
-            let container = Container {
+            let container = ContainerForModule {
                 version: 1,
                 auth_token: "fake-token".into(),
-                module_name: "fake-engine".into(),
                 module_instance_uuid7: String::new(),
                 payload: Some(payload),
             };
@@ -149,7 +150,7 @@ impl FakeEngine {
             let resp = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
             match resp {
                 Ok(Some(Ok(WsMessage::Binary(data)))) => {
-                    if let Ok(c) = Container::decode(data.as_ref()) {
+                    if let Ok(c) = ContainerForEngine::decode(data.as_ref()) {
                         let _ = c;
                         // Any response is a success: compliance means the
                         // module didn't crash or error on the payload.
