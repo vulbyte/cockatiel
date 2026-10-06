@@ -91,7 +91,7 @@ jobs:
 
   publish:
     name: publish
-    needs: package
+    needs: [package, package-macos-x64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -154,3 +154,81 @@ jobs:
             cockatiel_tui_v2-rs/cockatiel_module_info.json
             cockatiel_user_database-rs/cockatiel_module_info.json
             cockatiel_test_runner-rs/cockatiel_module_info.json
+
+  # macOS x86_64: GitHub retired hosted Intel runners, so cross-compile on the
+  # arm64 runner and run the binaries under Rosetta 2 to verify them.
+  package-macos-x64:
+    name: package macos-x86_64 (cross + Rosetta)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - id: ver
+        shell: bash
+        run: |
+          raw="${{ inputs.version || github.ref_name }}"
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+      - name: Build + package x86_64
+        shell: bash
+        env:
+          COCKATIEL_BUILD_TARGET: x86_64-apple-darwin
+        run: scripts/package-release.sh "${{ steps.ver.outputs.version }}" dist-x64
+      - name: Install x86_64 + doctor (Rosetta)
+        shell: bash
+        run: |
+          set -euo pipefail
+          launcher="cockatiel_launcher-rs/target/release/cockatiel"
+          root="$RUNNER_TEMP/root-x64"
+          "$launcher" install --lock cockatiel.lock --repo-root . --root "$root" \
+            --os macos --arch x86_64 --release-base "file://$PWD/dist-x64" \
+            --component engine --component tui --component user-db --component test-runner
+          "$launcher" doctor --root "$root" --quick --mode both
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-x86_64
+          path: dist-x64/*
+          if-no-files-found: error
+
+  # Clean-room per-device verification: a fresh runner with NO rust-cache and no
+  # prebuilt components builds only the launcher, then installs the PUBLISHED
+  # release and runs doctor. This is what proves the shipped artifacts work.
+  verify-installed:
+    name: verify installed ${{ matrix.os }}-${{ matrix.arch }}
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux,   arch: x86_64,  runner: ubuntu-latest }
+          - { os: linux,   arch: aarch64, runner: ubuntu-24.04-arm }
+          - { os: windows, arch: x86_64,  runner: windows-latest }
+          - { os: windows, arch: aarch64, runner: windows-11-vs2026-arm }
+          - { os: macos,   arch: aarch64, runner: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - id: ver
+        shell: bash
+        run: |
+          raw="${{ inputs.version || github.ref_name }}"
+          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
+      - name: Install from published release + doctor
+        shell: bash
+        run: scripts/verify-installed.sh "${{ steps.ver.outputs.version }}"
+
+  # ── Not yet wired (documented blockers) ─────────────────────────────
+  # Linux armv7 / Windows i686 (32-bit):
+  #   * protoc-bin-vendored has no armv7 binary -> codegen fails there; needs a
+  #     system/source protoc for that target.
+  #   * sherpa-onnx prebuilts are 64-bit only -> tts-rs cannot build on 32-bit.
+  #   Decide: build sherpa from source, or mark tts-rs 64-bit-only.
+  # Module matrix: build + package every modules/* per platform once the
+  #   per-module native deps (openssl/alsa/libxdo/sherpa) are installed on each
+  #   runner. Core-only today.

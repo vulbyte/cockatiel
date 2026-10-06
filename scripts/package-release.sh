@@ -22,6 +22,43 @@ OUT="${2:?usage: package-release.sh <version> <out-dir>}"
 
 mkdir -p "$OUT"
 
+# Optional cross target, e.g. COCKATIEL_BUILD_TARGET=x86_64-apple-darwin. The
+# launcher (packaging tool) is still built natively; only the components cross.
+TARGET="${COCKATIEL_BUILD_TARGET:-}"
+target_args=()
+[[ -n "$TARGET" ]] && target_args=(--target "$TARGET")
+
+# The release platform (matches the launcher's os/arch keys), derived from the
+# cross target when set, else from the host.
+if [[ -n "$TARGET" ]]; then
+  case "$TARGET" in
+    *apple-darwin*) PLATFORM_OS=macos ;;
+    *windows*)      PLATFORM_OS=windows ;;
+    *)              PLATFORM_OS=linux ;;
+  esac
+  case "$TARGET" in
+    x86_64*)            PLATFORM_ARCH=x86_64 ;;
+    aarch64*|arm64*)    PLATFORM_ARCH=aarch64 ;;
+    i686*|i586*)        PLATFORM_ARCH=x86 ;;
+    arm*)               PLATFORM_ARCH=arm ;;
+    *)                  PLATFORM_ARCH=x86_64 ;;
+  esac
+else
+  case "$(uname -s)" in
+    Darwin) PLATFORM_OS=macos ;;
+    MINGW*|MSYS*|CYGWIN*) PLATFORM_OS=windows ;;
+    *) PLATFORM_OS=linux ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) PLATFORM_ARCH=aarch64 ;;
+    x86_64|amd64)  PLATFORM_ARCH=x86_64 ;;
+    i686|i386)     PLATFORM_ARCH=x86 ;;
+    armv7l|arm*)   PLATFORM_ARCH=arm ;;
+    *)             PLATFORM_ARCH=x86_64 ;;
+  esac
+fi
+PLATFORM="$PLATFORM_OS-$PLATFORM_ARCH"
+
 # Build the launcher (release) — it is the packaging tool.
 cargo build --release --manifest-path "$ROOT/cockatiel_launcher-rs/Cargo.toml"
 LAUNCHER="$ROOT/cockatiel_launcher-rs/target/release/cockatiel"
@@ -45,9 +82,12 @@ for entry in "${COMPONENTS[@]}"; do
   fi
 
   printf '==> building %s\n' "$dir"
-  cargo build --release --manifest-path "$ROOT/$dir/Cargo.toml"
+  cargo build --release "${target_args[@]}" --manifest-path "$ROOT/$dir/Cargo.toml"
 
-  binpath="$ROOT/$dir/target/release/$bin"
+  # With a cross target the binary lands under target/<triple>/release/.
+  rel="release"
+  [[ -n "$TARGET" ]] && rel="$TARGET/release"
+  binpath="$ROOT/$dir/target/$rel/$bin"
   if [[ ! -f "$binpath" && -f "$binpath.exe" ]]; then
     binpath="$binpath.exe"
   fi
@@ -65,7 +105,9 @@ for entry in "${COMPONENTS[@]}"; do
 
   # Carry the patched manifest alongside the archive so the publish job can
   # merge each platform's asset entry into the component's checked-in manifest.
-  cp "$manifest" "$OUT/$dir.manifest.json"
+  # The name is per-platform so artifacts from different runners never collide
+  # when merged.
+  cp "$manifest" "$OUT/$dir.$PLATFORM.manifest.json"
 done
 
 printf '\nrelease directory: %s\n' "$OUT"
