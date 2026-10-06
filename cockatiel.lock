@@ -3,7 +3,7 @@
   "components": {
     "banned-words": {
       "path": "modules/cockatiel_module-banned_words-rs",
-      "sha": "9eaf5f0e5d48b4915ccdab1cef1c520fb385fda3",
+      "sha": "b8f217c8ec95f96a9ee5058c6926f1c14154acee",
       "version": "0.2.0",
       "repo": "vulbyte/cockatiel_module-banned_words-rs",
       "kind": "module"
@@ -45,7 +45,7 @@
     },
     "events": {
       "path": "modules/cockatiel_module-events-rs",
-      "sha": "0d863befc88b2dfe9ebca687edd05901a286cd49",
+      "sha": "ab871ec1ebb7dba81e107ca6da3f858baa64ead2",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_module-events-rs",
       "kind": "module"
@@ -66,7 +66,7 @@
     },
     "language-constrainer": {
       "path": "modules/cockatiel_module-language_constrainer-rs",
-      "sha": "6ccf479d7f74add9c67fc8e08c02c1d9f1e6e692",
+      "sha": "74dcb4a30e39e46fe8864717a7c6808adaf51381",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_module-language_constrainer-rs",
       "kind": "module"
