@@ -96,7 +96,7 @@ jobs:
   publish:
     name: publish
     if: ${{ !inputs.dry_run }}
-    needs: [package, package-macos-x64, package-linux-armv7, package-windows-i686, package-modules]
+    needs: [package, package-macos-x64, package-windows-i686, package-modules]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -229,52 +229,10 @@ jobs:
         shell: bash
         run: scripts/verify-installed.sh "${{ steps.ver.outputs.version }}"
 
-  # Linux armv7 (32-bit): cross-compile with `cross` and verify under qemu
-  # (qemu-user-static registers a binfmt handler, so the armv7 binaries run
-  # transparently). The vendored protoc is a HOST tool, so codegen works when
-  # cross-compiling (the missing-armv7-protoc problem only bites a native
-  # armv7 build).
-  package-linux-armv7:
-    name: package linux-armv7 (cross + qemu)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: armv7-unknown-linux-gnueabihf
-      - name: Install cross + qemu
-        run: |
-          cargo install cross --locked
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-      - id: ver
-        shell: bash
-        run: |
-          raw="${{ inputs.version || github.ref_name }}"
-          echo "version=${raw#v}" >> "$GITHUB_OUTPUT"
-      - name: Build + package armv7
-        shell: bash
-        env:
-          COCKATIEL_BUILD_TARGET: armv7-unknown-linux-gnueabihf
-          COCKATIEL_CARGO: cross
-        run: scripts/package-release.sh "${{ steps.ver.outputs.version }}" dist-armv7
-      - name: Install + doctor (qemu)
-        shell: bash
-        run: |
-          set -euo pipefail
-          launcher="cockatiel_launcher-rs/target/release/cockatiel"
-          root="$RUNNER_TEMP/root-armv7"
-          "$launcher" install --lock cockatiel.lock --repo-root . --root "$root" \
-            --os linux --arch arm --release-base "file://$PWD/dist-armv7" \
-            --component engine --component user-db --component test-runner
-          "$launcher" doctor --root "$root" --quick --mode both
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-linux-armv7
-          path: dist-armv7/*
-          if-no-files-found: error
+  # Linux armv7 (32-bit) is NOT buildable: turso_core (the timeline DB) takes a
+  # mandatory `io-uring` dependency on every Linux target, and the io-uring crate
+  # only supports x86_64/aarch64. Until turso supports armv7 (or we swap the DB),
+  # 32-bit Linux cannot ship. Windows i686 (below) is unaffected.
 
   # Windows i686 (32-bit): native build; aws-lc's x86 assembly needs NASM.
   package-windows-i686:

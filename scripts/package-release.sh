@@ -79,6 +79,10 @@ COMPONENTS=(
 for entry in "${COMPONENTS[@]}"; do
   dir="${entry%%|*}"
   bin="${entry##*|}"
+  # Git Bash's `-f` matches `foo.exe` for `foo`, so the `.exe` fallback below
+  # never fires there and the native launcher gets an extensionless path. Make
+  # the suffix explicit on Windows.
+  [[ "$PLATFORM_OS" == windows && "$bin" != *.exe ]] && bin="$bin.exe"
   manifest="$ROOT/$dir/cockatiel_module_info.json"
 
   if [[ ! -f "$manifest" ]]; then
