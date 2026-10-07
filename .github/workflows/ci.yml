@@ -74,7 +74,7 @@ jobs:
           cd cockatiel_engine-rs/modules/cockatiel_user_database-rs
           ./target/debug/cockatiel-user-database > /tmp/userdb.log 2>&1 &
           echo $! > /tmp/userdb.pid
-          cd ../cockatiel_engine-rs
+          cd "$GITHUB_WORKSPACE/cockatiel_engine-rs"
           ./target/debug/cockatiel-engine-rs > /tmp/engine.log 2>&1 &
           echo $! > /tmp/engine.pid
           # Wait for the engine's WS port to accept connections.
