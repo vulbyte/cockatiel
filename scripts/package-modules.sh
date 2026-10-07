@@ -50,6 +50,10 @@ fi
 PLATFORM="$PLATFORM_OS-$PLATFORM_ARCH"
 SKIP_MODULES="${SKIP_MODULES:-}"
 
+# Windows Git Bash may not expose `python3`; find whichever exists.
+PY="$(command -v python3 || command -v python || true)"
+[[ -n "$PY" ]] || { printf 'error: python3/python not found on PATH\n' >&2; exit 1; }
+
 cargo build --release --manifest-path "$ROOT/cockatiel_launcher-rs/Cargo.toml"
 LAUNCHER="$ROOT/cockatiel_launcher-rs/target/release/cockatiel"
 
@@ -57,8 +61,8 @@ fail=0
 for dir in "$ROOT"/modules/*/; do
   manifest="$dir/cockatiel_module_info.json"
   [[ -f "$manifest" ]] || continue
-  name=$(python3 -c "import json;print(json.load(open('$manifest'))['name'])")
-  build_cmd=$(python3 -c "import json;print(json.load(open('$manifest')).get('build_command') or '')")
+  name=$("$PY" -c "import json;print(json.load(open('$manifest'))['name'])")
+  build_cmd=$("$PY" -c "import json;print(json.load(open('$manifest')).get('build_command') or '')")
 
   if [[ "$build_cmd" != "cargo" ]]; then
     printf 'skip %s (non-cargo build)\n' "$name"
@@ -80,7 +84,7 @@ for dir in "$ROOT"/modules/*/; do
     continue
   fi
 
-  bin_route=$(python3 -c "import json;b=json.load(open('$manifest')).get('binary',{}).get('$PLATFORM_OS',{}).get('$PLATFORM_ARCH');print(b or '')")
+  bin_route=$("$PY" -c "import json;b=json.load(open('$manifest')).get('binary',{}).get('$PLATFORM_OS',{}).get('$PLATFORM_ARCH');print(b or '')")
   # The manifest route is relative to the module dir and ALREADY includes
   # `target/release/`; take its basename and rebuild under the (possibly cross)
   # target dir, or the path doubles to target/release/target/release/<bin>.
