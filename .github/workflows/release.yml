@@ -187,6 +187,10 @@ jobs:
         run: |
           set -euo pipefail
           launcher="cockatiel_launcher-rs/target/release/cockatiel"
+          version="${{ steps.ver.outputs.version }}"
+          # The resolver fetches <base>/<tag>/<file>; mirror the release layout.
+          mkdir -p "dist-x64/v$version"
+          cp dist-x64/*.tar.gz dist-x64/v$version/
           root="$RUNNER_TEMP/root-x64"
           "$launcher" install --lock cockatiel.lock --repo-root . --root "$root" \
             --os macos --arch x86_64 --release-base "file://$PWD/dist-x64" \
@@ -262,9 +266,14 @@ jobs:
         run: |
           set -euo pipefail
           launcher="cockatiel_launcher-rs/target/release/cockatiel"
+          version="${{ steps.ver.outputs.version }}"
+          mkdir -p "dist-i686/v$version"
+          cp dist-i686/*.zip "dist-i686/v$version/"
+          # Git Bash `pwd -W` gives a native D:/ path for the file:// URL.
+          base="file:///$(pwd -W)/dist-i686"
           root="$RUNNER_TEMP/root-i686"
           "$launcher" install --lock cockatiel.lock --repo-root . --root "$root" \
-            --os windows --arch x86 --release-base "file://$PWD/dist-i686" \
+            --os windows --arch x86 --release-base "$base" \
             --component engine --component user-db --component test-runner
           "$launcher" doctor --root "$root" --quick --mode both
       - uses: actions/upload-artifact@v4
