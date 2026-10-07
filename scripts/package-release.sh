@@ -28,6 +28,11 @@ TARGET="${COCKATIEL_BUILD_TARGET:-}"
 target_args=()
 [[ -n "$TARGET" ]] && target_args=(--target "$TARGET")
 
+# Build driver: `cargo` by default, or `cross` for targets that need a
+# containerized toolchain (e.g. linux armv7). The launcher is always built with
+# the host `cargo` (it is a host tool).
+CARGO_BIN="${COCKATIEL_CARGO:-cargo}"
+
 # The release platform (matches the launcher's os/arch keys), derived from the
 # cross target when set, else from the host.
 if [[ -n "$TARGET" ]]; then
@@ -82,7 +87,7 @@ for entry in "${COMPONENTS[@]}"; do
   fi
 
   printf '==> building %s\n' "$dir"
-  cargo build --release "${target_args[@]}" --manifest-path "$ROOT/$dir/Cargo.toml"
+  "$CARGO_BIN" build --release "${target_args[@]}" --manifest-path "$ROOT/$dir/Cargo.toml"
 
   # With a cross target the binary lands under target/<triple>/release/.
   rel="release"
@@ -101,6 +106,8 @@ for entry in "${COMPONENTS[@]}"; do
     --binary "$binpath" \
     --out-dir "$OUT" \
     --version "$VERSION" \
+    --os "$PLATFORM_OS" \
+    --arch "$PLATFORM_ARCH" \
     --write
 
   # Carry the patched manifest alongside the archive so the publish job can
