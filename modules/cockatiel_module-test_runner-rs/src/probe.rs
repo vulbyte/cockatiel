@@ -165,6 +165,14 @@ pub async fn run_probe_suite(cli: &Cli) -> Vec<Metrics> {
         if name.is_empty() {
             continue;
         }
+        // Core components now live under modules/ too; only launchable plugin
+        // modules have an empty/`module` kind.
+        if let Some(kind) = manifest.get("kind").and_then(|v| v.as_str()) {
+            if !kind.is_empty() && kind != "module" {
+                println!("[probe] skipping '{}' (core component: kind={})", name, kind);
+                continue;
+            }
+        }
         if manifest.get("terminal").and_then(|v| v.as_bool()).unwrap_or(false) {
             println!("[probe] skipping '{}' (terminal/UI module)", name);
             continue;

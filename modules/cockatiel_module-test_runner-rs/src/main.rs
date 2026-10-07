@@ -518,6 +518,14 @@ async fn run_module_suite(cli: &Cli) -> Vec<Metrics> {
         if name.is_empty() {
             continue;
         }
+        // Core components now live under modules/ too; only launchable plugin
+        // modules have an empty/`module` kind.
+        if let Some(kind) = manifest.get("kind").and_then(|v| v.as_str()) {
+            if !kind.is_empty() && kind != "module" {
+                println!("[modules] skipping '{}' (core component: kind={})", name, kind);
+                continue;
+            }
+        }
         // Runtime probe: --module <name>
         if let Some(filter) = &cli.module {
             if filter != &name {
