@@ -58,7 +58,7 @@ jobs:
       - name: Build test-runner + eligible modules (for the probe/soak suites)
         run: |
           cargo build --manifest-path cockatiel_test_runner-rs/Cargo.toml
-          for m in banned_words commend reprimand stress_test score_messages language_constrainer term_chat audit_viewer; do
+          for m in banned_words commend reprimand stress_test score_messages language_constrainer term_chat audit_viewer events; do
             cargo build --release --manifest-path modules/cockatiel_module-$m-rs/Cargo.toml || true
           done
 
