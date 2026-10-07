@@ -38,7 +38,7 @@
     },
     "engine": {
       "path": "cockatiel_engine-rs",
-      "sha": "76a02272b0c8b133bda28a81a181775ad3a1020e",
+      "sha": "661964a8f9e36b93e003cb3d9e133846d4fbba7f",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_engine-rs",
       "kind": "engine"
@@ -143,7 +143,7 @@
     },
     "user-db": {
       "path": "cockatiel_engine-rs/modules/cockatiel_user_database-rs",
-      "sha": "8b995d91517263aa7319f09328647093301a6047",
+      "sha": "e66b05ab73432ed79c963b7d07a98f6275dc297e",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_user_database-rs",
       "kind": "user-db"
