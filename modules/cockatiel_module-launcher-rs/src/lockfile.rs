@@ -39,9 +39,9 @@ mod tests {
         "lock_version": 1,
         "components": {
             "engine":      { "path": "cockatiel_engine-rs", "sha": "bd120bf", "version": "0.1.0", "repo": "vulbyte/cockatiel_engine-rs", "kind": "engine" },
-            "tui":         { "path": "cockatiel_tui_v2-rs", "sha": "a7a0017", "version": "0.1.0", "repo": "vulbyte/cockatiel_tui_v2-rs", "kind": "tui" },
-            "user-db":     { "path": "cockatiel_user_database-rs", "sha": null, "version": "0.1.0", "repo": "vulbyte/cockatiel", "kind": "user-db" },
-            "test-runner": { "path": "cockatiel_test_runner-rs", "sha": null, "version": "0.1.0", "repo": "vulbyte/cockatiel", "kind": "test-runner" },
+            "tui":         { "path": "modules/cockatiel_module-tui_v2-rs", "sha": "a7a0017", "version": "0.1.0", "repo": "vulbyte/cockatiel_tui_v2-rs", "kind": "tui" },
+            "user-db":     { "path": "cockatiel_engine-rs/modules/cockatiel_user_database-rs", "sha": null, "version": "0.1.0", "repo": "vulbyte/cockatiel", "kind": "user-db" },
+            "test-runner": { "path": "modules/cockatiel_module-test_runner-rs", "sha": null, "version": "0.1.0", "repo": "vulbyte/cockatiel", "kind": "test-runner" },
             "tts-rs":      { "path": "modules/cockatiel_module-tts-rs", "sha": "1ab25e8", "version": "0.1.0", "repo": "vulbyte/cockatiel_module-tts-rs", "kind": "module" }
         }
     }"#;

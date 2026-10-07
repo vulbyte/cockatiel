@@ -191,9 +191,9 @@ Example (strict JSON):
 
 **Pipeline.** An adapter sends a message into the engine, which inserts it into the timeline database as `queued`, then runs the 5-state chain: `queued` → pre-process fanout (concurrent) → in-process chain (sequential) → post-process fanout (concurrent) → marked `complete`. Every stage is acked; the timeline table *is* the queue, so a restart just re-queues anything still in flight. Messages flagged for audit are held (`audit` status) until a moderator approves (→ `complete`) or rejects (→ `failed`, row kept). Errors land in the timeline with `failed` status for later review. Displays (term-chat, audit-viewer) connect as post-process/output consumers and render the finished messages.
 
-**User database.** `cockatiel_user_database-rs` is a separate WebSocket service holding users, scores, roles, and per-user key/values. The engine is its only privileged client; mod commands (`commend`, `reprimand`, `ban`, `timeout`) map onto it. Platform roles (owner/mod/sponsor) are verified on login and merged with the user-db tier. User ranks are 0-1 floats computed server-side by the user-db (see `compute_rank`); the tier NAME displayed for a rank comes from the repo-root `rank_chart.json`, shared by the engine, the TUI and term-chat.
+**User database.** `cockatiel_user_database-rs` (now a submodule of the engine at `cockatiel_engine-rs/modules/cockatiel_user_database-rs`) is a separate WebSocket service holding users, scores, roles, and per-user key/values. The engine is its only privileged client; mod commands (`commend`, `reprimand`, `ban`, `timeout`) map onto it. Platform roles (owner/mod/sponsor) are verified on login and merged with the user-db tier. User ranks are 0-1 floats computed server-side by the user-db (see `compute_rank`); the tier NAME displayed for a rank comes from the repo-root `rank_chart.json`, shared by the engine, the TUI and term-chat.
 
-**TUI as supervisor.** `cockatiel_tui_v2-rs` (the v2 TUI — a Blender-inspired
+**TUI as supervisor.** `modules/cockatiel_module-tui_v2-rs` (the v2 TUI — a Blender-inspired
 BSP layout engine) is the operator's control surface. It launches the engine +
 user database, discovers and registers modules, starts/stops/rebuilds them
 (prebuilt binary → rebuild → crash-recovery ladder), edits their

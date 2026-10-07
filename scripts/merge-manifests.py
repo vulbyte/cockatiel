@@ -29,9 +29,9 @@ MANIFEST_NAME = "cockatiel_module_info.json"
 # component directory -> its checked-in manifest. Modules are discovered below.
 CORE_DIRS = [
     "cockatiel_engine-rs",
-    "cockatiel_user_database-rs",
-    "cockatiel_tui_v2-rs",
-    "cockatiel_test_runner-rs",
+    "cockatiel_engine-rs/modules/cockatiel_user_database-rs",
+    "modules/cockatiel_module-tui_v2-rs",
+    "modules/cockatiel_module-test_runner-rs",
 ]
 
 

@@ -30,7 +30,9 @@ pub fn install_root(cli: &Cli) -> Option<PathBuf> {
 }
 
 /// Modules directory: `--modules-dir` wins; else `<install_root>/modules` when
-/// it exists; else the legacy `cwd/../modules`.
+/// it exists; else the legacy layout — the test-runner now lives at
+/// `<repo>/modules/cockatiel_module-test_runner-rs`, so the modules dir is its
+/// parent.
 pub fn modules_dir(cli: &Cli) -> PathBuf {
     if let Some(dir) = &cli.modules_dir {
         return dir.clone();
@@ -41,7 +43,7 @@ pub fn modules_dir(cli: &Cli) -> PathBuf {
             return candidate;
         }
     }
-    legacy_cwd().join("..").join("modules")
+    legacy_cwd().join("..")
 }
 
 /// Engine config directory: `COCKATIEL_ENGINE_DIR` (set by `cockatiel doctor`
@@ -63,7 +65,8 @@ pub fn engine_dir(cli: &Cli) -> PathBuf {
             return legacy_named;
         }
     }
-    legacy_cwd().join("..").join("cockatiel_engine-rs")
+    // Two levels up from <repo>/modules/cockatiel_module-test_runner-rs.
+    legacy_cwd().join("..").join("..").join("cockatiel_engine-rs")
 }
 
 /// The engine's self-signed TLS certificate, when present.
@@ -139,10 +142,8 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("COCKATIEL_HOME");
         let cli = cli_with(None, None);
-        let expected = std::env::current_dir()
-            .unwrap()
-            .join("..")
-            .join("modules");
+        // The modules dir is the test-runner's parent (it lives under modules/).
+        let expected = std::env::current_dir().unwrap().join("..");
         assert_eq!(modules_dir(&cli), expected);
     }
 

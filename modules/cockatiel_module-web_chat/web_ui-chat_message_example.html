@@ -29,7 +29,7 @@
 
 chat-message {
 	background-color: blue;
-	display: block; /* Allows component to match iframe width */
+	display: flex; /* Allows component to match iframe width */
 	width: 100%;
 	box-sizing: border-box;
 	color: white; /*SA UA*/ 
@@ -37,14 +37,39 @@ chat-message {
 	padding: var(--spacing-m); /*SA UA*/
 }
 
+tail-container {
+    aspect-ratio: 1;
+    height: var(--spacing-l);
+    width: var(--spacing-l);
+    display: block;
+    margin-top: var(--spacing-l);
+    
+    mask-mode: luminance;
+    -webkit-mask-mode: luminance;
+    
+    mask-size: contain;
+    -webkit-mask-size: contain;
+    
+    mask-repeat: no-repeat;
+    -webkit-mask-repeat: no-repeat;
+}
+
+tail-container > img {
+	height: 100%;
+	width: 100%;
+}
+message-container {
+	width: 100%;
+	box-sizing: border-box;
+	color: white; /*SA UA*/ 
+	font-family: sans-serif; /*SA UA*/
+}
 message-head {
 	background-image: url(https://i.ytimg.com/vi/RmY_c1W6RjI/hq720.jpg?sqp=-oaymwEgCNAFEJQDSFXyq4qpAxIIARUAAIhCGAFwAcABBrgC8xg=&rs=AOn4CLB5_6TImCogTWn6Npye1DoxaxgFKw);
 	background-size: 100%;
 	background-position: 30% 50%;
 
-	/* 1. Add a dark tint color */
-	background-color: rgba(0, 0, 0, 0.7); 
-	/* 2. Blend the color into the image */
+	background-color: rgba(0, 0, 0, 0.6); 
 	background-blend-mode: darken; 
 
 	border-radius: var(--spacing-m) var(--spacing-m) var(--spacing-m) 0px;
@@ -151,6 +176,8 @@ user-perms-container {
 }
 
 user-perms {
+	border-radius: var(--spacing-l);
+	background-color: white;
 	display: flex; /*SA*/
 	align-items: center;
 	justify-content: center;		
@@ -282,6 +309,7 @@ command {
 	font-size: var(--spacing-m);
 	font-family: monospace;
 	padding: var(--spacing-s);
+	margin-bottom: var(--spacing-m);
 }
 
 token {
@@ -296,8 +324,9 @@ flag-key {
 	color: hsl(24, 100%, 70%);
 }
 
-message {
+message-parsed {
 	display: block;	
+	padding: var(--spacing-s);
 }
 
 </style>
@@ -315,85 +344,95 @@ message {
 	  <br>
 	  <br>
 	  	<chat-message id="message-uuid7"> 
-			<message-head>
-				<icon-container>
-					<img width="400"; height="400"; src="https://yt3.googleusercontent.com/uC9SzkA_i2tvfMCr6Pze-tqWM3YkAtJ1X0tl7uzLBo0g1arDPUH-lrzX_xJmGDcvh-3jzbbQvw=s160-c-k-c0x00ffffff-no-rj">
-				</icon-container>
-				<user-info-container>
-					<user-info>
-						<!--<user-info-main>-->
-							<username-container>
-								<username> vulbyte <!--UA--> </username>
-							</username-container>
-							<platform-container>
-								<platform-info>
-									<platform-name> twitch </platform-name>
-									<platform-icon> 
-										<img width="400"; height="400"; src="https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d3/Twitch_Glitch_Logo_Purple.svg/960px-Twitch_Glitch_Logo_Purple.svg.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail">
-									</platform-icon>
-								</platform-info>
-							</platform-container>
-							<user-perms-container>
-								<user-perms>
-									<img width="400"; height="400"; src=" https://cdn-icons-png.flaticon.com/512/7235/7235288.png ">
-								</user-perms>
-							</user-perms-container>
-							<!--</user-info-main>-->
-							<!--<user-info-secondary>-->
-							<user-rank-container>
-								<user-rank-name>emerald</user-rank-name>
-								<user-rank-icon>
-									<img width="400"; height="400"; src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-								</user-rank-icon>
-							</user-rank-container>
-							<user-score-container>
-								<user-score-label> score: </user-score-label>
-								<user-score-value> 143925 </user-score-value>
-							</user-score-container>
-							<commendment-container>
-								<commendment-label>rep:</commendment-label>
-								<commendment-display>4132</commendment-display>
-							</commendment-container>
-							<!--</user-info-secondary>-->
-					</user-info>
-				</user-info-container>
-					<badge-container>
-						<badge>
-							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-						</badge>
-						<badge>
-							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-						</badge>
-						<badge>
-							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-						</badge>
-						<badge>
-							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-						</badge>
-						<badge>
-							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-						</badge>
-						<badge>
-							<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
-						</badge>
-					</badge-container>
-			</message-head>
-			<message-body>
-				<command>
-					<token>!</token>tts
-					<flags>	
-						<flag> <flag-key>v</flag-key><flag-value>20</flag-value> </flag>
-						<flag> <flag-key>r</flag-key><flag-value>1.8</flag-value> </flag>
-						<flag> <flag-key>p</flag-key><flag-value>0.8</flag-value> </flag>
-					</flags>
-				</command>
-				<message>
-					hello how are youuuu?
-					hello how are youuuu?
-					hello how are youuuu?
-					hello how are youuuu?
-				</message>
-			</message-body>
+			<tail-container
+			      	style="
+					mask-image: url('./modules/cockatiel_module-web_chat/assets/0001-0012.gif');
+					filter: invert(1);
+				"
+			>
+			<img src="./modules/cockatiel_module-web_chat/assets/0001-0012.gif">
+			</tail-container>
+			<message-container>
+				<message-head>
+					<icon-container>
+						<img width="400"; height="400"; src="https://yt3.googleusercontent.com/uC9SzkA_i2tvfMCr6Pze-tqWM3YkAtJ1X0tl7uzLBo0g1arDPUH-lrzX_xJmGDcvh-3jzbbQvw=s160-c-k-c0x00ffffff-no-rj">
+					</icon-container>
+					<user-info-container>
+						<user-info>
+							<!--<user-info-main>-->
+								<username-container>
+									<username> vulbyte <!--UA--> </username>
+								</username-container>
+								<platform-container>
+									<platform-info>
+										<platform-name> twitch </platform-name>
+										<platform-icon> 
+											<img width="400"; height="400"; src="https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d3/Twitch_Glitch_Logo_Purple.svg/960px-Twitch_Glitch_Logo_Purple.svg.png?utm_source=commons.wikimedia.org&utm_campaign=index&utm_content=thumbnail">
+										</platform-icon>
+									</platform-info>
+								</platform-container>
+								<user-perms-container>
+									<user-perms>
+										<img width="400"; height="400"; src=" https://cdn-icons-png.flaticon.com/512/7235/7235288.png ">
+									</user-perms>
+								</user-perms-container>
+								<!--</user-info-main>-->
+								<!--<user-info-secondary>-->
+								<user-rank-container>
+									<user-rank-name>emerald</user-rank-name>
+									<user-rank-icon>
+										<img width="400"; height="400"; src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+									</user-rank-icon>
+								</user-rank-container>
+								<user-score-container>
+									<user-score-label> score: </user-score-label>
+									<user-score-value> 143925 </user-score-value>
+								</user-score-container>
+								<commendment-container>
+									<commendment-label>rep:</commendment-label>
+									<commendment-display>4132</commendment-display>
+								</commendment-container>
+								<!--</user-info-secondary>-->
+						</user-info>
+					</user-info-container>
+						<badge-container>
+							<badge>
+								<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+							</badge>
+							<badge>
+								<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+							</badge>
+							<badge>
+								<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+							</badge>
+							<badge>
+								<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+							</badge>
+							<badge>
+								<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+							</badge>
+							<badge>
+								<img width="400" height="400" src="https://ubistatic-a.akamaihd.net/0058/prod/assets/styles/images/hd-rank20.da30b73c.svg">
+							</badge>
+						</badge-container>
+				</message-head>
+				<message-body>
+					<command>
+						<token>!</token>tts
+						<flags>	
+							<flag> <flag-key>v</flag-key><flag-value>20</flag-value> </flag>
+							<flag> <flag-key>r</flag-key><flag-value>1.8</flag-value> </flag>
+							<flag> <flag-key>p</flag-key><flag-value>0.8</flag-value> </flag>
+						</flags>
+					</command>
+					<message-parsed>
+						hello how are youuuu?
+						hello how are youuuu?
+						hello how are youuuu?
+						hello how are youuuu?
+					</message-parsed>
+				</message-body>
+			</message-container>
 		</chat-message>	
   </div>
 </body>

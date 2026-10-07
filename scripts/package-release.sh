@@ -63,15 +63,15 @@ fi
 PLATFORM="$PLATFORM_OS-$PLATFORM_ARCH"
 
 # Build the launcher (release) — it is the packaging tool.
-cargo build --release --manifest-path "$ROOT/cockatiel_launcher-rs/Cargo.toml"
-LAUNCHER="$ROOT/cockatiel_launcher-rs/target/release/cockatiel"
+cargo build --release --manifest-path "$ROOT/modules/cockatiel_module-launcher-rs/Cargo.toml"
+LAUNCHER="$ROOT/modules/cockatiel_module-launcher-rs/target/release/cockatiel"
 
 # component-dir | binary-name (the release binary lives at <dir>/target/release/<bin>)
 COMPONENTS=(
   "cockatiel_engine-rs|cockatiel-engine-rs"
-  "cockatiel_user_database-rs|cockatiel-user-database"
-  "cockatiel_tui_v2-rs|cockatiel-tui-v2"
-  "cockatiel_test_runner-rs|cockatiel-test-runner"
+  "cockatiel_engine-rs/modules/cockatiel_user_database-rs|cockatiel-user-database"
+  "modules/cockatiel_module-tui_v2-rs|cockatiel-tui-v2"
+  "modules/cockatiel_module-test_runner-rs|cockatiel-test-runner"
 )
 
 for entry in "${COMPONENTS[@]}"; do

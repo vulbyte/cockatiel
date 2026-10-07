@@ -54,8 +54,8 @@ SKIP_MODULES="${SKIP_MODULES:-}"
 PY="$(command -v python3 || command -v python || true)"
 [[ -n "$PY" ]] || { printf 'error: python3/python not found on PATH\n' >&2; exit 1; }
 
-cargo build --release --manifest-path "$ROOT/cockatiel_launcher-rs/Cargo.toml"
-LAUNCHER="$ROOT/cockatiel_launcher-rs/target/release/cockatiel"
+cargo build --release --manifest-path "$ROOT/modules/cockatiel_module-launcher-rs/Cargo.toml"
+LAUNCHER="$ROOT/modules/cockatiel_module-launcher-rs/target/release/cockatiel"
 
 fail=0
 for dir in "$ROOT"/modules/*/; do

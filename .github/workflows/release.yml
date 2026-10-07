@@ -156,9 +156,9 @@ jobs:
           name: merged-manifests
           path: |
             cockatiel_engine-rs/cockatiel_module_info.json
-            cockatiel_tui_v2-rs/cockatiel_module_info.json
-            cockatiel_user_database-rs/cockatiel_module_info.json
-            cockatiel_test_runner-rs/cockatiel_module_info.json
+            modules/cockatiel_module-tui_v2-rs/cockatiel_module_info.json
+            cockatiel_engine-rs/modules/cockatiel_user_database-rs/cockatiel_module_info.json
+            modules/cockatiel_module-test_runner-rs/cockatiel_module_info.json
 
   # macOS x86_64: GitHub retired hosted Intel runners, so cross-compile on the
   # arm64 runner and run the binaries under Rosetta 2 to verify them.
@@ -186,7 +186,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          launcher="cockatiel_launcher-rs/target/release/cockatiel"
+          launcher="modules/cockatiel_module-launcher-rs/target/release/cockatiel"
           version="${{ steps.ver.outputs.version }}"
           # The resolver fetches <base>/<tag>/<file>; mirror the release layout.
           mkdir -p "dist-x64/v$version"
@@ -265,7 +265,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          launcher="cockatiel_launcher-rs/target/release/cockatiel"
+          launcher="modules/cockatiel_module-launcher-rs/target/release/cockatiel"
           version="${{ steps.ver.outputs.version }}"
           mkdir -p "dist-i686/v$version"
           cp dist-i686/*.zip "dist-i686/v$version/"

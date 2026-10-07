@@ -54,11 +54,11 @@ git submodule update --init --recursive
 
 ### 3. Build
 
-The **TUI** (`cockatiel_tui_v2-rs`) is your control surface. Build it in release
+The **TUI** (`modules/cockatiel_module-tui_v2-rs`) is your control surface. Build it in release
 mode:
 
 ```sh
-cargo build --release --manifest-path cockatiel_tui_v2-rs/Cargo.toml
+cargo build --release --manifest-path modules/cockatiel_module-tui_v2-rs/Cargo.toml
 ```
 
 On first build Cargo compiles ~20 dependent crates (engine, user-database,
@@ -70,7 +70,7 @@ cache is shared, so subsequent builds are fast.
 Run the TUI:
 
 ```sh
-cargo run --release --manifest-path cockatiel_tui_v2-rs/Cargo.toml
+cargo run --release --manifest-path modules/cockatiel_module-tui_v2-rs/Cargo.toml
 ```
 
 On startup the TUI **automatically launches the engine and the user database**
@@ -129,7 +129,7 @@ from the TUI.
 
 - [ ] Rust stable installed (`rustup update stable`)
 - [ ] Repo cloned with submodules (`--recurse-submodules`)
-- [ ] TUI built (`cargo build --release --manifest-path cockatiel_tui_v2-rs/Cargo.toml`)
+- [ ] TUI built (`cargo build --release --manifest-path modules/cockatiel_module-tui_v2-rs/Cargo.toml`)
 - [ ] Platform adapter configured + started
 - [ ] At least one processing module started (e.g. `score-messages`)
 

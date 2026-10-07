@@ -52,12 +52,16 @@ MANIFEST_NAME = "cockatiel_module_info.json"
 MONOREPO = "vulbyte/cockatiel"
 LOCK_PATH = ROOT / "cockatiel.lock"
 
+ENGINE_DIR = "cockatiel_engine-rs"
+
 # (lock key, component directory, kind, is_submodule)
+# user-db is a NESTED submodule of the engine (repo/sha live in the engine repo),
+# so it is neither a monorepo submodule nor an in-repo component.
 CORE = (
-    ("engine", "cockatiel_engine-rs", "engine", True),
-    ("tui", "cockatiel_tui_v2-rs", "tui", True),
-    ("user-db", "cockatiel_user_database-rs", "user-db", False),
-    ("test-runner", "cockatiel_test_runner-rs", "test-runner", False),
+    ("engine", ENGINE_DIR, "engine", True),
+    ("tui", "modules/cockatiel_module-tui_v2-rs", "tui", True),
+    ("user-db", f"{ENGINE_DIR}/modules/cockatiel_user_database-rs", "user-db", False),
+    ("test-runner", "modules/cockatiel_module-test_runner-rs", "test-runner", False),
 )
 
 
@@ -80,11 +84,14 @@ def normalize_repo(url: str) -> str:
     return path
 
 
-def read_gitmodules() -> dict[str, str]:
-    """Map submodule path -> raw URL from ``.gitmodules``."""
+def read_gitmodules_at(root: Path) -> dict[str, str]:
+    """Map submodule path -> raw URL from ``<root>/.gitmodules``."""
     mapping: dict[str, str] = {}
+    gm = root / ".gitmodules"
+    if not gm.is_file():
+        return mapping
     current: str | None = None
-    for line in (ROOT / ".gitmodules").read_text(encoding="utf-8").splitlines():
+    for line in gm.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped.startswith("[submodule"):
             current = None
@@ -95,11 +102,14 @@ def read_gitmodules() -> dict[str, str]:
     return mapping
 
 
-def read_submodule_shas() -> dict[str, str]:
-    """Map submodule path -> gitlink SHA from ``git submodule status``."""
-    out = subprocess.check_output(
-        ["git", "submodule", "status"], cwd=ROOT, text=True
-    )
+def read_submodule_shas_at(root: Path) -> dict[str, str]:
+    """Map submodule path -> gitlink SHA from ``git submodule status`` at root."""
+    try:
+        out = subprocess.check_output(
+            ["git", "submodule", "status"], cwd=root, text=True, stderr=subprocess.DEVNULL
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {}
     shas: dict[str, str] = {}
     for line in out.splitlines():
         line = line.rstrip()
@@ -112,6 +122,14 @@ def read_submodule_shas() -> dict[str, str]:
         if path:
             shas[path] = sha
     return shas
+
+
+def read_gitmodules() -> dict[str, str]:
+    return read_gitmodules_at(ROOT)
+
+
+def read_submodule_shas() -> dict[str, str]:
+    return read_submodule_shas_at(ROOT)
 
 
 def release_block(repo: str, version: str) -> dict[str, str]:
@@ -186,6 +204,17 @@ def main(argv: list[str]) -> int:
             sha = shas.get(rel)
             if sha is None:
                 raise SystemExit(f"error: {rel} missing from git submodule status")
+        elif rel.startswith(ENGINE_DIR + "/modules/"):
+            # Nested submodule of the engine: repo + sha live in the engine repo.
+            sub_rel = rel[len(ENGINE_DIR) + 1:]
+            eng_gm = read_gitmodules_at(ROOT / ENGINE_DIR)
+            eng_shas = read_submodule_shas_at(ROOT / ENGINE_DIR)
+            if sub_rel not in eng_gm:
+                raise SystemExit(
+                    f"error: {sub_rel} missing from {ENGINE_DIR}/.gitmodules"
+                )
+            repo = normalize_repo(eng_gm[sub_rel])
+            sha = eng_shas.get(sub_rel)
         else:
             repo, sha = MONOREPO, None
         # Core components carry a `kind` so the TUI's plugin discovery does not
@@ -201,8 +230,12 @@ def main(argv: list[str]) -> int:
         register(key, rel, kind, repo, version, sha)
 
     # --- modules ---------------------------------------------------------
+    # Core components now live under modules/ too; they are handled above.
+    core_rels = {rel for _, rel, _, _ in CORE}
     for manifest in sorted((ROOT / "modules").glob(f"*/{MANIFEST_NAME}")):
         rel = manifest.parent.relative_to(ROOT).as_posix()
+        if rel in core_rels:
+            continue
         raw, obj = load(manifest)
         name, version = obj["name"], obj["version"]
         if rel not in gitmodules:

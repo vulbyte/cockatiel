@@ -16,8 +16,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOAK=""
 [[ "${1:-}" == "--soak" ]] && SOAK="--soak"
 
-cargo build --release --manifest-path "$ROOT/cockatiel_launcher-rs/Cargo.toml"
-LAUNCHER="$ROOT/cockatiel_launcher-rs/target/release/cockatiel"
+cargo build --release --manifest-path "$ROOT/modules/cockatiel_module-launcher-rs/Cargo.toml"
+LAUNCHER="$ROOT/modules/cockatiel_module-launcher-rs/target/release/cockatiel"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cockatiel-doctor-gate.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -36,8 +36,8 @@ link_bin() { # <component-dir> <binary-name> <target-subdir>
 }
 
 link_bin cockatiel_engine-rs        cockatiel-engine-rs   engine
-link_bin cockatiel_user_database-rs cockatiel-user-database user-db
-link_bin cockatiel_test_runner-rs   cockatiel-test-runner bin
+link_bin cockatiel_engine-rs/modules/cockatiel_user_database-rs cockatiel-user-database user-db
+link_bin modules/cockatiel_module-test_runner-rs cockatiel-test-runner bin
 [[ -f "$ROOT/rank_chart.json" ]] && cp "$ROOT/rank_chart.json" "$TMP/root/rank_chart.json"
 
 exec "$LAUNCHER" doctor --root "$TMP/root" --quick --mode both $SOAK

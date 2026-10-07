@@ -38,7 +38,7 @@
     },
     "engine": {
       "path": "cockatiel_engine-rs",
-      "sha": "b54e276f8740111e39fe75d08199d218c0420df2",
+      "sha": "47c841fe016b508eb69d6511276dd412164aceea",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_engine-rs",
       "kind": "engine"
@@ -107,7 +107,7 @@
       "kind": "module"
     },
     "test-runner": {
-      "path": "cockatiel_test_runner-rs",
+      "path": "modules/cockatiel_module-test_runner-rs",
       "sha": null,
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel",
@@ -128,7 +128,7 @@
       "kind": "module"
     },
     "tui": {
-      "path": "cockatiel_tui_v2-rs",
+      "path": "modules/cockatiel_module-tui_v2-rs",
       "sha": "9d9844c23ddebdc8a44eeb57e974bd70b3bf809d",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_tui_v2-rs",
@@ -142,10 +142,10 @@
       "kind": "module"
     },
     "user-db": {
-      "path": "cockatiel_user_database-rs",
-      "sha": null,
+      "path": "cockatiel_engine-rs/modules/cockatiel_user_database-rs",
+      "sha": "8b995d91517263aa7319f09328647093301a6047",
       "version": "0.1.0",
-      "repo": "vulbyte/cockatiel",
+      "repo": "vulbyte/cockatiel_user_database-rs",
       "kind": "user-db"
     },
     "youtube-adapter": {

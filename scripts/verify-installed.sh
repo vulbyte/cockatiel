@@ -17,8 +17,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:?usage: verify-installed.sh <version> [local-release-dir]}"
 LOCAL="${2:-}"
 
-cargo build --release --manifest-path "$ROOT/cockatiel_launcher-rs/Cargo.toml"
-LAUNCHER="$ROOT/cockatiel_launcher-rs/target/release/cockatiel"
+cargo build --release --manifest-path "$ROOT/modules/cockatiel_module-launcher-rs/Cargo.toml"
+LAUNCHER="$ROOT/modules/cockatiel_module-launcher-rs/target/release/cockatiel"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/cockatiel-verify.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
