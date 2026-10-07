@@ -30,7 +30,9 @@ link_bin() { # <component-dir> <binary-name> <target-subdir>
   local path="$dir/target/release/$bin"
   [[ -f "$path" ]] || path="$path.exe"
   [[ -f "$path" ]] || { printf 'error: missing %s (run scripts/package-release.sh first)\n' "$path" >&2; exit 1; }
-  ln -sf "$path" "$dest/"
+  # Copy, not symlink: the native Windows launcher does not resolve a Git Bash
+  # (MSYS) symlink, so a symlinked install root is invisible to `doctor` there.
+  cp -f "$path" "$dest/"
 }
 
 link_bin cockatiel_engine-rs        cockatiel-engine-rs   engine

@@ -80,7 +80,11 @@ for dir in "$ROOT"/modules/*/; do
     continue
   fi
 
-  bin=$(python3 -c "import json;b=json.load(open('$manifest')).get('binary',{}).get('$PLATFORM_OS',{}).get('$PLATFORM_ARCH');print(b or '')")
+  bin_route=$(python3 -c "import json;b=json.load(open('$manifest')).get('binary',{}).get('$PLATFORM_OS',{}).get('$PLATFORM_ARCH');print(b or '')")
+  # The manifest route is relative to the module dir and ALREADY includes
+  # `target/release/`; take its basename and rebuild under the (possibly cross)
+  # target dir, or the path doubles to target/release/target/release/<bin>.
+  bin=$(basename "$bin_route")
   rel="release"
   [[ -n "$TARGET" ]] && rel="$TARGET/release"
   binpath="$dir/target/$rel/$bin"
