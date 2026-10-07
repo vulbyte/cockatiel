@@ -63,6 +63,14 @@ for dir in "$ROOT"/modules/*/; do
   [[ -f "$manifest" ]] || continue
   name=$("$PY" -c "import json;print(json.load(open('$manifest'))['name'])")
   build_cmd=$("$PY" -c "import json;print(json.load(open('$manifest')).get('build_command') or '')")
+  kind=$("$PY" -c "import json;print(json.load(open('$manifest')).get('kind') or '')")
+
+  # Core components (engine/tui/user-db/test-runner) live under modules/ too but
+  # are packaged by their own jobs; only plugin modules have kind empty/module.
+  if [[ -n "$kind" && "$kind" != "module" ]]; then
+    printf 'skip %s (core component: kind=%s)\n' "$name" "$kind"
+    continue
+  fi
 
   if [[ "$build_cmd" != "cargo" ]]; then
     printf 'skip %s (non-cargo build)\n' "$name"
