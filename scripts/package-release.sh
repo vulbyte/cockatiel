@@ -25,8 +25,6 @@ mkdir -p "$OUT"
 # Optional cross target, e.g. COCKATIEL_BUILD_TARGET=x86_64-apple-darwin. The
 # launcher (packaging tool) is still built natively; only the components cross.
 TARGET="${COCKATIEL_BUILD_TARGET:-}"
-target_args=()
-[[ -n "$TARGET" ]] && target_args=(--target "$TARGET")
 
 # Build driver: `cargo` by default, or `cross` for targets that need a
 # containerized toolchain (e.g. linux armv7). The launcher is always built with
@@ -91,7 +89,7 @@ for entry in "${COMPONENTS[@]}"; do
   fi
 
   printf '==> building %s\n' "$dir"
-  "$CARGO_BIN" build --release "${target_args[@]}" --manifest-path "$ROOT/$dir/Cargo.toml"
+  "$CARGO_BIN" build --release ${TARGET:+--target "$TARGET"} --manifest-path "$ROOT/$dir/Cargo.toml"
 
   # With a cross target the binary lands under target/<triple>/release/.
   rel="release"

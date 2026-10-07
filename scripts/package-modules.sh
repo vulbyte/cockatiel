@@ -17,8 +17,6 @@ OUT="${2:?usage: package-modules.sh <version> <out-dir>}"
 mkdir -p "$OUT"
 
 TARGET="${COCKATIEL_BUILD_TARGET:-}"
-target_args=()
-[[ -n "$TARGET" ]] && target_args=(--target "$TARGET")
 CARGO_BIN="${COCKATIEL_CARGO:-cargo}"
 
 # Same platform derivation as package-release.sh (kept in sync deliberately).
@@ -76,7 +74,7 @@ for dir in "$ROOT"/modules/*/; do
   fi
 
   printf '==> building %s\n' "$name"
-  if ! "$CARGO_BIN" build --release "${target_args[@]}" --manifest-path "$dir/Cargo.toml"; then
+  if ! "$CARGO_BIN" build --release ${TARGET:+--target "$TARGET"} --manifest-path "$dir/Cargo.toml"; then
     printf 'error: build failed for %s\n' "$name" >&2
     fail=1
     continue
