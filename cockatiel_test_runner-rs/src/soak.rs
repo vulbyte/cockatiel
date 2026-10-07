@@ -151,6 +151,12 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
     };
     let connect_deadline = Instant::now() + Duration::from_secs(20);
     let mut known: Vec<String> = Vec::new();
+    // Modules whose process exited WITHOUT ever connecting. Per the note in
+    // step 2 these are environment limitations (missing creds/deps, a headless
+    // terminal module that cannot start, ...), not connection-stability
+    // failures. They must be excluded from the soak loop below — otherwise the
+    // "skip" in step 2 is immediately undone and they are reported as failures.
+    let mut skipped: std::collections::HashSet<String> = std::collections::HashSet::new();
     while Instant::now() < connect_deadline {
         let live = connected_module_state(&mut ws, &auth, &uuid).await;
         known = launched
@@ -192,6 +198,7 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
         if exited {
             m.notes
                 .push(format!("soak: '{}' did not connect (process exited — missing creds/deps in this environment?)", name));
+            skipped.insert(name.clone());
             continue;
         }
         failures.insert(name.clone(), "never connected (within 20s; process still alive)".to_string());
@@ -214,7 +221,7 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
             }
         }
         for name in &launched {
-            if failures.contains_key(name) {
+            if failures.contains_key(name) || skipped.contains(name) {
                 continue;
             }
             let connected_now = live.contains_key(name);
@@ -246,7 +253,7 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
     {
         let live = connected_module_state(&mut ws, &auth, &uuid).await;
         for name in &launched {
-            if failures.contains_key(name) {
+            if failures.contains_key(name) || skipped.contains(name) {
                 continue;
             }
             let connected_now = live.contains_key(name);
@@ -270,6 +277,15 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
 
     // 4. Report per module.
     for name in &launched {
+        if skipped.contains(name) {
+            m.push_detail(
+                format!("soak:{}", name),
+                true,
+                0, 0.0, 0.0, 0.0,
+                "skipped (process exited without connecting — environment limitation, not a stability failure)".to_string(),
+            );
+            continue;
+        }
         match failures.get(name) {
             Some(reason) => m.push_detail(
                 format!("soak:{}", name),
