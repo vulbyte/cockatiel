@@ -38,7 +38,7 @@
     },
     "engine": {
       "path": "cockatiel_engine-rs",
-      "sha": "47c841fe016b508eb69d6511276dd412164aceea",
+      "sha": "76a02272b0c8b133bda28a81a181775ad3a1020e",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_engine-rs",
       "kind": "engine"
@@ -129,7 +129,7 @@
     },
     "tui": {
       "path": "modules/cockatiel_module-tui_v2-rs",
-      "sha": "9d9844c23ddebdc8a44eeb57e974bd70b3bf809d",
+      "sha": "2c3386a6605f6403b36e4cb9c02ea55b917d0c5c",
       "version": "0.1.0",
       "repo": "vulbyte/cockatiel_tui_v2-rs",
       "kind": "tui"
