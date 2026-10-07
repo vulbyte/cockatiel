@@ -23,6 +23,10 @@ on:
         description: "Release version, e.g. 0.1.0"
         required: true
         type: string
+      dry_run:
+        description: "Build, package and verify only — do NOT publish releases"
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -91,6 +95,7 @@ jobs:
 
   publish:
     name: publish
+    if: ${{ !inputs.dry_run }}
     needs: [package, package-macos-x64, package-linux-armv7, package-windows-i686, package-modules]
     runs-on: ubuntu-latest
     steps:
@@ -198,6 +203,7 @@ jobs:
   # release and runs doctor. This is what proves the shipped artifacts work.
   verify-installed:
     name: verify installed ${{ matrix.os }}-${{ matrix.arch }}
+    if: ${{ !inputs.dry_run }}
     needs: publish
     runs-on: ${{ matrix.runner }}
     strategy:
