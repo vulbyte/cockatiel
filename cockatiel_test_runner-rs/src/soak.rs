@@ -191,13 +191,12 @@ pub async fn run_soak_suite(cli: &Cli) -> Vec<Metrics> {
         // credentials or tts-service without torch), not a connection-stability
         // failure — note it and skip. A module still running but never
         // connected is hung/blocked: a hard FAIL.
-        let exited = children
-            .get_mut(i)
-            .map(|c| c.try_wait().ok().flatten().is_some())
-            .unwrap_or(false);
-        if exited {
-            m.notes
-                .push(format!("soak: '{}' did not connect (process exited — missing creds/deps in this environment?)", name));
+        let exit_status = children.get_mut(i).and_then(|c| c.try_wait().ok().flatten());
+        if let Some(status) = exit_status {
+            m.notes.push(format!(
+                "soak: '{}' did not connect (process exited: {} — missing creds/deps or headless-hostile in this environment?)",
+                name, status
+            ));
             skipped.insert(name.clone());
             continue;
         }
