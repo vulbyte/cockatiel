@@ -44,7 +44,8 @@ jobs:
             {"name": "language-constrainer", "auto_auth": true, "position": "preprocess", "priority": 100},
             {"name": "term-chat", "auto_auth": true, "position": "postprocess", "priority": 100},
             {"name": "cockatiel-audit-viewer", "auto_auth": true, "position": "preprocess", "priority": 100},
-            {"name": "tts-service", "auto_auth": true, "position": "postprocess", "priority": 100}
+            {"name": "tts-rs", "auto_auth": true, "position": "postprocess", "priority": 100},
+            {"name": "events", "auto_auth": true, "position": "preprocess", "priority": 100}
           ]
           EOF
 
