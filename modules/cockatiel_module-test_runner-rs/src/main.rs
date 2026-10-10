@@ -16,6 +16,7 @@ mod paths;
 mod probe;
 mod screening;
 mod soak;
+mod e2e;
 mod metrics;
 
 use metrics::Metrics;
@@ -45,7 +46,7 @@ USAGE:
   cockatiel-test-runner [OPTIONS]
 
 OPTIONS:
-  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "probe" | "soak" | "all"   (default: all)
+  --suite <name>       "chain" | "modules" | "screening" | "hardening" | "probe" | "soak" | "e2e" | "all"   (default: all)
   --module <name>      run only this module (runtime probe)
   --iterations <n>     messages per test burst        (default: 100)
   --duration-secs <n>  soak window: seconds each module must stay connected (default: 30)
@@ -357,6 +358,14 @@ async fn run_chain_suite(cli: &Cli) -> Vec<Metrics> {
         return vec![m];
     }
     let uuid = accepted_uuid;
+
+    // Settle past the engine's post-auth drain window before the first query:
+    // a frame sent too soon after auth is discarded ("sent before
+    // authorization"), and the very first message's verification would then
+    // burn its whole 3s window retrying and report "msg 0 not ingested". The
+    // screening suite already does this (`auth_as_test_runner`); the chain
+    // suite did not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Send N fake messages, then verify each was ingested by querying the
     // timeline for its row. The engine does not echo a response per message;
@@ -721,6 +730,9 @@ async fn main() {
     }
     if cli.suite == "soak" || cli.suite == "all" {
         all.extend(soak::run_soak_suite(&cli).await);
+    }
+    if cli.suite == "e2e" || cli.suite == "all" {
+        all.extend(e2e::run_e2e_suite(&cli).await);
     }
 
     // Summary

@@ -214,7 +214,7 @@ fn boot_and_test(
     // an empty registry, so those setups would be rejected before the check even
     // runs. Seed an auto-approved entry — the engine's own auto_config pass
     // preserves existing entries, so this survives startup.
-    fs::write(engine_dir.join("modules.json"), seeded_registry_json())
+    fs::write(engine_dir.join("modules.json"), seeded_registry_json(modules))
         .map_err(|e| format!("write engine registry: {}", e))?;
 
     // 1. user-db, bound to loopback with sandbox-only paths.
@@ -250,6 +250,13 @@ fn boot_and_test(
         .env("USER_DB_TOKEN", &token)
         .env("USER_DB_BACKUP_PATH", userdb_dir.join("user_data_backup.db"))
         .env("COCKATIEL_PIN", pin.to_string())
+        // Point the engine at the modules dir so it DISCOVERS the real modules
+        // and auto-configs them into the pipeline ordering. Without this the
+        // engine's cwd-relative `./modules` is empty, the pipeline has no
+        // recipients, and the chain/screening bursts never traverse a real
+        // module — the probe suite would connect them but the message chain
+        // would be a no-op.
+        .env("COCKATIEL_MODULE_PATHS", modules)
         .env(
             "COCKATIEL_START_PAUSED",
             if mode == Mode::Paused { "true" } else { "false" },
@@ -294,12 +301,14 @@ fn boot_and_test(
 /// Which suites to run for the given options.
 fn suites_for(opts: &DoctorOptions) -> Vec<String> {
     let mut suites: Vec<String> = if opts.quick {
-        vec!["screening".to_string()]
+        vec!["screening".to_string(), "e2e".to_string()]
     } else {
         vec![
+            "chain".to_string(),
             "screening".to_string(),
             "hardening".to_string(),
             "probe".to_string(),
+            "e2e".to_string(),
         ]
     };
     if opts.soak {
@@ -336,7 +345,13 @@ fn run_suite(
         .arg(opts.iterations.to_string())
         .arg("--json")
         .env("COCKATIEL_TLS_CERT", &cert)
-        .env("COCKATIEL_ENGINE_DIR", engine_dir);
+        .env("COCKATIEL_ENGINE_DIR", engine_dir)
+        // The engine's stdout/stderr is redirected to a SIBLING of the engine
+        // dir, not `<engine_dir>/engine.log`; tell the e2e suite where to look.
+        .env(
+            "COCKATIEL_ENGINE_LOG",
+            engine_dir.parent().unwrap_or(engine_dir).join("engine.log"),
+        );
     if suite == "soak" {
         cmd.arg("--duration-secs").arg(opts.duration_secs.to_string());
     }
@@ -414,23 +429,65 @@ fn config_json(dir: &Path, port: u16, paused: bool) -> String {
 /// hardening suite connects as `banned-words` to test name-trust and the
 /// gated-query surface, which needs a registered `auto_auth` entry on a fresh
 /// engine. Kept in the same shape CI seeds.
-fn seeded_registry_json() -> String {
+fn seeded_registry_json(modules_dir: &Path) -> String {
     // The engine deserializes this into `RegisteredModule`, whose fields are all
     // required — a partial entry (e.g. CI's name/auto_auth/position/priority
     // seed) fails to parse and the whole registry loads empty. `auth_token` may
     // be empty: auto-approval is name-only, the token is only for pinned-identity
     // reconnect which the suites do not need here.
-    serde_json::json!([
-        {
-            "name": "banned-words",
-            "instance_uuid7": "00000000-0000-7000-8000-000000000001",
-            "position": "inprocess",
+    //
+    // EVERY launchable module in the modules dir is seeded auto-approved, not
+    // just `banned-words`: the probe/soak suites launch real modules, and a
+    // headless sandbox has no operator to answer the interactive "add module?"
+    // prompt — without the seed the engine auto-denies them and the probe suite
+    // reports `connected=1`. `banned-words` is always included because the
+    // hardening suite impersonates it even when the modules dir is empty.
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let push = |entries: &mut Vec<serde_json::Value>, name: &str, position: &str, n: usize| {
+        entries.push(serde_json::json!({
+            "name": name,
+            "instance_uuid7": format!("00000000-0000-7000-8000-{:012}", n + 1),
+            "position": position,
             "priority": 100,
             "auto_auth": true,
-            "auth_token": ""
+            "auth_token": "",
+        }));
+    };
+
+    let mut names: Vec<(String, String)> = vec![("banned-words".to_string(), "inprocess".to_string())];
+    if let Ok(read) = fs::read_dir(modules_dir) {
+        for entry in read.flatten() {
+            let dir = entry.path();
+            let manifest_path = dir.join("cockatiel_module_info.json");
+            let Ok(data) = fs::read_to_string(&manifest_path) else { continue };
+            let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&data) else { continue };
+            let name = manifest.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            // Only launchable plugin modules (core components carry a non-empty
+            // kind).
+            if let Some(kind) = manifest.get("kind").and_then(|v| v.as_str()) {
+                if !kind.is_empty() && kind != "module" {
+                    continue;
+                }
+            }
+            if names.iter().any(|(n, _)| n == name) {
+                continue;
+            }
+            let position = manifest
+                .get("capabilities")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("inprocess")
+                .to_string();
+            names.push((name.to_string(), position));
         }
-    ])
-    .to_string()
+    }
+    for (i, (name, position)) in names.iter().enumerate() {
+        push(&mut entries, name, position, i);
+    }
+    serde_json::Value::Array(entries).to_string()
 }
 
 // ── ports, waits, spawning ──────────────────────────────────────────
@@ -598,9 +655,15 @@ mod tests {
         // The engine deserializes each entry into `RegisteredModule` with all
         // fields required; a partial entry makes the whole registry load empty
         // (the bug that silently broke the hardening setup). Pin every field.
-        let value: serde_json::Value = serde_json::from_str(&seeded_registry_json()).unwrap();
+        let dir = std::env::temp_dir().join(format!("ckt-doctor-seed-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let value: serde_json::Value = serde_json::from_str(&seeded_registry_json(&dir)).unwrap();
         let arr = value.as_array().unwrap();
         assert!(!arr.is_empty());
+        assert!(
+            arr.iter().any(|e| e["name"] == "banned-words"),
+            "banned-words is always seeded (the hardening suite impersonates it)"
+        );
         let first = arr[0].as_object().unwrap();
         for key in [
             "name",
@@ -614,6 +677,41 @@ mod tests {
         }
         assert_eq!(first["auto_auth"], true);
         assert!(!first["instance_uuid7"].as_str().unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seeded_registry_includes_every_launchable_module_in_the_dir() {
+        let dir = std::env::temp_dir().join(format!("ckt-doctor-seed2-{}", std::process::id()));
+        let m = dir.join("mod-x");
+        fs::create_dir_all(&m).unwrap();
+        fs::write(
+            m.join("cockatiel_module_info.json"),
+            r#"{"name":"mod-x","capabilities":"preprocess"}"#,
+        )
+        .unwrap();
+        // A core component (non-empty kind) must NOT be seeded.
+        let core = dir.join("core");
+        fs::create_dir_all(&core).unwrap();
+        fs::write(
+            core.join("cockatiel_module_info.json"),
+            r#"{"name":"core-x","kind":"engine"}"#,
+        )
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&seeded_registry_json(&dir)).unwrap();
+        let arr = value.as_array().unwrap();
+        assert!(
+            arr.iter().any(|e| e["name"] == "mod-x"
+                && e["position"] == "preprocess"
+                && e["auto_auth"] == true),
+            "a launchable module must be seeded auto-approved with its stage"
+        );
+        assert!(
+            !arr.iter().any(|e| e["name"] == "core-x"),
+            "core components must not be seeded"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

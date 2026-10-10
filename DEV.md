@@ -60,10 +60,20 @@ in-process modules run **sequentially** in config order, each seeing the
 (holds out-of-language messages for audit), then `banned-words` (censorship on
 whatever the language gate let through), then the rest in config order.
 
+Content-GENERATING modules run here too — e.g. `tts-rs` renders `!tts` speech
+and attaches the audio to its `MessageInProcess` ack. The engine carries that
+audio forward and hands it to the post-process displays **inline** on the
+message (the same way a pre/in-process module's audio rides the pipeline). A
+generator never talks to a consumer: there is no module-to-module query, so
+`term-chat` simply plays whatever audio the finished message carries. Keeping
+generators and consumers isolated is deliberate — it bounds the attack surface
+and makes each module's input/output traceable in the pipeline record.
+
 ### post-process
 post-process modules run **concurrently** after the chain, on the finished
 message, and can return anything (they are display/archival consumers —
-`term-chat`, `audit-viewer`, `tts-rs`). They ack with `MessagePostProcess`.
+`term-chat`, `audit-viewer`). They ack with `MessagePostProcess`, and they
+receive any audio the pre/in-process stages attached (played inline).
 
 
 ## One-file client imports

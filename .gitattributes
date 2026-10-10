@@ -1,0 +1,7 @@
+# Keep the one-click launchers sane regardless of the platform they are
+# checked out on: the shell scripts stay LF (bash chokes on CRLF), the Windows
+# batch file stays CRLF (cmd.exe is happiest with it).
+RUN-UNIX.sh        text eol=lf
+RUN-MAC.command    text eol=lf
+RUN-LINUX.sh       text eol=lf
+RUN-WINDOWS.bat    text eol=crlf
