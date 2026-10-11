@@ -1,0 +1,40 @@
+{
+  "name": "test-input",
+  "description": "Test input adapter — injects a synthetic chat message whose username, text, platform, rank, score, roles and colour are all configurable, so you can see exactly how the pipeline reacts. DEV tool: do not autostart.",
+  "version": "0.1.0",
+  "capabilities": "input",
+  "root_file": "./src/main.rs",
+  "launch_command": "cargo",
+  "command_flags": [
+    "run",
+    "--release"
+  ],
+  "build_command": "cargo",
+  "build_flags": [
+    "build",
+    "--release"
+  ],
+  "binary": {
+    "linux": {
+      "aarch64": "target/release/cockatiel-test-input",
+      "arm": "target/release/cockatiel-test-input",
+      "x86_64": "target/release/cockatiel-test-input"
+    },
+    "macos": {
+      "aarch64": "target/release/cockatiel-test-input",
+      "arm": "target/release/cockatiel-test-input",
+      "x86_64": "target/release/cockatiel-test-input"
+    },
+    "windows": {
+      "aarch64": "target/release/cockatiel-test-input.exe",
+      "arm": "target/release/cockatiel-test-input.exe",
+      "x86_64": "target/release/cockatiel-test-input.exe"
+    }
+  },
+  "autostart": false,
+  "terminal": false,
+  "price": 0,
+  "min_rank": 0,
+  "authority": 0,
+  "credentials": []
+}

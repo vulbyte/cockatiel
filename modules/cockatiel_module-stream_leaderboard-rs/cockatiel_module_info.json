@@ -1,0 +1,40 @@
+{
+  "authority": 0,
+  "autostart": true,
+  "binary": {
+    "linux": {
+      "aarch64": "target/release/cockatiel-stream-leaderboard",
+      "arm": "target/release/cockatiel-stream-leaderboard",
+      "x86_64": "target/release/cockatiel-stream-leaderboard"
+    },
+    "macos": {
+      "aarch64": "target/release/cockatiel-stream-leaderboard",
+      "arm": "target/release/cockatiel-stream-leaderboard",
+      "x86_64": "target/release/cockatiel-stream-leaderboard"
+    },
+    "windows": {
+      "aarch64": "target/release/cockatiel-stream-leaderboard.exe",
+      "arm": "target/release/cockatiel-stream-leaderboard.exe",
+      "x86_64": "target/release/cockatiel-stream-leaderboard.exe"
+    }
+  },
+  "build_command": "cargo",
+  "build_flags": [
+    "build",
+    "--release"
+  ],
+  "capabilities": "output",
+  "command_flags": [
+    "run",
+    "--release"
+  ],
+  "credentials": [],
+  "description": "Post-process module that ranks the chatters of the current stream by the points they have earned this stream. Records each user's first-seen score as a baseline (the engine enriches every message with the user's live total score), reports earned = current - baseline to the engine, and resets on a new stream (detected via the channel_viewers live edge). The TUI reads the cached ranking via the stream_leaderboard query.",
+  "launch_command": "cargo",
+  "min_rank": 0,
+  "name": "stream-leaderboard",
+  "price": 0,
+  "root_file": "./src/main.rs",
+  "terminal": false,
+  "version": "0.1.0"
+}
