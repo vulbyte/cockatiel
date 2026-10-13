@@ -26,6 +26,7 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as ProstMessage;
 use tokio_tungstenite::tungstenite::protocol::Message as WsMessage;
+use tracing::info;
 
 mod config;
 use config::LeaderboardConfig;
@@ -223,6 +224,10 @@ async fn run_once() -> Result<(), String> {
                                         .unwrap_or(false);
                                     set_live(&state, any_live);
                                 }
+                            }
+                            Some(ModulePayload::Shutdown(_)) => {
+                                info!("Engine requested shutdown — exiting");
+                                std::process::exit(0);
                             }
                             _ => {}
                         }
