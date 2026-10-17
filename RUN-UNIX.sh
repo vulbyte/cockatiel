@@ -56,6 +56,20 @@ if [ ! -f "$REPO_DIR/cockatiel.lock" ] \
 fi
 cd "$REPO_DIR"
 
+# ── Single instance: bring down any stack already running from this repo ───
+# Re-running the launcher used to start a SECOND TUI while the first (and its
+# supervised engine/user-db/modules) kept running, leaving duplicate module
+# processes that evict each other. Kill the old stack first so only one runs.
+# Best-effort: a pattern that matches nothing must never abort the launch.
+for _pat in \
+  "cockatiel_module-tui_v2-rs/target/release/cockatiel-tui-v2" \
+  "cockatiel_engine-rs/target/release/cockatiel-engine-rs" \
+  "cockatiel_user_database-rs/target/release/cockatiel-user-database" \
+  "modules/cockatiel_module-.*/target/release"; do
+  pkill -f -- "$_pat" 2>/dev/null || true
+done
+sleep 1
+
 # ── Submodules (a plain clone without --recurse-submodules leaves these empty)
 if [ ! -f "cockatiel_engine-rs/Cargo.toml" ] \
   || [ ! -f "modules/cockatiel_module-tui_v2-rs/Cargo.toml" ]; then
