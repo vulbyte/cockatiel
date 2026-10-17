@@ -67,3 +67,9 @@
 [submodule "modules/cockatiel_module-eightball-rs"]
 	path = modules/cockatiel_module-eightball-rs
 	url = https://github.com/vulbyte/cockatiel_module-eightball-rs
+[submodule "modules/cockatiel_module-random-rs"]
+	path = modules/cockatiel_module-random-rs
+	url = https://github.com/vulbyte/cockatiel_module-random-rs
+[submodule "modules/cockatiel_module-range-rs"]
+	path = modules/cockatiel_module-range-rs
+	url = https://github.com/vulbyte/cockatiel_module-range-rs
